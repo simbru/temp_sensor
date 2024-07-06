@@ -28,7 +28,7 @@ def update_plot(new_data, window_size=50):
     else:
         ax.set_xlim(0, window_size)
 
-# Loop to update both Streamlit chart and Matplotlib plot
+# Loop to update both Streamlit chart and Matplotlib plot 
 for tick in range(100):
     add_df = pd.DataFrame(np.random.randn(1, 1), columns=(["a"]))
     chart_data = pd.concat([chart_data, add_df], ignore_index=True)
