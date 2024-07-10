@@ -12,21 +12,6 @@ chart = st.line_chart(chart_data)
 
 # Create initial Matplotlib plot
 fig, ax = plt.subplots()
-line, = ax.plot(chart_data.index, chart_data['a'])
-placeholder = st.empty()
-placeholder.pyplot(fig)
-
-# Function to update Matplotlib plot with a sliding window of 10
-def update_plot(new_data, window_size=50):
-    line.set_xdata(new_data.index)
-    line.set_ydata(new_data['a'])
-    ax.relim()
-    ax.autoscale_view()
-    # Set x-axis limits to create a sliding window effect
-    if len(new_data) > window_size:
-        ax.set_xlim(len(new_data) - window_size, len(new_data))
-    else:
-        ax.set_xlim(0, window_size)
 
 # Loop to update both Streamlit chart and Matplotlib plot 
 for tick in range(100):
@@ -34,8 +19,5 @@ for tick in range(100):
     chart_data = pd.concat([chart_data, add_df], ignore_index=True)
     # Update Streamlit line chart
     chart.add_rows(add_df)
-    # Update Matplotlib plot
-    update_plot(chart_data)
-    placeholder.pyplot(fig)
     # Pause for a second
     time.sleep(1)
