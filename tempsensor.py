@@ -2,16 +2,13 @@ import adafruit_dht
 from board import D4 as pin
 import time 
 import datetime
-import configparser
-import pathlib
-import os
+from io_funcs import fetch_config
 
-# Read config
-config_loc = pathlib.Path(r"/home/weatherstation/.config.ini")
-config = configparser.ConfigParser()
-config.read(config_loc)
+# Get config content
+config = fetch_config() # path in definition
+log_interval_s = int(config["DEFAULT"]["LogInterval_s"])
 
-# Sensor stuff
+# Connect to sensor
 sensor = adafruit_dht.DHT22
 dht_device = adafruit_dht.DHT22(pin)
 
@@ -24,25 +21,14 @@ def log():
         humidity = ""
     return temperature, humidity
 
-def test_config_access(config, diagnostic_print = True):
-    if diagnostic_print is True:
-        print("Running from:", os.getcwd())
-        print("File at:", config_loc)
-        print("File exists:", config_loc.exists())
-        print("Default:", dict(config["DEFAULT"]))
-        print("Other sections:", config.sections())
-    return 0
-
-def test_csv_access():
-    return 0
-
-def start_log(running = True, to_csv = True, _print = True):
+def start_log(running = True, log_interval = log_interval_s,
+    to_csv = True, _print = True):
     while running == True:
         temp, hum = log()
-        time.sleep(1)
+        time.sleep(log_interval_s)
         if _print is True:
             print(temp, hum)
 
 if __name__ == "__main__":
-    #start_log()
-    print(test_config_access(config))
+    start_log()
+    # print(test_config_access(config))
