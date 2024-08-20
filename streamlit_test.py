@@ -3,39 +3,29 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+import altair 
 
 # Initial chart data
-chart_data = pd.DataFrame(np.random.randn(100, 1), columns=["a"])
 
-# Create initial line chart
-chart = st.line_chart(chart_data)
 
-# Create initial Matplotlib plot
-fig, ax = plt.subplots()
-line, = ax.plot(chart_data.index, chart_data['a'])
-placeholder = st.empty()
-placeholder.pyplot(fig)
+# Create altair line chart
+chart_row = st.empty()
 
-# Function to update Matplotlib plot with a sliding window of 10
-def update_plot(new_data, window_size=50):
-    line.set_xdata(new_data.index)
-    line.set_ydata(new_data['a'])
-    ax.relim()
-    ax.autoscale_view()
-    # Set x-axis limits to create a sliding window effect
-    if len(new_data) > window_size:
-        ax.set_xlim(len(new_data) - window_size, len(new_data))
-    else:
-        ax.set_xlim(0, window_size)
+def gen_temp(baseline = 20, variance = 5, seed = 42):
+    return baseline + np.random.randint(variance)
 
 # Loop to update both Streamlit chart and Matplotlib plot 
-for tick in range(100):
-    add_df = pd.DataFrame(np.random.randn(1, 1), columns=(["a"]))
-    chart_data = pd.concat([chart_data, add_df], ignore_index=True)
-    # Update Streamlit line chart
-    chart.add_rows(add_df)
-    # Update Matplotlib plot
-    update_plot(chart_data)
-    placeholder.pyplot(fig)
-    # Pause for a second
+chart_data = pd.DataFrame(np.ma.masked_array(data = np.zeros(1), mask = True), columns=["a"])
+chart_data["index"] = chart_data.index
+chart = altair.Chart(chart_data).mark_line().encode(x="index", y="a").interactive()
+chart_row.altair_chart(chart, use_container_width=True, on_select="ignore")
+
+runme = True
+i = 0
+while runme is True:
+    i += 1
+    new_data = pd.DataFrame([gen_temp()], columns=["a"])
+    new_data["index"] = len(chart_data) + i
+    chart_data = pd.concat([chart_data, new_data], ignore_index=True)
+    chart_row.add_rows(chart_data)
     time.sleep(1)
