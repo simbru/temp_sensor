@@ -3,6 +3,9 @@ import pathlib
 import os
 
 configpath = r"/home/weatherstation/.config.ini"
+configpath = "./config.ini" # need to get from Raspi and copy to somewhere in repo
+
+def gen_config(config_loc)
 
 def fetch_config(config_loc = configpath):
     """
@@ -36,4 +39,4 @@ def fetch_csv():
     config = fetch_config()
     # Get CSV location
     output_file = config["Parameters"]["OutputFile"]
-    
+    return output_file    
