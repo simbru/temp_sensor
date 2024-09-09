@@ -7,7 +7,7 @@ CONFIGPATH = "config.ini" # need to get from Raspi and copy to somewhere in repo
 
 def gen_default_config(config_loc = CONFIGPATH):
     """
-    Initialises a default config.ini file
+    Initialises a default config.ini file for parameters
     """
     config = configparser.ConfigParser()
     config["DEFAULT"] = {'LogInterval_s' : '1',

@@ -31,7 +31,7 @@ def print_to_console(temperature, humidity):
 def run_tempsensor():
     global sensor_found
     if sensor_found is False:
-        print("no sensor, generate sample data")
+        print("no sensor, generating sample data")
     i = True
     while i is True:
         try:
