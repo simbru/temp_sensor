@@ -6,6 +6,9 @@ try:
 except ModuleNotFoundError:
     print("no dht sensor")
     sensor_found = False
+except ImportError:
+    print("no dht sensor")
+    sensor_found = False
 import time 
 import datetime
 import numpy as np
@@ -39,6 +42,8 @@ def run_tempsensor():
             from board import D4 as pin
             sensor_found = True
         except ModuleNotFoundError:
+            sensor_found = False
+        except ImportError:
             sensor_found = False
         if sensor_found is True:
             sensor = adafruit_dht.DHT22

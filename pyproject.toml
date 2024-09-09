@@ -21,10 +21,12 @@ classifiers = [
 ]
 dependencies = [
     "shiny",
+    "shinywidgets",
     "numpy",
     "adafruit_dht",
     "pandas",
-    
+    "plotly",
+    "adafruit_dht"
 ]
 
 # [project.urls]
