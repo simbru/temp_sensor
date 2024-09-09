@@ -2,16 +2,23 @@ try:
     import adafruit_dht
     from board import D4 as pin
     print("found dht sensor")
-    sensory_found = True
+    sensor_found = True
 except ModuleNotFoundError:
     print("no dht sensor")
-    sensory_found = False
+    sensor_found = False
 import time 
 import datetime
 import numpy as np
 import pathlib
+# Local imports
+import io_funcs
 
-def write_data(temperature, humidity, filename = "tempsensor.csv"):        
+CONFIG = io_funcs.fetch_config()
+
+def write_data(temperature, humidity, filename = CONFIG["DEFAULT"]["outputfile"]):        
+    if pathlib.Path(filename).exists() is False:
+        with open(filename, "w") as f:
+            f.write("time,temperature,humidity\n")
     with open(filename, "a") as f:
         f.write(f"{datetime.datetime.now()},{temperature},{humidity}\n")
 
@@ -21,18 +28,19 @@ def print_to_console(temperature, humidity):
     else:
         print(datetime.datetime.now(), "failed read")
 
-if __name__ == "__main__":
-    if sensory_found is False:
+def run_tempsensor():
+    global sensor_found
+    if sensor_found is False:
         print("no sensor, generate sample data")
     i = True
     while i is True:
         try:
             import adafruit_dht
             from board import D4 as pin
-            sensory_found = True
+            sensor_found = True
         except ModuleNotFoundError:
-            sensory_found = False
-        if sensory_found is True:
+            sensor_found = False
+        if sensor_found is True:
             sensor = adafruit_dht.DHT22
             # pin = 7
             dht_device = adafruit_dht.DHT22(pin)
@@ -55,4 +63,8 @@ if __name__ == "__main__":
             temperature, humidity = simulate_tempsens()
         write_data(temperature, humidity)
         print_to_console(temperature, humidity)
-        time.sleep(.5)
+        time.sleep(float(CONFIG["DEFAULT"]["loginterval_s"]))
+
+
+if __name__ == "__main__":
+    run_tempsensor()
