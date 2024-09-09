@@ -22,7 +22,9 @@ classifiers = [
 dependencies = [
     "shiny",
     "numpy",
-    "adafruit_dht"
+    "adafruit_dht",
+    "pandas",
+    
 ]
 
 # [project.urls]
