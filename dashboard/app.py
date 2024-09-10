@@ -7,6 +7,8 @@ from shinywidgets import output_widget, render_plotly
 import plotly.express as px
 import plotly.graph_objects as go
 from shiny import reactive
+import os
+
 # Local imports
 import io_funcs
 import tempsensor

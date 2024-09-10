@@ -37,18 +37,18 @@ def run_tempsensor():
         print("no sensor, generating sample data")
     i = True
     while i is True:
-        try:
-            import adafruit_dht
-            from board import D4 as pin
-            sensor_found = True
-        except ModuleNotFoundError:
-            sensor_found = False
-        except ImportError:
-            sensor_found = False
+        # try:
+        #     import adafruit_dht
+        #     from board import D4 as pin
+        #     sensor_found = True
+        # except ModuleNotFoundError:
+        #     sensor_found = False
+        # except ImportError:
+        #     sensor_found = False
         if sensor_found is True:
-            sensor = adafruit_dht.DHT22
+            #sensor = adafruit_dht.DHT22
             # pin = 7
-            dht_device = adafruit_dht.DHT22(pin)
+            dht_device = adafruit_dht.DHT22(pin, use_pulseio=False)
             try:
                 temperature = dht_device.temperature
                 humidity = dht_device.humidity
@@ -69,7 +69,6 @@ def run_tempsensor():
         write_data(temperature, humidity)
         print_to_console(temperature, humidity)
         time.sleep(float(CONFIG["DEFAULT"]["loginterval_s"]))
-
-
+    
 if __name__ == "__main__":
     run_tempsensor()
