@@ -17,7 +17,7 @@ import pathlib
 import io_funcs
 
 CONFIG = io_funcs.fetch_config()
-
+print(dict(CONFIG))
 def write_data(temperature, humidity, filename = CONFIG["DEFAULT"]["outputfile"]):        
     if pathlib.Path(filename).exists() is False:
         with open(filename, "w") as f:

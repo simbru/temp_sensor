@@ -7,7 +7,8 @@ from shinywidgets import output_widget, render_plotly
 import plotly.express as px
 import plotly.graph_objects as go
 from shiny import reactive
-import os
+import subprocess
+
 
 # Local imports
 import io_funcs
@@ -144,4 +145,5 @@ app_ui = ui.page_fluid(
     ui.input_action_button("resume_scroll", "Resume Auto-Scroll")
 )
 
+os.sub
 app = App(app_ui, server)
