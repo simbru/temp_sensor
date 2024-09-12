@@ -145,5 +145,5 @@ app_ui = ui.page_fluid(
     ui.input_action_button("resume_scroll", "Resume Auto-Scroll")
 )
 
-os.sub
+subprocess.Popen(["python", "tempsensor.py"], )
 app = App(app_ui, server)
