@@ -1,4 +1,4 @@
-import pandas as pd
+import h5py
 import os
 import csv
 import pathlib
@@ -19,23 +19,19 @@ time.sleep(2) # give time for tempsensor to spin up
 
 CONFIG = io_funcs.fetch_config()
 print(dict(CONFIG["DEFAULT"]))
+RENDER_INTERVAL = 2
 SAVEPATH = pathlib.Path(CONFIG["DEFAULT"]["outputfile"])
 print("Save path:", SAVEPATH)
 print("Exists:", SAVEPATH.exists())
 
 with ui.card():
-    @reactive.file_reader(SAVEPATH, interval_secs=2)
-    def fetch_data():
-        # Force pandas to re-read the file without caching
-        df = pd.read_csv(SAVEPATH, engine='python')
-        return df
 
+    # Create initial plot with immediate data
     p = figure(title = "Test", x_axis_label = "Time", y_axis_label = "Temperature",
             x_axis_type = "datetime",)
-    df = pd.read_csv(SAVEPATH, engine='python') # first read the file once to get start state
-    df["time"] = pd.to_datetime(df["time"])
-    source = ColumnDataSource(data=df)
-    # temperature, time = df["temperature"], df["time"]
+    # Fetch the data from H5 file 
+    logdict = io_funcs.fetch_log_data()
+    source = ColumnDataSource(data=logdict)
     plot_line = p.line(x = "time", y = "temperature", source = source, color = "red")
 
     @render_bokeh
@@ -43,20 +39,18 @@ with ui.card():
         return p
 
     @render_bokeh
-    @reactive.file_reader(SAVEPATH, interval_secs=2)
+    @reactive.file_reader(SAVEPATH, interval_secs=RENDER_INTERVAL)
     def update_plot():
-        df = pd.read_csv(SAVEPATH, engine='python')
-        temperature, time = df["temperature"], df["time"]
-        df["time"] = pd.to_datetime(df["time"])
-        source.data = df
+        update_logdict = io_funcs.fetch_log_data()
+        source.data = update_logdict
 
-    @render.text
-    @reactive.file_reader(SAVEPATH)
-    def time():
-        with open(SAVEPATH, 'r', newline='') as f:
-            reader = csv.reader(f)
-            content = [i for i in reader]
-            curr_string = content[-1][0]
-            parsed_date = datetime.datetime.strptime(curr_string, '%Y-%m-%d %H:%M:%S.%f')
-            formatted_date = parsed_date.strftime('%B %d, %Y at %I:%M:%S %p')
-            return f"Time: {formatted_date}"
+    # @render.text
+    # @reactive.file_reader(SAVEPATH)
+    # def time():
+    #     with open(SAVEPATH, 'r', newline='') as f:
+    #         reader = csv.reader(f)
+    #         content = [i for i in reader]
+    #         curr_string = content[-1][0]
+    #         parsed_date = datetime.datetime.strptime(curr_string, '%Y-%m-%d %H:%M:%S.%f')
+    #         formatted_date = parsed_date.strftime('%B %d, %Y at %I:%M:%S %p')
+    #         return f"Time: {formatted_date}"

@@ -1,6 +1,8 @@
 import configparser
 import pathlib
 import os
+import h5py
+import numpy as np
 
 #CONFIGPATH = r"/home/weatherstation/.config.ini"
 CONFIGPATH = "config.ini" # need to get from Raspi and copy to somewhere in repo
@@ -27,7 +29,6 @@ def gen_default_config(config_loc = CONFIGPATH):
         else:
             print("Aborting... No default config generated.")
 
-
 def fetch_config(config_loc = CONFIGPATH):
     """
     Generates a configparser object and reads the .config.ini into it,
@@ -40,6 +41,8 @@ def fetch_config(config_loc = CONFIGPATH):
     config.optionxform = str
     config.read(config_loc)
     return config
+
+FILENAME = fetch_config(CONFIGPATH)["DEFAULT"]["outputfile"]
 
 def write_to_config(param_str, value, config_loc = CONFIGPATH):
     # Get the config file
@@ -55,9 +58,22 @@ def write_to_config(param_str, value, config_loc = CONFIGPATH):
         with open(CONFIGPATH, 'w') as configfile:
             config.write(configfile)
 
-def fetch_csv():
+# def fetch_csv():
+#     # Get config
+#     config = fetch_config()
+#     # Get CSV location
+#     output_file = config["DEFAULT"]["OutputFile"]
+#     return output_file    
+
+def fetch_log_data(filename = FILENAME):
+    """
+    Fetches data from .h5 file and returns it as a dictionary
+    """
     # Get config
-    config = fetch_config()
-    # Get CSV location
-    output_file = config["DEFAULT"]["OutputFile"]
-    return output_file    
+    with h5py.File(filename, "r") as f:     
+        # Now construct a dictionary out of the file
+        times = np.strings.decode(np.array(list(f["time"]))).astype(np.datetime64)
+        temps = np.array(list(f["temperature"]))
+        hums = np.array(list(f["humidity"]))
+        output_dict = {"time": times, "temperature": temps, "humidity": hums}
+        return output_dict
