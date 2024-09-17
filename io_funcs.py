@@ -72,7 +72,7 @@ def fetch_log_data(filename = FILENAME):
     # Get config
     with h5py.File(filename, "r") as f:     
         # Now construct a dictionary out of the file
-        times = np.strings.decode(np.array(list(f["time"]))).astype(np.datetime64)
+        times = np.char.decode(np.array(list(f["time"]))).astype(np.datetime64)
         temps = np.array(list(f["temperature"]))
         hums = np.array(list(f["humidity"]))
         output_dict = {"time": times, "temperature": temps, "humidity": hums}

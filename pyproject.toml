@@ -22,11 +22,11 @@ classifiers = [
 dependencies = [
     "shiny",
     "shinywidgets",
-    "numpy",
+    "numpy==1.26.4",
     "adafruit_dht",
-    "pandas",
-    "plotly",
-    "adafruit_dht"
+    "bokeh",
+    "bokeh-jupyter",
+    "h5py==3.10",
 ]
 
 # [project.urls]
