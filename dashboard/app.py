@@ -19,7 +19,7 @@ time.sleep(2) # give time for tempsensor to spin up
 
 CONFIG = io_funcs.fetch_config()
 print(dict(CONFIG["DEFAULT"]))
-RENDER_INTERVAL = 2
+RENDER_INTERVAL = int(CONFIG["DEFAULT"]["loginterval_s"]) + 1
 SAVEPATH = pathlib.Path(CONFIG["DEFAULT"]["outputfile"])
 print("Save path:", SAVEPATH)
 print("Exists:", SAVEPATH.exists())

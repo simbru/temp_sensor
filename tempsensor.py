@@ -54,42 +54,6 @@ def print_to_console(timestamp, temperature, humidity):
     else:
         print(timestamp, "failed read")
 
-def run_tempsensor():
-    global sensor_found
-    if sensor_found is False:
-        print("no sensor, generating sample data")
-    i = True
-    while i is True:
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-        if sensor_found is True:
-            dht_device = adafruit_dht.DHT22(pin, use_pulseio=False)
-            try:
-                temperature = dht_device.temperature
-                humidity = dht_device.humidity
-            except RuntimeError:
-                temperature = None
-                humidity = None
-        else:
-            def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar = 5):
-                temp = tempbaseline + np.random.randint(tempvar)
-                hum = humbaseline + np.random.randint(humvar)
-                # Sensor fails read sometimes, simulate that:
-                random_fail = np.random.randint(5)
-                if random_fail == 1:
-                    temp = None
-                    hum = None
-                return temp, hum
-            temperature, humidity = simulate_tempsens()
-        # write_data(temperature, humidity)
-        # If file doesn't exist, create it
-        if pathlib.Path(CONFIG["DEFAULT"]["outputfile"]).exists() is False:
-            init_data_hdf5()
-        # Append to file
-        write_data_hdf5(timestamp, temperature, humidity)
-        # Print to console
-        print_to_console(timestamp, temperature, humidity)
-        time.sleep(float(CONFIG["DEFAULT"]["loginterval_s"]))
-
 def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar = 5):
     temp = tempbaseline + np.random.randint(tempvar)
     hum = humbaseline + np.random.randint(humvar)
@@ -100,11 +64,8 @@ def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar =
         hum = None
     return temp, hum
 
-def fetch_log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
+def fetch_log_data(filename = CONFIG["DEFAULT"]["outputfile"], gen_data = False):
     global sensor_found
-    # If file doesn't exist, create it
-    if pathlib.Path(CONFIG["DEFAULT"]["outputfile"]).exists() is False:
-        init_data_hdf5()
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
     if sensor_found is False:
         temperature, humidity = simulate_tempsens()
@@ -125,8 +86,14 @@ def fetch_log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
     return None 
 
 def run_tempsensor_test():
-    print("Running tempsensor test")
+    print("Running tempsensor")
+    # If file doesn't exist, create it
+    if pathlib.Path(CONFIG["DEFAULT"]["outputfile"]).exists() is False:
+        print(f"File doesn't exist, creating it at {CONFIG["DEFAULT"]["outputfile"]}")
+        init_data_hdf5()
+    # Schedule the initial run
     schedule.enter(LOGINTERVAL, 1, fetch_log_data)
+    # Run the scheduler -> this will keep the program running
     schedule.run()
 
 if __name__ == "__main__":
