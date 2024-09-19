@@ -42,7 +42,6 @@ def tempsensor_subprocess():
 def end_tempsensor():
     if os.path.isfile(PID_FILE):
         os.remove(PID_FILE)
-    print("Temperature sensor stopped.")
 
 if __name__ == "__main__":
     run_tempsensor_test()

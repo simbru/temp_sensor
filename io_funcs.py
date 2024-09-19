@@ -153,7 +153,7 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"], gen_data = False):
     # Print to console
     print_to_console(timestamp, temperature, humidity)
     # # Schedule the next run
-    schedule.enter(LOGINTERVAL, 1, log_data)
+    schedule.enter(LOGINTERVAL, 0, log_data)
     return None 
 
 latest_output_dict = None
