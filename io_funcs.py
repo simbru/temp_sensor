@@ -3,9 +3,12 @@ import pathlib
 import os
 import h5py
 import numpy as np
+import pyarrow as pa
 import sched, time
 import datetime
 import threading
+import copy
+import atexit 
 
 # Import handling based on RasPi/dev
 try:
@@ -33,7 +36,8 @@ def gen_default_config(config_loc = CONFIGPATH):
     config["DEFAULT"] = {'loginterval_s' : '1',
                         'RemoteLOGINTERVAL_S' : '86400',
                         'OutputFile' : 'templog.csv',
-                        'TestWrite' : '8'}
+                        'TestWrite' : '8',
+                        'LastRead'  : None}
     if not os.path.exists(CONFIGPATH):
         with open(CONFIGPATH, 'w') as configfile:
             config.write(configfile)
@@ -78,7 +82,6 @@ CONFIG = fetch_config(CONFIGPATH)
 FILENAME = CONFIG["DEFAULT"]["outputfile"]
 LOGINTERVAL = float(CONFIG["DEFAULT"]["loginterval_s"])
 schedule = sched.scheduler(time.time, time.sleep)
-latest_output_dict = None
 
 def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar = 5):
     temp = tempbaseline + np.random.randint(tempvar)
@@ -100,7 +103,7 @@ def init_data_hdf5(filename = CONFIG["DEFAULT"]["outputfile"]):
     # Create file if it doesn't exist
     if pathlib.Path(CONFIG["DEFAULT"]["outputfile"]).exists() is False:
         print("Save file doesn't exist, creating it at", CONFIG["DEFAULT"]["outputfile"])
-        with h5py.File(filename, "w") as f:
+        with h5py.File(filename, "w", locking = True) as f:
             f.create_dataset("time", (0,), maxshape = (None,), dtype = h5py.string_dtype())
             f.create_dataset("temperature", (0,), maxshape = (None,), dtype = 'f')
             f.create_dataset("humidity", (0,), maxshape = (None,), dtype = 'f')
@@ -116,17 +119,16 @@ def init_data_hdf5(filename = CONFIG["DEFAULT"]["outputfile"]):
 def write_data_hdf5(timestamp, temperature, humidity, filename = CONFIG["DEFAULT"]["outputfile"]):
     # Append to file and resize continously
     with file_lock:
-        with h5py.File(filename, "a") as f:
+        with h5py.File(filename, "a", locking = False) as f:
             f["time"].resize((f["time"].shape[0] + 1,))
-            f["time"][-1] = timestamp
             f["temperature"].resize((f["temperature"].shape[0] + 1,))
-            f["temperature"][-1] = temperature
             f["humidity"].resize((f["humidity"].shape[0] + 1,))
-            f["humidity"][-1] = humidity
-
+            f["time"][-1] = timestamp
+            f["temperature"][-1] = temperature
+            f["humidity"][-1]  = humidity
 
 def log_data(filename = CONFIG["DEFAULT"]["outputfile"], gen_data = False):
-    print("Im logging!")
+    # print("Im logging!")
     global sensor_found
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
     if sensor_found is False:
@@ -147,7 +149,6 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"], gen_data = False):
                 # temperature = None
                 # humidity = None
     # Append to file
-    print(temperature, humidity)
     write_data_hdf5(timestamp, temperature, humidity)
     # Print to console
     print_to_console(timestamp, temperature, humidity)
@@ -155,27 +156,31 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"], gen_data = False):
     schedule.enter(LOGINTERVAL, 1, log_data)
     return None 
 
-
-def _fetchlog(filename = FILENAME):
+latest_output_dict = None
+def _fetchlog(filename=FILENAME):
     """
     Fetches data from .h5 file and returns it as a dictionary
     """
-    global latest_output_dict
     with file_lock:
-        with h5py.File(filename, "r") as f:     
-            # Now construct a dictionary out of the file
-            times = np.char.decode(np.array(list(f["time"]))).astype(np.datetime64)
-            temps = np.array(list(f["temperature"]))
-            hums = np.array(list(f["humidity"]))
-            output_dict = {"time": times, "temperature": temps, "humidity": hums}
-            latest_output_dict = output_dict
-            return latest_output_dict
-    
+        with h5py.File(filename, "r", locking = False) as f: 
+            times = np.array(f["time"], dtype = np.datetime64)
+            temps = np.array(f["temperature"], dtype = "float32")
+            hums  = np.array(f["humidity"], dtype = "float32")
+    # Assign to global variable only after processing
+    global latest_output_dict
+    latest_output_dict = {"time": times, "temperature": temps, "humidity": hums}
+    return latest_output_dict
+
 def fetch_log_data():
-    print("im fetching!")
+    # Schedule the next run
     schedule.enter(LOGINTERVAL, 1, fetch_log_data)
-    # global latest_output_dict
-    # schedule.enter(LOGINTERVAL, 2, _fetchlog)
-    # schedule.run()
-    # return latest_output_dict
-    return _fetchlog()
+    # Fetch immediately the first time to ensure data is loaded
+    _fetchlog()
+    # Return the latest data
+    global latest_output_dict
+    return latest_output_dict
+
+def cleanup(PID_FILE):
+    if os.path.isfile(PID_FILE):
+        os.remove(PID_FILE) 
+
