@@ -39,11 +39,12 @@ def tempsensor_subprocess():
     print("Temperature sensor started.")
     return process
 
-def cleanup():
+def end_tempsensor():
     if os.path.isfile(PID_FILE):
         os.remove(PID_FILE)
+    print("Temperature sensor stopped.")
 
 if __name__ == "__main__":
     run_tempsensor_test()
 
-atexit.register(cleanup)
+atexit.register(end_tempsensor)

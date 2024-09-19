@@ -163,9 +163,9 @@ def _fetchlog(filename=FILENAME):
     """
     with file_lock:
         with h5py.File(filename, "r", locking = False) as f: 
-            times = np.array(f["time"], dtype = np.datetime64)
             temps = np.array(f["temperature"], dtype = "float32")
             hums  = np.array(f["humidity"], dtype = "float32")
+            times = np.array(f["time"], dtype = np.datetime64)
     # Assign to global variable only after processing
     global latest_output_dict
     latest_output_dict = {"time": times, "temperature": temps, "humidity": hums}

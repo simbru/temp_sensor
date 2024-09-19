@@ -1,18 +1,9 @@
-import h5py
-import csv
 import pathlib
 from shiny import reactive
-import subprocess
 from shiny.express import input, ui, render
 from shinywidgets import render_bokeh
-from bokeh.plotting import figure, show
+from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource
-import time
-import datetime
-import atexit
-import psutil
-import os
-import atexit
 # os.environ['HDF5_USE_FILE_LOCKING'] = 'True'
 # Local imports
 import io_funcs
