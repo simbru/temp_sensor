@@ -9,14 +9,14 @@ from bokeh.models import ColumnDataSource, RangeTool
 import io_funcs
 import tempsensor 
 
-temp_sensor_process = tempsensor.tempsensor_subprocess()
-
 CONFIG = io_funcs.fetch_config()
 RENDER_INTERVAL = float(CONFIG["DEFAULT"]["loginterval_s"])
 SAVEPATH = pathlib.Path(CONFIG["DEFAULT"]["outputfile"])
+    
+# Spin up the temperature sensor first
+temp_sensor_process = tempsensor.tempsensor_subprocess()
 
 with ui.card():
-
     # Fetch initial data from H5 file 
     source = ColumnDataSource(data=io_funcs.fetch_log_data())
     # Create initial plot with immediate data
@@ -55,3 +55,4 @@ with ui.card():
         date = curr_datetime[:10]
         time = curr_datetime[11:-4]
         return f"Time: {time} Date: {date}"
+

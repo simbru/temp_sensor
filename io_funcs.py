@@ -3,12 +3,10 @@ import pathlib
 import os
 import h5py
 import numpy as np
-import pyarrow as pa
-import sched, time
 import datetime
 import threading
-import copy
-import atexit 
+import time 
+import sched
 
 # Import handling based on RasPi/dev
 try:
@@ -16,11 +14,8 @@ try:
     from board import D4 as pin
     print("found dht sensor")
     sensor_found = True
-except ModuleNotFoundError:
-    print("no dht sensor, generating data")
-    sensor_found = False
-except ImportError:
-    print("no dht sensor, generating data")
+except (ModuleNotFoundError, ImportError):
+    print("no dht sensor, generated data")
     sensor_found = False
 
 #CONFIGPATH = r"/home/weatherstation/.config.ini"
@@ -107,7 +102,6 @@ def init_data_hdf5(filename = CONFIG["DEFAULT"]["outputfile"]):
             f.create_dataset("time", (0,), maxshape = (None,), dtype = h5py.string_dtype())
             f.create_dataset("temperature", (0,), maxshape = (None,), dtype = 'f')
             f.create_dataset("humidity", (0,), maxshape = (None,), dtype = 'f')
-
 # def write_data(temperature, humidity, filename = CONFIG["DEFAULT"]["outputfile"]):        
 #     if pathlib.Path(filename).exists() is False:
 #         with open(filename, "w") as f:
@@ -169,7 +163,7 @@ def _fetchlog(filename=FILENAME):
     # Assign to global variable only after processing
     global latest_output_dict
     latest_output_dict = {"time": times, "temperature": temps, "humidity": hums}
-    return latest_output_dict
+    return None
 
 def fetch_log_data():
     # Schedule the next run
