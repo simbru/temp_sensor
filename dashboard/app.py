@@ -55,4 +55,3 @@ with ui.card():
         date = curr_datetime[:10]
         time = curr_datetime[11:-4]
         return f"Time: {time} Date: {date}"
-
