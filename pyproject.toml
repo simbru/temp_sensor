@@ -1,17 +1,10 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
 name = "tempsens"
-version = "0.1"
+version = "0.1.0"
 authors = [
   { name="Simen Bruøygard", email="simen.bruoy@gmail.com" },
 ]
-description = """A package for 
-logging temperature via a Ras Pi 
-and uploading it to a central database.
-"""
+description = "Temperature and humidity monitoring system for Raspberry Pi with DHT22 sensor"
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
@@ -23,18 +16,15 @@ dependencies = [
     "shiny",
     "shinywidgets",
     "numpy==1.26.4",
-    "adafruit_dht",
     "bokeh",
-    "bokeh-jupyter",
     "h5py==3.10",
+    "psutil",
+    "pandas",
+    "jupyter-bokeh>=4.0.5",
 ]
 
-# [project.urls]
-# Homepage = 
-# Issues = 
+[project.optional-dependencies]
+pi = [
+    "adafruit_dht",
+]
 
-[tool.setuptools.packages]
-find = {}  # Scan the project directory with the default parameters
-
-[tool.hatch.build.targets.wheel]
-autodiscover = true

@@ -1,0 +1,580 @@
+"""
+Bokeh Server dashboard for live temperature/humidity monitoring.
+Run with: bokeh serve --show tempsens/dashboard/bokeh_app.py
+"""
+import pathlib
+import sys
+
+import numpy as np
+import pandas as pd
+
+# Add project root to path
+_project_root = pathlib.Path(__file__).parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from bokeh.plotting import figure, curdoc
+from bokeh.models import ColumnDataSource, Button, Spinner, Range1d, Toggle, CustomJS
+from bokeh.layouts import column, row
+from bokeh.models.widgets import Div
+
+from tempsens import io_funcs, sensor as tempsensor
+
+# Constants
+TOLERANCE_MS = 2000  # 2 seconds tolerance for range comparison
+DEFAULT_MA_WINDOW = 10
+
+# Configuration
+CONFIG = io_funcs.fetch_config()
+UPDATE_INTERVAL = int(float(CONFIG["DEFAULT"]["loginterval_s"]) * 1000)  # Convert to milliseconds
+SAMPLE_INTERVAL_SECONDS = UPDATE_INTERVAL / 1000.0
+if SAMPLE_INTERVAL_SECONDS:
+    samples_per_min = 60.0 / SAMPLE_INTERVAL_SECONDS
+    SAMPLE_RATE_TEXT = f"dt≈{SAMPLE_INTERVAL_SECONDS:.1f}s (~{samples_per_min:.0f}/min)"
+else:
+    SAMPLE_RATE_TEXT = "dt≈0s"
+
+status_state = {
+    "sample_text": SAMPLE_RATE_TEXT,
+    "ma_text": "",
+}
+
+
+def _read_config_float(key: str, fallback: float) -> float:
+    try:
+        raw_value = CONFIG["DEFAULT"].get(key, str(fallback))
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _compute_axis_bounds(min_value: float, max_value: float, margin_pct: float) -> tuple[float, float]:
+    if max_value <= min_value:
+        max_value = min_value + 1.0
+    span = max_value - min_value
+    pad = span * max(margin_pct, 0.0)
+    return min_value - pad, max_value + pad
+
+
+TEMP_MIN = _read_config_float("temperature_min_c", 0.0)
+TEMP_MAX = _read_config_float("temperature_max_c", 40.0)
+TEMP_MARGIN = _read_config_float("temperature_margin_pct", 0.05)
+TEMP_Y_START, TEMP_Y_END = _compute_axis_bounds(TEMP_MIN, TEMP_MAX, TEMP_MARGIN)
+
+HUM_MIN = _read_config_float("humidity_min_pct", 0.0)
+HUM_MAX = _read_config_float("humidity_max_pct", 100.0)
+HUM_MARGIN = _read_config_float("humidity_margin_pct", 0.05)
+HUM_Y_START, HUM_Y_END = _compute_axis_bounds(HUM_MIN, HUM_MAX, HUM_MARGIN)
+
+# Start the temperature sensor if not running
+temp_sensor_process = tempsensor.tempsensor_subprocess()
+
+# Initialize data
+def prepare_source_data(raw_data, window_size):
+    """Return CDS-compatible dict with moving-average columns added."""
+    if not raw_data:
+        return {"time": [], "temperature": [], "humidity": [], "temp_ma": [], "hum_ma": []}
+
+    time_vals = np.asarray(raw_data.get("time", []))
+    temps = np.asarray(raw_data.get("temperature", []), dtype=float)
+    hums = np.asarray(raw_data.get("humidity", []), dtype=float)
+
+    if len(temps) == 0:
+        return {"time": time_vals, "temperature": temps, "humidity": hums,
+                "temp_ma": temps, "hum_ma": hums}
+
+    window = max(int(window_size), 1)
+    temp_ma = pd.Series(temps).rolling(window=window, min_periods=1).mean().to_numpy()
+    hum_ma = pd.Series(hums).rolling(window=window, min_periods=1).mean().to_numpy()
+
+    return {
+        "time": time_vals,
+        "temperature": temps,
+        "humidity": hums,
+        "temp_ma": temp_ma,
+        "hum_ma": hum_ma,
+    }
+
+
+initial_data_raw = io_funcs.fetch_log_data()
+initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW)
+source = ColumnDataSource(data=initial_data)
+
+# Time window settings (in minutes)
+current_window = {
+    "minutes": 60,
+    "force_update": True,
+    "auto_range": True,
+    "last_set_start": None,  # Track the last programmatic range start (ms)
+    "last_set_end": None,
+    "data_min": None,
+    "data_max": None,
+}
+
+# Guard flag so programmatic range changes do not disable auto-range
+range_update_state = {"pending": 0}
+
+# Create temperature plot with sensible y-range (0-40°C)
+temp_plot = figure(
+    title="Temperature Over Time",
+    x_axis_label="Time",
+    y_axis_label="Temperature (°C)",
+    x_axis_type="datetime",
+    y_range=Range1d(start=TEMP_Y_START, end=TEMP_Y_END),
+    height=400,
+    width=1100,
+    tools="pan,wheel_zoom,box_zoom,reset,save",
+    active_drag=None,
+    active_scroll=None,
+    x_range=Range1d()
+)
+temp_raw_renderer = temp_plot.line('time', 'temperature', source=source, line_width=2,
+                                   color='#ff7a7a', alpha=0.6)
+temp_ma_renderer = temp_plot.line('time', 'temp_ma', source=source, line_width=3,
+                                  color='red', alpha=0.9)
+
+# Create humidity plot with 0-100% range
+humidity_plot = figure(
+    title="Humidity Over Time",
+    x_axis_label="Time",
+    y_axis_label="Humidity (%)",
+    x_axis_type="datetime",
+    y_range=Range1d(start=HUM_Y_START, end=HUM_Y_END),
+    height=400,
+    width=1100,
+    tools="pan,wheel_zoom,box_zoom,reset,save",
+    active_drag=None,
+    active_scroll=None,
+    x_range=temp_plot.x_range  # Link x-axis with temperature plot
+)
+hum_raw_renderer = humidity_plot.line('time', 'humidity', source=source, line_width=2,
+                                      color='#6fa8ff', alpha=0.6)
+hum_ma_renderer = humidity_plot.line('time', 'hum_ma', source=source, line_width=3,
+                                     color='navy', alpha=0.9)
+
+# Apply sliding window updates without triggering the range-change callback
+def set_programmatic_range(start_ms, end_ms):
+    """Set the x-range while suppressing user-interaction detection."""
+    range_update_state["pending"] = 2  # expect callbacks for start and end
+    current_window["last_set_start"] = start_ms
+    current_window["last_set_end"] = end_ms
+    temp_plot.x_range.start = start_ms
+    temp_plot.x_range.end = end_ms
+
+# Disable auto-range when user interacts with plots
+def range_change_callback(attr, old, new):
+    """Detect if range change was from user or programmatic."""
+    if range_update_state["pending"] > 0:
+        range_update_state["pending"] = max(range_update_state["pending"] - 1, 0)
+        current_window[f"last_set_{attr}"] = new
+        return
+
+    expected_key = f"last_set_{attr}"
+    expected = current_window.get(expected_key)
+    diff = None
+
+    if expected is not None:
+        diff = abs(new - expected)
+        if diff <= TOLERANCE_MS:
+            current_window[expected_key] = new
+            return
+
+    # Allow Bokeh to clamp to available data without disabling auto-range
+    data_min = current_window.get("data_min")
+    data_max = current_window.get("data_max")
+    if attr == "start" and data_min is not None and abs(new - data_min) <= TOLERANCE_MS:
+        current_window[expected_key] = new
+        return
+    if attr == "end" and data_max is not None and abs(new - data_max) <= TOLERANCE_MS:
+        current_window[expected_key] = new
+        return
+
+    if current_window["auto_range"]:
+        current_window["auto_range"] = False
+        if diff is not None:
+            print(f"Auto-range disabled - user changed {attr} (diff: {diff:.1f}ms)")
+        else:
+            print(f"Auto-range disabled - user changed {attr} (no programmatic baseline)")
+
+    current_window[expected_key] = new
+
+# Add event listeners to detect user interaction with x-axis
+temp_plot.x_range.on_change('start', range_change_callback)
+temp_plot.x_range.on_change('end', range_change_callback)
+
+# Current readings display
+current_readings = Div(text="<h3>Loading...</h3>", width=1100, height=120)
+
+# Time window buttons
+btn_10min = Button(label="10 min", button_type="default", width=100)
+btn_60min = Button(label="60 min", button_type="success", width=100)
+btn_3h = Button(label="3 hours", button_type="default", width=100)
+btn_12h = Button(label="12 hours", button_type="default", width=100)
+btn_24h = Button(label="24 hours", button_type="default", width=100)
+btn_1week = Button(label="1 week", button_type="default", width=100)
+btn_all = Button(label="All data", button_type="default", width=100)
+
+time_buttons = [btn_10min, btn_60min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all]
+
+# Custom window inputs (days/hours/minutes/seconds)
+time_input_state = {"updating": False}
+window_days = Spinner(title="Days", low=0, high=365, step=1, value=0, width=90)
+window_hours = Spinner(title="Hours", low=0, high=23, step=1, value=1, width=90)
+window_minutes = Spinner(title="Minutes", low=0, high=59, step=1, value=0, width=90)
+window_seconds = Spinner(title="Seconds", low=0, high=59, step=1, value=0, width=90)
+
+
+def format_minutes(minutes):
+    if minutes is None:
+        return "ALL data"
+
+    total_seconds = int(round(float(minutes) * 60))
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    if secs:
+        parts.append(f"{secs}s")
+
+    return " ".join(parts) if parts else "0s"
+
+
+def format_duration_seconds(total_seconds):
+    total_seconds = int(round(total_seconds))
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+
+    return "".join(parts)
+
+
+def set_time_inputs_from_minutes(minutes):
+    """Sync the custom inputs with a minutes value (None -> zeros)."""
+    if minutes is None or minutes <= 0:
+        values = (0, 0, 0, 0)
+    else:
+        total_seconds = int(round(float(minutes) * 60))
+        days, rem = divmod(total_seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        mins, secs = divmod(rem, 60)
+        values = (days, hours, mins, secs)
+
+    time_input_state["updating"] = True
+    try:
+        window_days.value = values[0]
+        window_hours.value = values[1]
+        window_minutes.value = values[2]
+        window_seconds.value = values[3]
+    finally:
+        time_input_state["updating"] = False
+
+
+def get_minutes_from_inputs():
+    try:
+        total_seconds = (
+            int(window_days.value) * 86400
+            + int(window_hours.value) * 3600
+            + int(window_minutes.value) * 60
+            + int(window_seconds.value)
+        )
+    except (TypeError, ValueError):
+        return None
+
+    if total_seconds <= 0:
+        return None
+
+    return total_seconds / 60
+
+def set_button_active(active_btn):
+    """Highlight the active preset button (or clear selection with None)."""
+    for btn in time_buttons:
+        btn.button_type = "success" if btn == active_btn else "default"
+
+def update_time_window(minutes, sync_inputs=True):
+    """Update the time window and optionally sync custom inputs."""
+    current_window["minutes"] = minutes
+    current_window["force_update"] = True
+    current_window["auto_range"] = True  # Re-enable auto-range
+
+    if sync_inputs:
+        set_time_inputs_from_minutes(minutes)
+
+    print(f"Time window changed to: {format_minutes(minutes)}, auto-range re-enabled")
+    update_data()
+
+
+def on_custom_time_change(attr, old, new):
+    if time_input_state["updating"]:
+        return
+
+    minutes = get_minutes_from_inputs()
+    if minutes is None:
+        return
+
+    set_button_active(None)
+    update_time_window(minutes, sync_inputs=False)
+
+
+for spinner in (window_days, window_hours, window_minutes, window_seconds):
+    spinner.on_change("value", on_custom_time_change)
+
+# Initialize custom inputs to current preset (60 minutes)
+set_time_inputs_from_minutes(current_window["minutes"])
+
+btn_10min.on_click(lambda: (set_button_active(btn_10min), update_time_window(10)))
+btn_60min.on_click(lambda: (set_button_active(btn_60min), update_time_window(60)))
+btn_3h.on_click(lambda: (set_button_active(btn_3h), update_time_window(180)))
+btn_12h.on_click(lambda: (set_button_active(btn_12h), update_time_window(720)))
+btn_24h.on_click(lambda: (set_button_active(btn_24h), update_time_window(1440)))
+btn_1week.on_click(lambda: (set_button_active(btn_1week), update_time_window(10080)))
+btn_all.on_click(lambda: (set_button_active(btn_all), update_time_window(None)))
+
+# CSV download buttons
+btn_download_temp = Button(label="📥 Download Temperature CSV", button_type="primary", width=230)
+btn_download_hum = Button(label="📥 Download Humidity CSV", button_type="primary", width=230)
+btn_download_both = Button(label="📥 Download Both CSV", button_type="success", width=230)
+ma_spinner = Spinner(title="Moving average window (samples)", low=1, high=500, step=1,
+                     value=DEFAULT_MA_WINDOW, width=180)
+show_raw_toggle = Toggle(label="Raw data: ON", button_type="success", active=True, width=140)
+
+
+def build_download_callback(columns, prefix):
+    return CustomJS(args=dict(source=source, columns=columns, prefix=prefix), code="""
+        var cols = columns;
+        var data = source.data;
+        if (!cols.length || !data) {
+            return;
+        }
+        var first = data[cols[0]];
+        if (!first || !first.length) {
+            return;
+        }
+
+        var lines = [cols.join(',')];
+        var nrows = first.length;
+        for (var i = 0; i < nrows; i++) {
+            var row = [];
+            for (var j = 0; j < cols.length; j++) {
+                var col = cols[j];
+                var value = data[col][i];
+                if (col === 'time') {
+                    var dt = new Date(value);
+                    if (!isNaN(dt.getTime())) {
+                        var y = dt.getFullYear();
+                        var m = ('0' + (dt.getMonth() + 1)).slice(-2);
+                        var d = ('0' + dt.getDate()).slice(-2);
+                        var hh = ('0' + dt.getHours()).slice(-2);
+                        var mm = ('0' + dt.getMinutes()).slice(-2);
+                        var ss = ('0' + dt.getSeconds()).slice(-2);
+                        row.push(y + '-' + m + '-' + d + ' ' + hh + ':' + mm + ':' + ss);
+                        continue;
+                    }
+                }
+                if (typeof value === 'number') {
+                    row.push(value.toFixed(2));
+                } else if (value == null) {
+                    row.push('');
+                } else {
+                    row.push(String(value));
+                }
+            }
+            lines.push(row.join(','));
+        }
+
+    var csv = lines.join('\\n');
+        var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        var timestamp = new Date().toISOString().replace(/[:.-]/g, '').slice(0, 15);
+        var filename = prefix + '_' + timestamp + '.csv';
+        var link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+    """)
+
+
+btn_download_temp.js_on_event("button_click", build_download_callback(["time", "temperature"], "temperature"))
+btn_download_hum.js_on_event("button_click", build_download_callback(["time", "humidity"], "humidity"))
+btn_download_both.js_on_event("button_click", build_download_callback(["time", "temperature", "humidity"], "temp_humidity"))
+
+
+def on_ma_change(attr, old, new):
+    """Recompute moving averages when the window size changes."""
+    try:
+        int(new)
+    except (TypeError, ValueError):
+        return
+    update_ma_info(new)
+    current_window["force_update"] = True
+    update_data()
+
+
+ma_spinner.on_change("value", on_ma_change)
+
+
+def on_raw_toggle_change(attr, old, new):
+    visible = bool(new)
+    temp_raw_renderer.visible = visible
+    hum_raw_renderer.visible = visible
+    show_raw_toggle.button_type = "success" if visible else "default"
+    show_raw_toggle.label = f"Raw data: {'ON' if visible else 'OFF'}"
+
+
+show_raw_toggle.on_change("active", on_raw_toggle_change)
+on_raw_toggle_change("active", True, show_raw_toggle.active)
+
+
+def update_ma_info(window_size):
+    window_size = max(int(window_size), 1)
+    approx_duration = window_size * SAMPLE_INTERVAL_SECONDS
+    status_state["ma_text"] = f"{window_size} samp ≈ {format_duration_seconds(approx_duration)}"
+
+
+update_ma_info(DEFAULT_MA_WINDOW)
+
+def update_data():
+    """Update the data source with new readings."""
+    try:
+        new_data = io_funcs.fetch_log_data()
+
+        if not new_data or len(new_data.get("time", [])) == 0:
+            return
+
+        window = max(int(ma_spinner.value), 1)
+        update_ma_info(window)
+
+        prepared = prepare_source_data(new_data, window)
+
+        # Replace dataset to keep moving averages in sync
+        source.data = prepared
+
+        # Track current data extents for range-change handling
+        current_window["data_min"] = prepared["time"][0]
+        current_window["data_max"] = prepared["time"][-1]
+
+        if current_window.get("force_update", False):
+            current_window["force_update"] = False
+            current_window["force_update_was_true"] = True
+
+        # Update time window (sliding window) - only if auto_range is enabled
+        latest_time_ms = prepared["time"][-1]  # Already in milliseconds
+
+        if current_window["auto_range"]:
+            if current_window["minutes"] is not None:
+                # Calculate window boundaries (all in milliseconds)
+                window_duration_ms = current_window["minutes"] * 60 * 1000
+                window_start_ms = latest_time_ms - window_duration_ms
+
+                # Update x-axis range for sliding window
+                set_programmatic_range(window_start_ms, latest_time_ms)
+
+                # Debug output
+                if current_window.get("force_update_was_true", False):
+                    print(f"Setting window to {format_minutes(current_window['minutes'])}")
+                    current_window["force_update_was_true"] = False
+            else:
+                # Show all data
+                start_ms = prepared["time"][0]
+                end_ms = latest_time_ms
+
+                set_programmatic_range(start_ms, end_ms)
+
+                if current_window.get("force_update_was_true", False):
+                    print("Setting window to ALL data")
+                    current_window["force_update_was_true"] = False
+
+        # Update current readings display with human-readable time
+        # Convert milliseconds back to datetime for display
+        curr_datetime = pd.Timestamp(latest_time_ms, unit='ms')
+        curr_time_str = curr_datetime.strftime('%Y-%m-%d %H:%M:%S')
+        curr_temp = prepared["temp_ma"][-1]
+        curr_hum = prepared["hum_ma"][-1]
+
+        # Show auto-range status
+        auto_status = "🟢 Auto-following" if current_window["auto_range"] else "🔴 Manual (click time button to re-enable)"
+
+        smoothing_text = status_state.get("ma_text", "-" )
+        sample_text = status_state.get("sample_text", "-")
+
+        current_readings.text = f"""
+        <div style="background-color:#f0f0f0;padding:18px;border-radius:5px;margin-bottom:18px;display:flex;flex-wrap:wrap;gap:24px;align-items:center;">
+            <div style="min-width:150px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Time</h3>
+                <p style="font-size:18px;margin:0;">{curr_time_str}</p>
+            </div>
+            <div style="min-width:150px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Readings</h3>
+                <p style="font-size:18px;margin:0;">{curr_temp:.1f}°C · {curr_hum:.1f}%</p>
+            </div>
+            <div style="min-width:150px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Smoothing</h3>
+                <p style="font-size:16px;margin:0;">{smoothing_text}</p>
+            </div>
+            <div style="min-width:150px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Cadence</h3>
+                <p style="font-size:16px;margin:0;">{sample_text}</p>
+            </div>
+            <div style="min-width:150px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Mode</h3>
+                <p style="font-size:16px;margin:0;color:#333;">{auto_status}</p>
+            </div>
+        </div>
+        """
+    except Exception as e:
+        print(f"Error updating data: {e}")
+
+# Initial update
+update_data()
+
+# Schedule periodic updates
+curdoc().add_periodic_callback(update_data, UPDATE_INTERVAL)
+
+# Layout
+time_button_row = row(btn_10min, btn_60min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all,
+                      sizing_mode="scale_width")
+
+download_button_row = row(btn_download_temp, btn_download_hum, btn_download_both,
+                          sizing_mode="scale_width")
+
+custom_time_row = row(window_days, window_hours, window_minutes, window_seconds,
+                      sizing_mode="scale_width")
+ma_controls_row = row(ma_spinner, show_raw_toggle, sizing_mode="scale_width")
+
+layout = column(
+    Div(text="<h1>🌡️ Temperature & Humidity Monitor</h1>", width=1100, height=60),
+    current_readings,
+    Div(text="<h4>Time Window:</h4>", width=1100, height=30),
+    time_button_row,
+    Div(text="<h4>Custom Window:</h4>", width=1100, height=30),
+    custom_time_row,
+    Div(text="<h4>Moving Average:</h4>", width=1100, height=30),
+    ma_controls_row,
+    Div(text="<br>", width=1100, height=10),  # Spacer
+    temp_plot,
+    humidity_plot,
+    Div(text="<br>", width=1100, height=10),
+    Div(text="<h4>Download Data:</h4>", width=1100, height=30),
+    download_button_row
+)
+
+curdoc().add_root(layout)
+curdoc().title = "Temperature Monitor"

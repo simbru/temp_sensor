@@ -21,30 +21,34 @@ except (ModuleNotFoundError, ImportError):
 #CONFIGPATH = r"/home/weatherstation/.config.ini"
 CONFIGPATH = "config.ini" # need to get from Raspi and copy to somewhere in repo
 
+DEFAULT_CONFIG_VALUES = {
+    "loginterval_s": "1",
+    "remoteinterval_s": "86400",
+    "outputfile": "templog.h5",
+    "temperature_min_c": "0",
+    "temperature_max_c": "40",
+    "temperature_margin_pct": "0.05",
+    "humidity_min_pct": "0",
+    "humidity_max_pct": "100",
+    "humidity_margin_pct": "0.05",
+    "LastRead": "None",
+}
+
 file_lock = threading.Lock()
 
-def gen_default_config(config_loc = CONFIGPATH):
-    """
-    Initialises a default config.ini file for parameters
-    """
+def gen_default_config(config_loc=CONFIGPATH, force=False):
+    """Write a default config file with sane parameters."""
+    config_loc = pathlib.Path(config_loc)
     config = configparser.ConfigParser()
-    config["DEFAULT"] = {'loginterval_s' : '1',
-                        'RemoteLOGINTERVAL_S' : '86400',
-                        'OutputFile' : 'templog.csv',
-                        'TestWrite' : '8',
-                        'LastRead'  : None}
-    if not os.path.exists(CONFIGPATH):
-        with open(CONFIGPATH, 'w') as configfile:
-            config.write(configfile)
-    else:
-        print(f"File already exists at {CONFIGPATH}")
-        print("Do you want to overwrite it?")
-        overwrite = input("y/n:")
-        if overwrite == "y":
-            with open(CONFIGPATH, 'w') as configfile:
-                config.write(configfile)
-        else:
-            print("Aborting... No default config generated.")
+    config.optionxform = str  # type: ignore[attr-defined]
+    config["DEFAULT"] = DEFAULT_CONFIG_VALUES.copy()
+
+    if config_loc.exists() and not force:
+        return config
+
+    with config_loc.open('w') as configfile:
+        config.write(configfile)
+    return config
 
 def fetch_config(config_loc = CONFIGPATH):
     """
@@ -53,16 +57,29 @@ def fetch_config(config_loc = CONFIGPATH):
     """
     # Read config_loc into pathlib.Path for sanity
     config_loc = pathlib.Path(config_loc)
+    if not config_loc.exists():
+        gen_default_config(config_loc)
     # Read config
     config = configparser.ConfigParser()
-    config.optionxform = str
-    config.read(config_loc)
+    config.optionxform = str  # type: ignore[attr-defined]
+    config.read(str(config_loc))
+
+    defaults = config["DEFAULT"]
+    updated = False
+    for key, value in DEFAULT_CONFIG_VALUES.items():
+        if key not in defaults:
+            defaults[key] = value
+            updated = True
+
+    if updated:
+        with config_loc.open('w') as configfile:
+            config.write(configfile)
     return config
 
 def write_to_config(param_str, value, config_loc = CONFIGPATH):
     # Get the config file
     config = fetch_config(CONFIGPATH)
-    config.optionxform = str
+    config.optionxform = str  # type: ignore[attr-defined]
     # Get contents DEFAULT section
     current_content = list(config["DEFAULT"].keys())
     if param_str not in current_content:
@@ -135,7 +152,7 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"], gen_data = False):
                 print("try")
                 temperature = dht_device.temperature
                 humidity = dht_device.humidity
-            except RuntimeError as e:
+            except RuntimeError:
                 print("BAD READ TRYING AGAIN")
                 continue
             else:
@@ -153,16 +170,22 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"], gen_data = False):
 latest_output_dict = None
 def _fetchlog(filename=FILENAME):
     """
-    Fetches data from .h5 file and returns it as a dictionary
+    Fetches data from .h5 file and returns it as a dictionary.
+    Time is returned as milliseconds since epoch (float) for Bokeh compatibility.
     """
     with file_lock:
-        with h5py.File(filename, "r", locking = False) as f: 
+        with h5py.File(filename, "r", locking = False) as f:
             temps = np.array(f["temperature"], dtype = "float32")
             hums  = np.array(f["humidity"], dtype = "float32")
-            times = np.array(f["time"], dtype = np.datetime64)
+            times_dt64 = np.array(f["time"], dtype = np.datetime64)
+
+    # Convert datetime64 to milliseconds since epoch for Bokeh compatibility
+    # This prevents type mixing issues between datetime64 and float
+    times_ms = times_dt64.astype('datetime64[ms]').astype(np.int64).astype(np.float64)
+
     # Assign to global variable only after processing
     global latest_output_dict
-    latest_output_dict = {"time": times, "temperature": temps, "humidity": hums}
+    latest_output_dict = {"time": times_ms, "temperature": temps, "humidity": hums}
     return None
 
 def fetch_log_data():

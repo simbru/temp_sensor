@@ -2,10 +2,12 @@
 import subprocess
 import atexit
 import psutil
-# Local imports
-import io_funcs
 import os
 import time
+
+# Local imports
+from . import io_funcs
+
 os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 
 PID_FILE = 'tempsens_running.pid'
@@ -39,7 +41,7 @@ def tempsensor_subprocess():
         except (OSError, ValueError):
             print("Invalid PID or no process found.")
     # Start the temperature sensor
-    process = subprocess.Popen(["python", "tempsensor.py"])
+    process = subprocess.Popen(["python", "-m", "tempsens.sensor"])
     with open(PID_FILE, 'w') as f:
         f.write(str(process.pid))
     print("SUBPROCESS: Spinning up tempsensor.")
