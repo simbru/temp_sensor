@@ -19,7 +19,8 @@ except (ModuleNotFoundError, ImportError):
     sensor_found = False
 
 #CONFIGPATH = r"/home/weatherstation/.config.ini"
-CONFIGPATH = "config.ini" # need to get from Raspi and copy to somewhere in repo
+# Allow override via environment variable for running multiple test instances
+CONFIGPATH = os.environ.get('TEMPSENS_CONFIG', "config.ini")
 
 DEFAULT_CONFIG_VALUES = {
     "loginterval_s": "1",

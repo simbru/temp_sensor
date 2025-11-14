@@ -221,7 +221,7 @@ HUM_Y_START, HUM_Y_END = _compute_window_bounds(initial_hum_center, hum_window_s
 
 # Time window settings (in minutes)
 current_window = {
-    "minutes": 60,
+    "minutes": 10,
     "force_update": True,
     "auto_range": True,
     "last_set_start": None,
@@ -240,7 +240,7 @@ temp_plot = figure(
     x_axis_type="datetime",
     y_range=Range1d(start=TEMP_Y_START, end=TEMP_Y_END),
     height=400,
-    width=1100,
+    sizing_mode="stretch_width",
     tools="pan,wheel_zoom,box_zoom,reset,save",
     active_drag=None,
     active_scroll=None,
@@ -258,7 +258,7 @@ humidity_plot = figure(
     x_axis_type="datetime",
     y_range=Range1d(start=HUM_Y_START, end=HUM_Y_END),
     height=400,
-    width=1100,
+    sizing_mode="stretch_width",
     tools="pan,wheel_zoom,box_zoom,reset,save",
     active_drag=None,
     active_scroll=None,
@@ -369,7 +369,7 @@ temp_plot.x_range.on_change('start', range_change_callback)
 temp_plot.x_range.on_change('end', range_change_callback)
 
 # UI widgets
-current_readings = Div(text="<h3>Loading...</h3>", width=1100, height=120)
+current_readings = Div(text="<h3>Loading...</h3>", sizing_mode="stretch_width", height=120)
 
 # Sensor selection dropdown
 sensor_names = [cfg["name"] for cfg in sensor_configs]
@@ -381,26 +381,30 @@ sensor_selector = Select(
 )
 
 # Time window buttons
-btn_10min = Button(label="10 min", button_type="default", width=100)
-btn_60min = Button(label="60 min", button_type="success", width=100)
+btn_10min = Button(label="10 min", button_type="success", width=100)
+btn_1h = Button(label="1 hour", button_type="default", width=100)
 btn_3h = Button(label="3 hours", button_type="default", width=100)
 btn_12h = Button(label="12 hours", button_type="default", width=100)
 btn_24h = Button(label="24 hours", button_type="default", width=100)
 btn_1week = Button(label="1 week", button_type="default", width=100)
 btn_all = Button(label="All data", button_type="default", width=100)
 
-time_buttons = [btn_10min, btn_60min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all]
+time_buttons = [btn_10min, btn_1h, btn_3h, btn_12h, btn_24h, btn_1week, btn_all]
 
 # Custom window inputs (days/hours/minutes/seconds)
+# Note: No hard limits - you can enter any value (e.g., 120 minutes, 48 hours, etc.)
 time_input_state = {"updating": False}
-window_days = Spinner(title="Days", low=0, high=365, step=1, value=0, width=90)
-window_hours = Spinner(title="Hours", low=0, high=23, step=1, value=1, width=90)
-window_minutes = Spinner(title="Minutes", low=0, high=59, step=1, value=0, width=90)
-window_seconds = Spinner(title="Seconds", low=0, high=59, step=1, value=0, width=90)
+window_days = Spinner(title="Days", low=0, step=1, value=0, width=90)
+window_hours = Spinner(title="Hours", low=0, step=1, value=0, width=90)
+window_minutes = Spinner(title="Minutes", low=0, step=1, value=10, width=90)
+window_seconds = Spinner(title="Seconds", low=0, step=1, value=0, width=90)
 
 ma_spinner = Spinner(title="Moving average window (samples)", low=1, high=500, step=1,
                      value=DEFAULT_MA_WINDOW, width=180)
 show_raw_toggle = Toggle(label="Raw data: ON", button_type="success", active=True, width=140)
+
+# CSV download button
+btn_download_csv = Button(label="📥 Download CSV", button_type="success", width=230)
 
 # Window width spinners
 temp_window_spinner = Spinner(title="Temperature window (°C)", low=MIN_TEMP_WINDOW,
@@ -416,6 +420,83 @@ window_control_state = {
     "temp_syncing": False,
     "hum_syncing": False,
 }
+
+
+def build_download_callback():
+    """Create CustomJS callback for CSV download with sensor name and timestamp."""
+    return CustomJS(args=dict(source=source, sensor_selector=sensor_selector), code="""
+        // Sanitize sensor name for filename
+        function sanitizeFilename(name) {
+            var sanitized = name.replace(/[^\\w\\-]/g, '_');
+            sanitized = sanitized.replace(/_+/g, '_');
+            sanitized = sanitized.replace(/^_+|_+$/g, '');
+            return sanitized || 'Unnamed_Sensor';
+        }
+
+        var columns = ['time', 'temperature', 'humidity'];
+        var data = source.data;
+        if (!data || !data.time || !data.time.length) {
+            return;
+        }
+
+        var sensorName = sensor_selector.value || 'Unnamed Sensor';
+        var lines = [['sensor_name'].concat(columns).join(',')];
+        var nrows = data.time.length;
+
+        for (var i = 0; i < nrows; i++) {
+            var row = [sensorName];
+
+            // Handle time column
+            var timeVal = data.time[i];
+            var dt = new Date(timeVal);
+            if (!isNaN(dt.getTime())) {
+                var y = dt.getFullYear();
+                var m = ('0' + (dt.getMonth() + 1)).slice(-2);
+                var d = ('0' + dt.getDate()).slice(-2);
+                var hh = ('0' + dt.getHours()).slice(-2);
+                var mm = ('0' + dt.getMinutes()).slice(-2);
+                var ss = ('0' + dt.getSeconds()).slice(-2);
+                row.push(y + '-' + m + '-' + d + ' ' + hh + ':' + mm + ':' + ss);
+            } else {
+                row.push('');
+            }
+
+            // Handle temperature
+            var temp = data.temperature[i];
+            if (typeof temp === 'number') {
+                row.push(temp.toFixed(2));
+            } else if (temp == null) {
+                row.push('');
+            } else {
+                row.push(String(temp));
+            }
+
+            // Handle humidity
+            var hum = data.humidity[i];
+            if (typeof hum === 'number') {
+                row.push(hum.toFixed(2));
+            } else if (hum == null) {
+                row.push('');
+            } else {
+                row.push(String(hum));
+            }
+
+            lines.push(row.join(','));
+        }
+
+        var csv = lines.join(String.fromCharCode(10));
+        var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        var timestamp = new Date().toISOString().replace(/[:.-]/g, '').slice(0, 15);
+        var sanitizedSensorName = sanitizeFilename(sensorName);
+        var filename = sanitizedSensorName + '_' + timestamp + '.csv';
+        var link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+    """)
 
 
 def set_button_active(active_btn):
@@ -568,7 +649,7 @@ for spinner in (window_days, window_hours, window_minutes, window_seconds):
     spinner.on_change("value", on_custom_time_change)
 
 btn_10min.on_click(lambda: (set_button_active(btn_10min), update_time_window(10)))
-btn_60min.on_click(lambda: (set_button_active(btn_60min), update_time_window(60)))
+btn_1h.on_click(lambda: (set_button_active(btn_1h), update_time_window(60)))
 btn_3h.on_click(lambda: (set_button_active(btn_3h), update_time_window(180)))
 btn_12h.on_click(lambda: (set_button_active(btn_12h), update_time_window(720)))
 btn_24h.on_click(lambda: (set_button_active(btn_24h), update_time_window(1440)))
@@ -577,6 +658,9 @@ btn_all.on_click(lambda: (set_button_active(btn_all), update_time_window(None)))
 
 temp_window_spinner.on_change("value", _on_temp_window_change)
 hum_window_spinner.on_change("value", _on_hum_window_change)
+
+# Wire up CSV download callback
+btn_download_csv.js_on_event("button_click", build_download_callback())
 
 
 def on_ma_change(attr, old, new):
@@ -731,11 +815,11 @@ curdoc().add_periodic_callback(update_data, UPDATE_INTERVAL)
 
 # Layout
 sensor_selection_row = row(sensor_selector, sizing_mode="scale_width")
-time_button_row = row(btn_10min, btn_60min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all,
+time_button_row = row(btn_10min, btn_1h, btn_3h, btn_12h, btn_24h, btn_1week, btn_all,
                       sizing_mode="scale_width")
 custom_time_row = row(window_days, window_hours, window_minutes, window_seconds,
                       sizing_mode="scale_width")
-ma_controls_row = row(ma_spinner, show_raw_toggle, sizing_mode="scale_width")
+ma_controls_row = row(ma_spinner, show_raw_toggle, btn_download_csv, sizing_mode="scale_width")
 display_range_row = row(
     temp_window_spinner,
     temp_window_range_display,
@@ -745,22 +829,23 @@ display_range_row = row(
 )
 
 layout = column(
-    Div(text="<h1>🌡️ Multi-Sensor Temperature Monitor</h1>", width=1100, height=60),
-    Div(text="<h3>Sensor Selection</h3>", width=1100, height=30),
+    Div(text="<h1>🌡️ Multi-Sensor Temperature Monitor</h1>", sizing_mode="stretch_width", height=60),
+    Div(text="<h3>Sensor Selection</h3>", sizing_mode="stretch_width", height=30),
     sensor_selection_row,
-    Div(text="<br>", width=1100, height=10),
+    Div(text="<br>", sizing_mode="stretch_width", height=10),
     current_readings,
-    Div(text="<h4>Time Window:</h4>", width=1100, height=30),
+    Div(text="<h4>Time Window:</h4>", sizing_mode="stretch_width", height=30),
     time_button_row,
-    Div(text="<h4>Custom Window:</h4>", width=1100, height=30),
+    Div(text="<h4>Custom Window:</h4>", sizing_mode="stretch_width", height=30),
     custom_time_row,
-    Div(text="<h4>Moving Average:</h4>", width=1100, height=30),
+    Div(text="<h4>Moving Average:</h4>", sizing_mode="stretch_width", height=30),
     ma_controls_row,
-    Div(text="<h4>Display Range:</h4>", width=1100, height=30),
+    Div(text="<h4>Display Range:</h4>", sizing_mode="stretch_width", height=30),
     display_range_row,
-    Div(text="<br>", width=1100, height=10),
+    Div(text="<br>", sizing_mode="stretch_width", height=10),
     temp_plot,
     humidity_plot,
+    sizing_mode="scale_width"
 )
 
 curdoc().add_root(layout)

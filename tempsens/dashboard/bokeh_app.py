@@ -269,7 +269,7 @@ HUM_Y_START, HUM_Y_END = _compute_window_bounds(initial_hum_center, hum_window_s
 
 # Time window settings (in minutes)
 current_window = {
-    "minutes": 60,
+    "minutes": 10,
     "force_update": True,
     "auto_range": True,
     "last_set_start": None,  # Track the last programmatic range start (ms)
@@ -289,7 +289,7 @@ temp_plot = figure(
     x_axis_type="datetime",
     y_range=Range1d(start=TEMP_Y_START, end=TEMP_Y_END),
     height=400,
-    width=1100,
+    sizing_mode="stretch_width",
     tools="pan,wheel_zoom,box_zoom,reset,save",
     active_drag=None,
     active_scroll=None,
@@ -308,7 +308,7 @@ humidity_plot = figure(
     x_axis_type="datetime",
     y_range=Range1d(start=HUM_Y_START, end=HUM_Y_END),
     height=400,
-    width=1100,
+    sizing_mode="stretch_width",
     tools="pan,wheel_zoom,box_zoom,reset,save",
     active_drag=None,
     active_scroll=None,
@@ -508,7 +508,7 @@ humidity_plot.y_range.on_change('start', _handle_hum_y_change)
 humidity_plot.y_range.on_change('end', _handle_hum_y_change)
 
 # Current readings display
-current_readings = Div(text="<h3>Loading...</h3>", width=1100, height=120)
+current_readings = Div(text="<h3>Loading...</h3>", sizing_mode="stretch_width", height=120)
 
 window_control_state = {
     "temp_syncing": False,
@@ -525,22 +525,23 @@ temp_window_range_display = Div(text="", width=200, height=40)
 hum_window_range_display = Div(text="", width=200, height=40)
 
 # Time window buttons
-btn_10min = Button(label="10 min", button_type="default", width=100)
-btn_60min = Button(label="60 min", button_type="success", width=100)
+btn_10min = Button(label="10 min", button_type="success", width=100)
+btn_1h = Button(label="1 hour", button_type="default", width=100)
 btn_3h = Button(label="3 hours", button_type="default", width=100)
 btn_12h = Button(label="12 hours", button_type="default", width=100)
 btn_24h = Button(label="24 hours", button_type="default", width=100)
 btn_1week = Button(label="1 week", button_type="default", width=100)
 btn_all = Button(label="All data", button_type="default", width=100)
 
-time_buttons = [btn_10min, btn_60min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all]
+time_buttons = [btn_10min, btn_1h, btn_3h, btn_12h, btn_24h, btn_1week, btn_all]
 
 # Custom window inputs (days/hours/minutes/seconds)
+# Note: No hard limits - you can enter any value (e.g., 120 minutes, 48 hours, etc.)
 time_input_state = {"updating": False}
-window_days = Spinner(title="Days", low=0, high=365, step=1, value=0, width=90)
-window_hours = Spinner(title="Hours", low=0, high=23, step=1, value=1, width=90)
-window_minutes = Spinner(title="Minutes", low=0, high=59, step=1, value=0, width=90)
-window_seconds = Spinner(title="Seconds", low=0, high=59, step=1, value=0, width=90)
+window_days = Spinner(title="Days", low=0, step=1, value=0, width=90)
+window_hours = Spinner(title="Hours", low=0, step=1, value=0, width=90)
+window_minutes = Spinner(title="Minutes", low=0, step=1, value=10, width=90)
+window_seconds = Spinner(title="Seconds", low=0, step=1, value=0, width=90)
 
 
 def format_minutes(minutes):
@@ -658,7 +659,7 @@ for spinner in (window_days, window_hours, window_minutes, window_seconds):
 set_time_inputs_from_minutes(current_window["minutes"])
 
 btn_10min.on_click(lambda: (set_button_active(btn_10min), update_time_window(10)))
-btn_60min.on_click(lambda: (set_button_active(btn_60min), update_time_window(60)))
+btn_1h.on_click(lambda: (set_button_active(btn_1h), update_time_window(60)))
 btn_3h.on_click(lambda: (set_button_active(btn_3h), update_time_window(180)))
 btn_12h.on_click(lambda: (set_button_active(btn_12h), update_time_window(720)))
 btn_24h.on_click(lambda: (set_button_active(btn_24h), update_time_window(1440)))
@@ -980,7 +981,7 @@ update_data()
 curdoc().add_periodic_callback(update_data, UPDATE_INTERVAL)
 
 # Layout
-time_button_row = row(btn_10min, btn_60min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all,
+time_button_row = row(btn_10min, btn_1h, btn_3h, btn_12h, btn_24h, btn_1week, btn_all,
                       sizing_mode="scale_width")
 
 download_button_row = row(btn_download_temp, btn_download_hum, btn_download_both,
@@ -1001,25 +1002,26 @@ display_range_row = row(
 device_info_row = row(device_name_input, device_ip_display, sizing_mode="scale_width")
 
 layout = column(
-    Div(text="<h3>Device Information</h3>", width=1100, height=40),
+    Div(text="<h3>Device Information</h3>", sizing_mode="stretch_width", height=40),
     device_info_row,
-    Div(text="<br>", width=1100, height=10),  # Spacer
-    Div(text="<h1>🌡️ Temperature & Humidity Monitor</h1>", width=1100, height=60),
+    Div(text="<br>", sizing_mode="stretch_width", height=10),  # Spacer
+    Div(text="<h1>🌡️ Temperature & Humidity Monitor</h1>", sizing_mode="stretch_width", height=60),
     current_readings,
-    Div(text="<h4>Time Window:</h4>", width=1100, height=30),
+    Div(text="<h4>Time Window:</h4>", sizing_mode="stretch_width", height=30),
     time_button_row,
-    Div(text="<h4>Custom Window:</h4>", width=1100, height=30),
+    Div(text="<h4>Custom Window:</h4>", sizing_mode="stretch_width", height=30),
     custom_time_row,
-    Div(text="<h4>Moving Average:</h4>", width=1100, height=30),
+    Div(text="<h4>Moving Average:</h4>", sizing_mode="stretch_width", height=30),
     ma_controls_row,
-    Div(text="<h4>Display Range:</h4>", width=1100, height=30),
+    Div(text="<h4>Display Range:</h4>", sizing_mode="stretch_width", height=30),
     display_range_row,
-    Div(text="<br>", width=1100, height=10),  # Spacer
+    Div(text="<br>", sizing_mode="stretch_width", height=10),  # Spacer
     temp_plot,
     humidity_plot,
-    Div(text="<br>", width=1100, height=10),
-    Div(text="<h4>Download Data:</h4>", width=1100, height=30),
-    download_button_row
+    Div(text="<br>", sizing_mode="stretch_width", height=10),
+    Div(text="<h4>Download Data:</h4>", sizing_mode="stretch_width", height=30),
+    download_button_row,
+    sizing_mode="scale_width"
 )
 
 curdoc().add_root(layout)
