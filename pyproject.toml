@@ -23,11 +23,8 @@ dependencies = [
     "requests>=2.31.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 pi = [
     "adafruit_dht; sys_platform == 'linux'",
-]
-server = [
-    # Server only needs core dependencies
 ]
 
