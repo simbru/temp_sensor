@@ -25,7 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 pi = [
-    "adafruit_dht",
+    "adafruit_dht; sys_platform == 'linux'",
 ]
 server = [
     # Server only needs core dependencies
