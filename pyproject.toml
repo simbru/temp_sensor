@@ -13,22 +13,29 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    # Minimal core dependencies shared by both client and server
     "numpy>=1.26.4",
-    "bokeh",
-    "h5py>=3.10",
-    "psutil",
     "pandas",
-    "fastapi>=0.104.0",
-    "uvicorn[standard]>=0.24.0",
-    "requests>=2.31.0",
+    "psutil",
 ]
 
 [dependency-groups]
-pi = [
+client = [
+    # Raspberry Pi client dependencies
+    "h5py>=3.10",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
     "adafruit_dht; sys_platform == 'linux'",
+]
+server = [
+    # Server dashboard dependencies
+    "bokeh",
+    "requests>=2.31.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
 ]
 
 [tool.uv]
-# Exclude pi group by default (opt-in on Raspberry Pi with --group pi)
+# No groups installed by default - must explicitly choose client or server
 default-groups = []
 
