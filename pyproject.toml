@@ -28,3 +28,7 @@ pi = [
     "adafruit_dht; sys_platform == 'linux'",
 ]
 
+[tool.uv]
+# Exclude pi group by default (opt-in on Raspberry Pi with --group pi)
+default-groups = []
+
