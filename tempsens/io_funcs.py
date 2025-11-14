@@ -19,7 +19,8 @@ except (ModuleNotFoundError, ImportError):
     sensor_found = False
 
 #CONFIGPATH = r"/home/weatherstation/.config.ini"
-CONFIGPATH = "config.ini" # need to get from Raspi and copy to somewhere in repo
+# Allow override via environment variable for running multiple test instances
+CONFIGPATH = os.environ.get('TEMPSENS_CONFIG', "config.ini")
 
 DEFAULT_CONFIG_VALUES = {
     "loginterval_s": "1",
@@ -36,6 +37,8 @@ DEFAULT_CONFIG_VALUES = {
     "humidity_window_pct": "50",
     "humidity_range_update_s": "10",
     "LastRead": "None",
+    "device_name": "Temperature Sensor",
+    "api_port": "5000",
 }
 
 file_lock = threading.Lock()
@@ -200,6 +203,59 @@ def fetch_log_data():
     # Return the latest data
     global latest_output_dict
     return latest_output_dict
+
+def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limit=None):
+    """
+    Fetches data from .h5 file with optional time range filtering or limit.
+    Returns data as a dictionary with ISO-formatted time strings (for API compatibility).
+
+    Args:
+        filename: Path to HDF5 file
+        start_time: Start timestamp as string (ISO format: 'YYYY-MM-DD HH:MM:SS')
+        end_time: End timestamp as string (ISO format: 'YYYY-MM-DD HH:MM:SS')
+        limit: If specified, return only the last N readings (ignores time filters)
+
+    Returns:
+        Dictionary with keys 'time' (ISO strings), 'temperature', 'humidity'
+    """
+    with file_lock:
+        with h5py.File(filename, "r", locking=False) as f:
+            temps = np.array(f["temperature"], dtype="float32")
+            hums = np.array(f["humidity"], dtype="float32")
+            times_str = np.array(f["time"], dtype=str)
+
+    # Convert string times to datetime64 for filtering
+    times_dt64 = np.array(times_str, dtype=np.datetime64)
+
+    # Apply limit if specified (get last N readings)
+    if limit is not None:
+        if limit < len(times_dt64):
+            temps = temps[-limit:]
+            hums = hums[-limit:]
+            times_str = times_str[-limit:]
+            times_dt64 = times_dt64[-limit:]
+
+    # Apply time range filtering if specified (and no limit)
+    elif start_time is not None or end_time is not None:
+        mask = np.ones(len(times_dt64), dtype=bool)
+
+        if start_time is not None:
+            start_dt64 = np.datetime64(start_time)
+            mask &= times_dt64 >= start_dt64
+
+        if end_time is not None:
+            end_dt64 = np.datetime64(end_time)
+            mask &= times_dt64 <= end_dt64
+
+        temps = temps[mask]
+        hums = hums[mask]
+        times_str = times_str[mask]
+
+    return {
+        "time": times_str.tolist(),
+        "temperature": temps.tolist(),
+        "humidity": hums.tolist()
+    }
 
 def cleanup(PID_FILE):
     if os.path.isfile(PID_FILE):

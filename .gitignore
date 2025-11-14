@@ -1,4 +1,19 @@
+# HDF5 data files (client-side)
 templog.h5
+templog_test*.h5
+
+# SQLite database (server-side)
+sensor_data.db
+*.db
+
+# Process ID files
 tempsens_running.pid
-**/__pycache__/ 
+
+# Python cache
+**/__pycache__/
+
+# User settings
 settings.ini
+
+# Test config files (optional - uncomment if you don't want to track them)
+# config_test*.ini
