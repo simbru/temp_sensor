@@ -2,8 +2,10 @@
 Bokeh Server dashboard for live temperature/humidity monitoring.
 Run with: bokeh serve --show tempsens/dashboard/bokeh_app.py
 """
+import configparser
 import pathlib
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -23,6 +25,21 @@ from tempsens import io_funcs, sensor as tempsensor
 # Constants
 TOLERANCE_MS = 2000  # 2 seconds tolerance for range comparison
 DEFAULT_MA_WINDOW = 10
+MIN_TEMP_WINDOW = 1.0
+MIN_HUM_WINDOW = 1.0
+MAX_HUM_WINDOW = 100.0
+DEFAULT_TEMP_CENTER = 20.0
+DEFAULT_HUM_CENTER = 50.0
+TEMP_CENTER_DEADBAND = 0.25
+HUM_CENTER_DEADBAND = 2.0
+
+SETTINGS_FILE = _project_root / "settings.ini"
+SETTINGS_SECTION = "DISPLAY"
+SETTINGS_DEFAULTS = {
+    "temperature_window_c": "10",
+    "humidity_window_pct": "50",
+}
+
 
 # Configuration
 CONFIG = io_funcs.fetch_config()
@@ -34,11 +51,6 @@ if SAMPLE_INTERVAL_SECONDS:
 else:
     SAMPLE_RATE_TEXT = "dt≈0s"
 
-status_state = {
-    "sample_text": SAMPLE_RATE_TEXT,
-    "ma_text": "",
-}
-
 
 def _read_config_float(key: str, fallback: float) -> float:
     try:
@@ -48,23 +60,106 @@ def _read_config_float(key: str, fallback: float) -> float:
         return fallback
 
 
-def _compute_axis_bounds(min_value: float, max_value: float, margin_pct: float) -> tuple[float, float]:
-    if max_value <= min_value:
-        max_value = min_value + 1.0
-    span = max_value - min_value
-    pad = span * max(margin_pct, 0.0)
-    return min_value - pad, max_value + pad
+TEMP_RANGE_COOLDOWN = max(_read_config_float("temperature_range_update_s", 10.0), 0.0)
+HUM_RANGE_COOLDOWN = max(_read_config_float("humidity_range_update_s", 10.0), 0.0)
 
 
-TEMP_MIN = _read_config_float("temperature_min_c", 0.0)
-TEMP_MAX = _read_config_float("temperature_max_c", 40.0)
-TEMP_MARGIN = _read_config_float("temperature_margin_pct", 0.05)
-TEMP_Y_START, TEMP_Y_END = _compute_axis_bounds(TEMP_MIN, TEMP_MAX, TEMP_MARGIN)
+def _coerce_window(value: object, fallback: float, minimum: float, maximum: float | None = None) -> float:
+    try:
+        window = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        window = fallback
+    if window < minimum:
+        window = minimum
+    if maximum is not None and window > maximum:
+        window = maximum
+    return window
 
-HUM_MIN = _read_config_float("humidity_min_pct", 0.0)
-HUM_MAX = _read_config_float("humidity_max_pct", 100.0)
-HUM_MARGIN = _read_config_float("humidity_margin_pct", 0.05)
-HUM_Y_START, HUM_Y_END = _compute_axis_bounds(HUM_MIN, HUM_MAX, HUM_MARGIN)
+
+def _load_settings() -> configparser.ConfigParser:
+    cfg = configparser.ConfigParser()
+    cfg.optionxform = str  # type: ignore[assignment]
+    if SETTINGS_FILE.exists():
+        cfg.read(SETTINGS_FILE)
+    if SETTINGS_SECTION not in cfg:
+        cfg[SETTINGS_SECTION] = {}
+    section = cfg[SETTINGS_SECTION]
+    changed = False
+    for key, default in SETTINGS_DEFAULTS.items():
+        if key not in section:
+            section[key] = default
+            changed = True
+    if changed:
+        with SETTINGS_FILE.open("w") as fh:
+            cfg.write(fh)
+    return cfg
+
+
+def _persist_settings(cfg: configparser.ConfigParser) -> None:
+    with SETTINGS_FILE.open("w") as fh:
+        cfg.write(fh)
+
+
+TEMP_WINDOW_DEFAULT = _read_config_float("temperature_window_c", 10.0)
+HUM_WINDOW_DEFAULT = _read_config_float("humidity_window_pct", 50.0)
+
+settings_config = _load_settings()
+settings_section = settings_config[SETTINGS_SECTION]
+temp_window_initial = _coerce_window(
+    settings_section.get("temperature_window_c", str(TEMP_WINDOW_DEFAULT)),
+    TEMP_WINDOW_DEFAULT,
+    MIN_TEMP_WINDOW,
+)
+hum_window_initial = _coerce_window(
+    settings_section.get("humidity_window_pct", str(HUM_WINDOW_DEFAULT)),
+    HUM_WINDOW_DEFAULT,
+    MIN_HUM_WINDOW,
+    MAX_HUM_WINDOW,
+)
+
+# Normalise stored settings so they match clamped values
+normalised = False
+if settings_section.get("temperature_window_c") != str(temp_window_initial):
+    settings_section["temperature_window_c"] = str(temp_window_initial)
+    normalised = True
+if settings_section.get("humidity_window_pct") != str(hum_window_initial):
+    settings_section["humidity_window_pct"] = str(hum_window_initial)
+    normalised = True
+if normalised:
+    _persist_settings(settings_config)
+
+status_state = {
+    "sample_text": SAMPLE_RATE_TEXT,
+    "ma_text": "",
+}
+
+
+def _compute_window_bounds(center: float, width: float, *, minimum: float | None = None,
+                           maximum: float | None = None) -> tuple[float, float]:
+    width = max(width, 0.0)
+    if width == 0.0:
+        return center, center
+
+    half = width / 2.0
+    start = center - half
+    end = center + half
+
+    if minimum is not None and maximum is not None and width >= (maximum - minimum):
+        return minimum, maximum
+
+    if minimum is not None and start < minimum:
+        start = minimum
+        end = start + width
+    if maximum is not None and end > maximum:
+        end = maximum
+        start = end - width
+
+    if minimum is not None and start < minimum:
+        start = minimum
+    if maximum is not None and end > maximum:
+        end = maximum
+
+    return start, end
 
 # Start the temperature sensor if not running
 temp_sensor_process = tempsensor.tempsensor_subprocess()
@@ -99,6 +194,48 @@ def prepare_source_data(raw_data, window_size):
 initial_data_raw = io_funcs.fetch_log_data()
 initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW)
 source = ColumnDataSource(data=initial_data)
+
+initial_temp_ma = float(initial_data["temp_ma"][-1]) if len(initial_data["temp_ma"]) else None
+if initial_temp_ma is not None and np.isnan(initial_temp_ma):
+    initial_temp_ma = None
+initial_hum_ma = float(initial_data["hum_ma"][-1]) if len(initial_data["hum_ma"]) else None
+if initial_hum_ma is not None and np.isnan(initial_hum_ma):
+    initial_hum_ma = None
+
+latest_values: dict[str, float | None] = {
+    "temp": initial_temp_ma,
+    "hum": initial_hum_ma,
+}
+
+initial_temp_center = latest_values["temp"] if latest_values["temp"] is not None else DEFAULT_TEMP_CENTER
+initial_hum_center = latest_values["hum"] if latest_values["hum"] is not None else DEFAULT_HUM_CENTER
+
+now_monotonic = time.monotonic()
+
+temp_window_state = {
+    "value": temp_window_initial,
+    "auto": True,
+    "pending": 0,
+    "last_start": None,
+    "last_end": None,
+    "manual_center": None,
+    "last_auto_center": initial_temp_center,
+    "last_auto_update": now_monotonic - TEMP_RANGE_COOLDOWN,
+}
+hum_window_state = {
+    "value": hum_window_initial,
+    "auto": True,
+    "pending": 0,
+    "last_start": None,
+    "last_end": None,
+    "manual_center": None,
+    "last_auto_center": initial_hum_center,
+    "last_auto_update": now_monotonic - HUM_RANGE_COOLDOWN,
+}
+
+TEMP_Y_START, TEMP_Y_END = _compute_window_bounds(initial_temp_center, temp_window_state["value"])
+HUM_Y_START, HUM_Y_END = _compute_window_bounds(initial_hum_center, hum_window_state["value"],
+                                                minimum=0.0, maximum=100.0)
 
 # Time window settings (in minutes)
 current_window = {
@@ -152,6 +289,140 @@ hum_raw_renderer = humidity_plot.line('time', 'humidity', source=source, line_wi
 hum_ma_renderer = humidity_plot.line('time', 'hum_ma', source=source, line_width=3,
                                      color='navy', alpha=0.9)
 
+
+def _set_temp_y_range(center: float | None, window: float, *, record_auto: bool = False) -> None:
+    if center is None:
+        center = DEFAULT_TEMP_CENTER
+    start, end = _compute_window_bounds(center, window)
+    temp_window_state["pending"] = 2
+    temp_window_state["last_start"] = start
+    temp_window_state["last_end"] = end
+    temp_window_state["manual_center"] = None
+    temp_plot.y_range.start = start
+    temp_plot.y_range.end = end
+    if record_auto:
+        temp_window_state["last_auto_center"] = (start + end) / 2.0
+        temp_window_state["last_auto_update"] = time.monotonic()
+
+
+def _set_hum_y_range(center: float | None, window: float, *, record_auto: bool = False) -> None:
+    if center is None:
+        center = DEFAULT_HUM_CENTER
+    start, end = _compute_window_bounds(center, window, minimum=0.0, maximum=100.0)
+    hum_window_state["pending"] = 2
+    hum_window_state["last_start"] = start
+    hum_window_state["last_end"] = end
+    hum_window_state["manual_center"] = None
+    humidity_plot.y_range.start = start
+    humidity_plot.y_range.end = end
+    if record_auto:
+        hum_window_state["last_auto_center"] = (start + end) / 2.0
+        hum_window_state["last_auto_update"] = time.monotonic()
+
+
+_set_temp_y_range(initial_temp_center, temp_window_state["value"], record_auto=True)
+_set_hum_y_range(initial_hum_center, hum_window_state["value"], record_auto=True)
+temp_window_state["last_auto_update"] -= TEMP_RANGE_COOLDOWN
+hum_window_state["last_auto_update"] -= HUM_RANGE_COOLDOWN
+
+
+def _should_auto_update_temp(center: float | None) -> bool:
+    if center is None:
+        return False
+    last_center = temp_window_state.get("last_auto_center")
+    if last_center is not None and abs(center - last_center) < TEMP_CENTER_DEADBAND:
+        return False
+    now = time.monotonic()
+    last_ts = temp_window_state.get("last_auto_update", 0.0)
+    if now - last_ts < TEMP_RANGE_COOLDOWN:
+        return False
+    return True
+
+
+def _should_auto_update_hum(center: float | None) -> bool:
+    if center is None:
+        return False
+    last_center = hum_window_state.get("last_auto_center")
+    if last_center is not None and abs(center - last_center) < HUM_CENTER_DEADBAND:
+        return False
+    now = time.monotonic()
+    last_ts = hum_window_state.get("last_auto_update", 0.0)
+    if now - last_ts < HUM_RANGE_COOLDOWN:
+        return False
+    return True
+
+
+def _handle_temp_y_change(attr, old, new):
+    if temp_window_state["pending"] > 0:
+        temp_window_state["pending"] = max(temp_window_state["pending"] - 1, 0)
+        temp_window_state[f"last_{attr}"] = new
+        return
+
+    temp_window_state[f"last_{attr}"] = new
+    if attr == "start":
+        return
+
+    start = temp_plot.y_range.start
+    end = temp_plot.y_range.end
+    if start is None or end is None:
+        return
+
+    span = end - start
+    if span <= 0:
+        return
+
+    width = max(round(span, 2), MIN_TEMP_WINDOW)
+    temp_window_state["value"] = width
+    temp_window_state["auto"] = False
+    temp_window_state["manual_center"] = (start + end) / 2.0
+    _persist_window_settings()
+
+    if not window_control_state["temp_syncing"]:
+        window_control_state["temp_syncing"] = True
+        try:
+            temp_window_spinner.value = width
+        finally:
+            window_control_state["temp_syncing"] = False
+
+    _update_window_displays()
+
+
+def _handle_hum_y_change(attr, old, new):
+    if hum_window_state["pending"] > 0:
+        hum_window_state["pending"] = max(hum_window_state["pending"] - 1, 0)
+        hum_window_state[f"last_{attr}"] = new
+        return
+
+    hum_window_state[f"last_{attr}"] = new
+    if attr == "start":
+        return
+
+    start = humidity_plot.y_range.start
+    end = humidity_plot.y_range.end
+    if start is None or end is None:
+        return
+
+    span = end - start
+    if span <= 0:
+        return
+
+    width = max(round(span, 0), MIN_HUM_WINDOW)
+    width = min(width, MAX_HUM_WINDOW)
+
+    hum_window_state["value"] = width
+    hum_window_state["auto"] = False
+    hum_window_state["manual_center"] = (start + end) / 2.0
+    _persist_window_settings()
+
+    if not window_control_state["hum_syncing"]:
+        window_control_state["hum_syncing"] = True
+        try:
+            hum_window_spinner.value = width
+        finally:
+            window_control_state["hum_syncing"] = False
+
+    _update_window_displays()
+
 # Apply sliding window updates without triggering the range-change callback
 def set_programmatic_range(start_ms, end_ms):
     """Set the x-range while suppressing user-interaction detection."""
@@ -201,9 +472,27 @@ def range_change_callback(attr, old, new):
 # Add event listeners to detect user interaction with x-axis
 temp_plot.x_range.on_change('start', range_change_callback)
 temp_plot.x_range.on_change('end', range_change_callback)
+temp_plot.y_range.on_change('start', _handle_temp_y_change)
+temp_plot.y_range.on_change('end', _handle_temp_y_change)
+humidity_plot.y_range.on_change('start', _handle_hum_y_change)
+humidity_plot.y_range.on_change('end', _handle_hum_y_change)
 
 # Current readings display
 current_readings = Div(text="<h3>Loading...</h3>", width=1100, height=120)
+
+window_control_state = {
+    "temp_syncing": False,
+    "hum_syncing": False,
+}
+
+temp_window_spinner = Spinner(title="Temperature window (°C)", low=MIN_TEMP_WINDOW,
+                              high=None, step=0.5,
+                              value=temp_window_state["value"], width=180)
+hum_window_spinner = Spinner(title="Humidity window (%)", low=MIN_HUM_WINDOW,
+                             high=MAX_HUM_WINDOW, step=1,
+                             value=hum_window_state["value"], width=180)
+temp_window_range_display = Div(text="", width=200, height=40)
+hum_window_range_display = Div(text="", width=200, height=40)
 
 # Time window buttons
 btn_10min = Button(label="10 min", button_type="default", width=100)
@@ -398,7 +687,7 @@ def build_download_callback(columns, prefix):
             lines.push(row.join(','));
         }
 
-    var csv = lines.join('\\n');
+    var csv = lines.join(String.fromCharCode(10));
         var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
         var timestamp = new Date().toISOString().replace(/[:.-]/g, '').slice(0, 15);
         var filename = prefix + '_' + timestamp + '.csv';
@@ -431,6 +720,46 @@ def on_ma_change(attr, old, new):
 ma_spinner.on_change("value", on_ma_change)
 
 
+def _on_temp_window_change(attr, old, new):
+    if window_control_state["temp_syncing"]:
+        return
+    value = _coerce_window(new, temp_window_state["value"], MIN_TEMP_WINDOW)
+    temp_window_state["value"] = value
+    temp_window_state["auto"] = True
+    temp_window_state["manual_center"] = None
+    temp_window_state["pending"] = 2
+    window_control_state["temp_syncing"] = True
+    try:
+        temp_window_spinner.value = value
+    finally:
+        window_control_state["temp_syncing"] = False
+    _persist_window_settings()
+    _set_temp_y_range(latest_values["temp"], value, record_auto=True)
+    _update_window_displays()
+
+
+def _on_hum_window_change(attr, old, new):
+    if window_control_state["hum_syncing"]:
+        return
+    value = _coerce_window(new, hum_window_state["value"], MIN_HUM_WINDOW, MAX_HUM_WINDOW)
+    hum_window_state["value"] = value
+    hum_window_state["auto"] = True
+    hum_window_state["manual_center"] = None
+    hum_window_state["pending"] = 2
+    window_control_state["hum_syncing"] = True
+    try:
+        hum_window_spinner.value = value
+    finally:
+        window_control_state["hum_syncing"] = False
+    _persist_window_settings()
+    _set_hum_y_range(latest_values["hum"], value, record_auto=True)
+    _update_window_displays()
+
+
+temp_window_spinner.on_change("value", _on_temp_window_change)
+hum_window_spinner.on_change("value", _on_hum_window_change)
+
+
 def on_raw_toggle_change(attr, old, new):
     visible = bool(new)
     temp_raw_renderer.visible = visible
@@ -451,6 +780,39 @@ def update_ma_info(window_size):
 
 update_ma_info(DEFAULT_MA_WINDOW)
 
+
+def _update_window_displays():
+    temp_start = temp_plot.y_range.start
+    temp_end = temp_plot.y_range.end
+    hum_start = humidity_plot.y_range.start
+    hum_end = humidity_plot.y_range.end
+
+    if temp_start is None or temp_end is None:
+        temp_html = "<p style='margin:0;font-size:14px;'>Range: —</p>"
+    else:
+        temp_html = (
+            f"<p style='margin:0;font-size:14px;'>Range: {temp_start:.1f}°C – {temp_end:.1f}°C</p>"
+        )
+
+    if hum_start is None or hum_end is None:
+        hum_html = "<p style='margin:0;font-size:14px;'>Range: —</p>"
+    else:
+        hum_html = (
+            f"<p style='margin:0;font-size:14px;'>Range: {hum_start:.0f}% – {hum_end:.0f}%</p>"
+        )
+
+    temp_window_range_display.text = temp_html
+    hum_window_range_display.text = hum_html
+
+
+def _persist_window_settings():
+    settings_section["temperature_window_c"] = f"{temp_window_state['value']:.2f}"
+    settings_section["humidity_window_pct"] = f"{hum_window_state['value']:.2f}"
+    _persist_settings(settings_config)
+
+
+_update_window_displays()
+
 def update_data():
     """Update the data source with new readings."""
     try:
@@ -466,6 +828,21 @@ def update_data():
 
         # Replace dataset to keep moving averages in sync
         source.data = prepared
+
+        latest_temp_ma = float(prepared["temp_ma"][-1]) if len(prepared["temp_ma"]) else None
+        if latest_temp_ma is not None and np.isnan(latest_temp_ma):
+            latest_temp_ma = None
+        latest_hum_ma = float(prepared["hum_ma"][-1]) if len(prepared["hum_ma"]) else None
+        if latest_hum_ma is not None and np.isnan(latest_hum_ma):
+            latest_hum_ma = None
+        latest_values["temp"] = latest_temp_ma
+        latest_values["hum"] = latest_hum_ma
+
+        if temp_window_state["auto"] and _should_auto_update_temp(latest_temp_ma):
+            _set_temp_y_range(latest_temp_ma, temp_window_state["value"], record_auto=True)
+        if hum_window_state["auto"] and _should_auto_update_hum(latest_hum_ma):
+            _set_hum_y_range(latest_hum_ma, hum_window_state["value"], record_auto=True)
+        _update_window_displays()
 
         # Track current data extents for range-change handling
         current_window["data_min"] = prepared["time"][0]
@@ -559,6 +936,14 @@ custom_time_row = row(window_days, window_hours, window_minutes, window_seconds,
                       sizing_mode="scale_width")
 ma_controls_row = row(ma_spinner, show_raw_toggle, sizing_mode="scale_width")
 
+display_range_row = row(
+    temp_window_spinner,
+    temp_window_range_display,
+    hum_window_spinner,
+    hum_window_range_display,
+    sizing_mode="scale_width"
+)
+
 layout = column(
     Div(text="<h1>🌡️ Temperature & Humidity Monitor</h1>", width=1100, height=60),
     current_readings,
@@ -568,6 +953,8 @@ layout = column(
     custom_time_row,
     Div(text="<h4>Moving Average:</h4>", width=1100, height=30),
     ma_controls_row,
+    Div(text="<h4>Display Range:</h4>", width=1100, height=30),
+    display_range_row,
     Div(text="<br>", width=1100, height=10),  # Spacer
     temp_plot,
     humidity_plot,

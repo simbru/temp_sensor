@@ -28,9 +28,13 @@ DEFAULT_CONFIG_VALUES = {
     "temperature_min_c": "0",
     "temperature_max_c": "40",
     "temperature_margin_pct": "0.05",
+    "temperature_window_c": "10",
+    "temperature_range_update_s": "10",
     "humidity_min_pct": "0",
     "humidity_max_pct": "100",
     "humidity_margin_pct": "0.05",
+    "humidity_window_pct": "50",
+    "humidity_range_update_s": "10",
     "LastRead": "None",
 }
 
@@ -58,7 +62,7 @@ def fetch_config(config_loc = CONFIGPATH):
     # Read config_loc into pathlib.Path for sanity
     config_loc = pathlib.Path(config_loc)
     if not config_loc.exists():
-        gen_default_config(config_loc)
+        gen_default_config(str(config_loc))
     # Read config
     config = configparser.ConfigParser()
     config.optionxform = str  # type: ignore[attr-defined]

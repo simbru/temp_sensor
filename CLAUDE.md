@@ -81,7 +81,12 @@ uv run python -m tempsens.sensor    # Run with real sensor
 `config.ini` contains:
 - `loginterval_s`: Seconds between sensor reads
 - `outputfile`: Path to HDF5 data file
+- `temperature_window_c` / `humidity_window_pct`: Default plot window widths (°C and %)
+- `temperature_range_update_s` / `humidity_range_update_s`: Minimum seconds between auto y-axis recenter events
+- Legacy bounds/margin keys kept for backward compatibility
 - Other parameters loaded via `fetch_config()`
+
+User interface preferences are persisted in `settings.ini` (created on demand, ignored by git) so changes to the dashboard window controls survive restarts.
 
 ## Common Commands
 
