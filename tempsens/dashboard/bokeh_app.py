@@ -4,6 +4,7 @@ Run with: bokeh serve --show tempsens/dashboard/bokeh_app.py
 """
 import configparser
 import pathlib
+import socket
 import sys
 import time
 
@@ -18,9 +19,35 @@ if str(_project_root) not in sys.path:
 from bokeh.plotting import figure, curdoc
 from bokeh.models import ColumnDataSource, Button, Spinner, Range1d, Toggle, CustomJS
 from bokeh.layouts import column, row
-from bokeh.models.widgets import Div
+from bokeh.models.widgets import Div, TextInput
 
 from tempsens import io_funcs, sensor as tempsensor
+
+
+def get_device_ip():
+    """Get the device's primary IP address."""
+    try:
+        # Create a socket to determine the primary network interface IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))  # Doesn't actually connect, just determines routing
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "Unknown"
+
+
+def sanitize_filename(name):
+    """Sanitize device name for use in filenames by replacing special characters with underscores."""
+    import re
+    # Replace spaces, commas, and other special characters with underscores
+    sanitized = re.sub(r'[^\w\-]', '_', name)
+    # Replace multiple consecutive underscores with a single underscore
+    sanitized = re.sub(r'_+', '_', sanitized)
+    # Remove leading/trailing underscores
+    sanitized = sanitized.strip('_')
+    return sanitized if sanitized else "Unnamed_Device"
+
 
 # Constants
 TOLERANCE_MS = 2000  # 2 seconds tolerance for range comparison
@@ -38,6 +65,7 @@ SETTINGS_SECTION = "DISPLAY"
 SETTINGS_DEFAULTS = {
     "temperature_window_c": "10",
     "humidity_window_pct": "50",
+    "device_name": "Unnamed Device",
 }
 
 
@@ -116,6 +144,8 @@ hum_window_initial = _coerce_window(
     MIN_HUM_WINDOW,
     MAX_HUM_WINDOW,
 )
+device_name_initial = settings_section.get("device_name", "Unnamed Device")
+device_ip = get_device_ip()
 
 # Normalise stored settings so they match clamped values
 normalised = False
@@ -643,25 +673,38 @@ ma_spinner = Spinner(title="Moving average window (samples)", low=1, high=500, s
                      value=DEFAULT_MA_WINDOW, width=180)
 show_raw_toggle = Toggle(label="Raw data: ON", button_type="success", active=True, width=140)
 
+# Device info widgets
+device_name_input = TextInput(value=device_name_initial, title="Device Name:", width=400)
+device_ip_display = Div(text=f"<strong>IP Address:</strong> {device_ip}", width=300, height=50)
 
-def build_download_callback(columns, prefix):
-    return CustomJS(args=dict(source=source, columns=columns, prefix=prefix), code="""
-        var cols = columns;
+
+def build_download_callback(columns, prefix, device_name_widget):
+    return CustomJS(args=dict(source=source, columns=columns, prefix=prefix, device_name_widget=device_name_widget), code="""
+        // Sanitize device name for filename
+        function sanitizeFilename(name) {
+            var sanitized = name.replace(/[^\\w\\-]/g, '_');
+            sanitized = sanitized.replace(/_+/g, '_');
+            sanitized = sanitized.replace(/^_+|_+$/g, '');
+            return sanitized || 'Unnamed_Device';
+        }
+
+        var cols = ['device_name'].concat(columns);
         var data = source.data;
-        if (!cols.length || !data) {
+        if (!columns.length || !data) {
             return;
         }
-        var first = data[cols[0]];
+        var first = data[columns[0]];
         if (!first || !first.length) {
             return;
         }
 
+        var deviceName = device_name_widget.value || 'Unnamed Device';
         var lines = [cols.join(',')];
         var nrows = first.length;
         for (var i = 0; i < nrows; i++) {
-            var row = [];
-            for (var j = 0; j < cols.length; j++) {
-                var col = cols[j];
+            var row = [deviceName];
+            for (var j = 0; j < columns.length; j++) {
+                var col = columns[j];
                 var value = data[col][i];
                 if (col === 'time') {
                     var dt = new Date(value);
@@ -687,10 +730,11 @@ def build_download_callback(columns, prefix):
             lines.push(row.join(','));
         }
 
-    var csv = lines.join(String.fromCharCode(10));
+        var csv = lines.join(String.fromCharCode(10));
         var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
         var timestamp = new Date().toISOString().replace(/[:.-]/g, '').slice(0, 15);
-        var filename = prefix + '_' + timestamp + '.csv';
+        var sanitizedDeviceName = sanitizeFilename(deviceName);
+        var filename = sanitizedDeviceName + '_' + prefix + '_' + timestamp + '.csv';
         var link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
         link.download = filename;
@@ -701,9 +745,9 @@ def build_download_callback(columns, prefix):
     """)
 
 
-btn_download_temp.js_on_event("button_click", build_download_callback(["time", "temperature"], "temperature"))
-btn_download_hum.js_on_event("button_click", build_download_callback(["time", "humidity"], "humidity"))
-btn_download_both.js_on_event("button_click", build_download_callback(["time", "temperature", "humidity"], "temp_humidity"))
+btn_download_temp.js_on_event("button_click", build_download_callback(["time", "temperature"], "temperature", device_name_input))
+btn_download_hum.js_on_event("button_click", build_download_callback(["time", "humidity"], "humidity", device_name_input))
+btn_download_both.js_on_event("button_click", build_download_callback(["time", "temperature", "humidity"], "temp_humidity", device_name_input))
 
 
 def on_ma_change(attr, old, new):
@@ -770,6 +814,16 @@ def on_raw_toggle_change(attr, old, new):
 
 show_raw_toggle.on_change("active", on_raw_toggle_change)
 on_raw_toggle_change("active", True, show_raw_toggle.active)
+
+
+def on_device_name_change(attr, old, new):
+    """Persist device name to settings.ini when changed."""
+    settings_section["device_name"] = new
+    _persist_settings(settings_config)
+    print(f"Device name updated to: {new}")
+
+
+device_name_input.on_change("value", on_device_name_change)
 
 
 def update_ma_info(window_size):
@@ -944,7 +998,12 @@ display_range_row = row(
     sizing_mode="scale_width"
 )
 
+device_info_row = row(device_name_input, device_ip_display, sizing_mode="scale_width")
+
 layout = column(
+    Div(text="<h3>Device Information</h3>", width=1100, height=40),
+    device_info_row,
+    Div(text="<br>", width=1100, height=10),  # Spacer
     Div(text="<h1>🌡️ Temperature & Humidity Monitor</h1>", width=1100, height=60),
     current_readings,
     Div(text="<h4>Time Window:</h4>", width=1100, height=30),
