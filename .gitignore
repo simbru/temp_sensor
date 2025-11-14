@@ -15,5 +15,11 @@ tempsens_running.pid
 # User settings
 settings.ini
 
+# UV lock file (platform-specific, regenerate locally)
+uv.lock
+
+# Python virtual environment
+.venv/
+
 # Test config files (optional - uncomment if you don't want to track them)
 # config_test*.ini
