@@ -13,14 +13,11 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "shiny",
-    "shinywidgets",
-    "numpy==1.26.4",
+    "numpy>=1.26.4",
     "bokeh",
-    "h5py==3.10",
+    "h5py>=3.10",
     "psutil",
     "pandas",
-    "jupyter-bokeh>=4.0.5",
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "requests>=2.31.0",
@@ -31,6 +28,6 @@ pi = [
     "adafruit_dht",
 ]
 server = [
-    # Server-specific dependencies (if any in future)
+    # Server only needs core dependencies
 ]
 
