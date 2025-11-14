@@ -19,34 +19,89 @@ This system uses a **client-server architecture**:
 
 ---
 
+## Quick Start
+
+### Server Deployment (Lab Computer)
+
+**What you need**: Lab server with campus network access
+
+```bash
+# 1. Clone repository
+cd ~
+git clone <your-repo-url> temp_sensor
+cd temp_sensor
+
+# 2. Install dependencies
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.cargo/env
+uv sync
+
+# 3. Configure sensors
+nano server/config_server.ini
+# Add your Pi sensors in [SENSORS] section:
+# Room_397 = http://100.64.0.5:5000
+
+# 4. Run dashboard (replace <SERVER_PUBLIC_IP> with your server's IP)
+uv run bokeh serve server/bokeh_app.py --port 5006 --allow-websocket-origin=<SERVER_PUBLIC_IP>:5006
+```
+
+**Access**: `http://<SERVER_PUBLIC_IP>:5006/bokeh_app` from any campus computer
+
+### Client Deployment (Raspberry Pi)
+
+**What you need**: Raspberry Pi with DHT22 sensor and Headscale VPN
+
+```bash
+# 1. Clone repository
+cd ~
+git clone <your-repo-url> temp_sensor
+cd temp_sensor
+
+# 2. Install dependencies
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.cargo/env
+uv sync --extra pi
+
+# 3. Configure sensor
+nano config.ini
+# Set: device_name = "Room 397"
+
+# 4. Run client
+uv run python run_client.py
+```
+
+**Note**: Client exposes API at `http://<pi-headscale-ip>:5000` for server to poll
+
+---
+
 ## Prerequisites
 
-### Hardware
+### Hardware (Client Only)
 - **Raspberry Pi** (any model with GPIO, tested on Pi Zero 2 W)
 - **DHT22 sensor** (temperature/humidity)
 - Wiring: VCC→3.3V, GND→GND, Data→GPIO4 (pin 7)
 
-### Software
+### Software (Both)
 - **Headscale VPN** configured with all Pis and server connected
 - **Python 3.11+** with `uv` package manager
 - **Git** for cloning repository
 - **SSH access** to Raspberry Pi and server
 
 ### Network Setup
-- Each Pi must have a Headscale IP (e.g., `100.64.0.5`, `100.64.0.6`, etc.)
-- Server must have Headscale IP AND campus-accessible IP (e.g., `139.184.163.16`)
-- Port 5000 open on each Pi (for API)
-- Port 5006 open on server (for dashboard)
+- **Client**: Each Pi must have a Headscale IP (e.g., `100.64.0.5`, `100.64.0.6`, etc.)
+- **Client**: Port 5000 open on each Pi (for API)
+- **Server**: Must have Headscale IP AND campus-accessible public IP
+- **Server**: Port 5006 open on server (for dashboard)
 
 ---
 
-## Deployment Guide
+## Detailed Deployment Guide
 
 ### Step 1: Deploy Raspberry Pi Client(s)
 
 SSH into your Raspberry Pi:
 ```bash
-ssh pi@139.184.162.15
+ssh pi@<PI_PUBLIC_IP>
 ```
 
 #### 1.1 Clone Repository
@@ -161,7 +216,7 @@ Note the IP (e.g., `100.64.0.5`) - you'll use this in Step 2.
 
 SSH into your server:
 ```bash
-ssh user@139.184.163.16
+ssh user@<SERVER_PUBLIC_IP>
 ```
 
 #### 2.1 Clone Repository
@@ -208,7 +263,8 @@ Incubator = http://100.64.0.7:5000
 #### 2.5 Test Server Dashboard
 ```bash
 # Test run (will create sensor_data.db and start polling)
-uv run bokeh serve server/bokeh_app.py --port 5006 --allow-websocket-origin=139.184.163.16:5006
+# Replace <SERVER_PUBLIC_IP> with your server's actual IP address
+uv run bokeh serve server/bokeh_app.py --port 5006 --allow-websocket-origin=<SERVER_PUBLIC_IP>:5006
 ```
 
 You should see:
@@ -218,7 +274,7 @@ You should see:
 - "Bokeh app running at: http://localhost:5006/bokeh_app"
 
 Open browser and navigate to:
-- `http://139.184.163.16:5006/bokeh_app` (from campus network)
+- `http://<SERVER_PUBLIC_IP>:5006/bokeh_app` (from campus network)
 - `http://localhost:5006/bokeh_app` (from server itself)
 
 Press `Ctrl+C` to stop.
@@ -239,7 +295,7 @@ After=network.target
 Type=simple
 User=youruser
 WorkingDirectory=/home/youruser/temp_sensor
-ExecStart=/home/youruser/.cargo/bin/uv run bokeh serve server/bokeh_app.py --port 5006 --allow-websocket-origin=139.184.163.16:5006
+ExecStart=/home/youruser/.cargo/bin/uv run bokeh serve server/bokeh_app.py --port 5006 --allow-websocket-origin=<SERVER_PUBLIC_IP>:5006
 Restart=always
 RestartSec=10
 
@@ -271,7 +327,7 @@ sudo journalctl -u tempserver.service -f
 ### Accessing the Dashboard
 From any campus computer, open a browser and navigate to:
 ```
-http://139.184.163.16:5006/bokeh_app
+http://<SERVER_PUBLIC_IP>:5006/bokeh_app
 ```
 
 ### Dashboard Features
@@ -570,7 +626,7 @@ netstat -tlnp | grep 5006
 
 # Ensure --allow-websocket-origin matches public IP
 # In systemd service or command line:
---allow-websocket-origin=139.184.163.16:5006
+--allow-websocket-origin=<SERVER_PUBLIC_IP>:5006
 
 # Allow port in firewall
 sudo ufw allow 5006
@@ -689,11 +745,11 @@ temp_sensor/
 │  Bokeh Server   │  bokeh_app.py (port 5006)
 └────────┬────────┘
          │
-         │ Campus Network (139.184.163.16)
+         │ Campus Network (public IP)
          │
          ↓ WebSocket (wss://)
 ┌─────────────────┐
-│  User Browser   │  http://139.184.163.16:5006/bokeh_app
+│  User Browser   │  http://<SERVER_PUBLIC_IP>:5006/bokeh_app
 │  Campus PC      │  (any campus computer)
 └─────────────────┘
 ```
