@@ -148,20 +148,30 @@ def _compute_window_bounds(center: float, width: float, *, minimum: float | None
 # Initialize data
 def prepare_source_data(raw_data, window_size):
     """Return CDS-compatible dict with moving-average columns added."""
+    print(f"\n[DEBUG] prepare_source_data called, window_size={window_size}")
+
     if not raw_data or len(raw_data.get("time", [])) == 0:
+        print("[DEBUG] No raw data, returning empty")
         return {"time": [], "temperature": [], "humidity": [], "temp_ma": [], "hum_ma": []}
 
     time_vals = np.asarray(raw_data.get("time", []))
     temps = np.asarray(raw_data.get("temperature", []), dtype=float)
     hums = np.asarray(raw_data.get("humidity", []), dtype=float)
 
+    print(f"[DEBUG] Got {len(time_vals)} data points from raw_data")
+    if len(time_vals) > 1:
+        print(f"[DEBUG] First timestamp: {time_vals[0]}, Last timestamp: {time_vals[-1]}")
+
     if len(temps) == 0:
+        print("[DEBUG] No temperature data, returning as-is")
         return {"time": time_vals, "temperature": temps, "humidity": hums,
                 "temp_ma": temps, "hum_ma": hums}
 
     # Insert NaN markers at time gaps for visualization
     # This shows gaps in plots without storing NaN in HDF5 (reduces lock contention)
+    print("[DEBUG] Calling _insert_gap_markers...")
     time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums)
+    print(f"[DEBUG] After gap markers: {len(time_vals)} data points")
 
     window = max(int(window_size), 1)
     # Use min_periods=1 so moving average smoothly interpolates across small gaps
@@ -196,7 +206,10 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
     Returns:
         Tuple of (times, temps, hums) with NaN inserted at gaps
     """
+    print(f"\n[DEBUG] _insert_gap_markers called with {len(time_vals)} time points")
+
     if len(time_vals) < 2:
+        print(f"[DEBUG] Not enough data points ({len(time_vals)}), returning as-is")
         return time_vals, temps, hums
 
     # Convert to datetime and calculate time gaps
