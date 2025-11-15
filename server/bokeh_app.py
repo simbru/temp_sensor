@@ -256,8 +256,15 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
 
         print(f"  Inserting {num_nan_markers} NaN markers for gap at index {gap_idx}")
 
-        for _ in range(num_nan_markers):
-            result_times.append(time_vals[gap_idx - 1])
+        # Insert NaN with interpolated timestamps within the gap
+        # This ensures Bokeh recognizes them as distinct points
+        gap_start_time = pd.to_datetime(time_vals[gap_idx - 1])
+        gap_end_time = pd.to_datetime(time_vals[gap_idx])
+        time_step = (gap_end_time - gap_start_time) / (num_nan_markers + 1)
+
+        for i in range(1, num_nan_markers + 1):
+            nan_timestamp = gap_start_time + (time_step * i)
+            result_times.append(nan_timestamp.isoformat())
             result_temps.append(np.nan)
             result_hums.append(np.nan)
 
