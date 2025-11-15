@@ -38,5 +38,6 @@ server = [
 # Pi-specific hardware (must be installed separately on Raspberry Pi)
 pi-hardware = [
     "adafruit-circuitpython-dht; sys_platform == 'linux'",
+    "RPi.GPIO; sys_platform == 'linux'",
 ]
 

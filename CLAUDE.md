@@ -272,8 +272,80 @@ User Browser (139.184.163.16:5006)
 - **Secure**: Private Headscale network, campus firewall protection
 
 ### Setup Steps
-1. Connect all Pis to Headscale (get 100.64.0.x IPs)
-2. Deploy `run_client.py` on each Pi with unique `device_name` in `config.ini`
-3. Configure server's `config_server.ini` with all Pi API endpoints
-4. Run `bokeh serve server/bokeh_app.py` on lab server
-5. Access dashboard from any campus computer at `http://139.184.163.16:5006`
+1. Deploy `run_client.py` on each Pi with unique `device_name` in `config.ini`
+2. Configure server's `config_server.ini` with all Pi API endpoints (using campus IPs)
+3. Run `bokeh serve server/bokeh_app.py` on lab server
+4. Access dashboard from campus network
+
+## Windows WSL2 Deployment
+
+### Critical: WSL2 Networking Quirks
+
+When running the server in WSL2 on Windows, network configuration is more complex than native Linux:
+
+**The Problem:**
+- WSL2 runs in a virtualized network with its own IP address (e.g., `172.22.87.2`)
+- WSL2's `127.0.0.1` is **separate** from Windows's `127.0.0.1`
+- External clients connect to Windows IP, not WSL IP
+- Direct port binding in WSL2 is not accessible from other machines
+
+**The Solution:**
+Use Windows `netsh` port proxy to forward traffic from Windows to WSL2:
+
+```powershell
+# 1. Get WSL IP address (from WSL terminal)
+wsl hostname -I
+# Example output: 172.22.87.2
+
+# 2. Set up port forwarding (Windows PowerShell as Admin)
+netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=8000 connectaddress=172.22.87.2
+
+# 3. Add Windows Firewall rule
+New-NetFirewallRule -DisplayName "Temperature Dashboard HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Any
+
+# 4. Verify port proxy
+netsh interface portproxy show all
+```
+
+**Traffic Flow:**
+```
+Client Browser (139.184.160.232)
+    ↓ HTTP request to 139.184.163.16:80
+Windows Host (139.184.163.16:80)
+    ↓ netsh port proxy forwards to
+WSL2 VM (172.22.87.2:8000)
+    ↓ Bokeh server responds
+```
+
+### Important Notes
+
+1. **WSL IP can change after Windows reboot!** You'll need to:
+   - Manually update the port proxy after reboot, OR
+   - Create a startup script to auto-detect WSL IP and update proxy
+
+2. **Port 80 vs Port 8000:**
+   - University network blocks non-standard ports (like 8000) between subnets
+   - Port 80 (standard HTTP) typically allowed across subnets
+   - Use port 80 for external access, WSL runs on 8000 internally
+
+3. **Server startup command in WSL:**
+```bash
+uv run python -m bokeh serve server/bokeh_app.py \
+  --port 8000 \
+  --address 0.0.0.0 \
+  --allow-websocket-origin=139.184.163.16:80 \
+  --allow-websocket-origin=139.184.163.16:8000 \
+  --allow-websocket-origin=localhost:8000
+```
+
+**Must use `--address 0.0.0.0`** to listen on all interfaces, not just `127.0.0.1`!
+
+### Alternative: Native Windows Deployment
+
+Running the server natively on Windows (without WSL) would simplify networking, but currently blocked by:
+- `adafruit-circuitpython-dht` checks `/proc/cpuinfo` on import (Linux-specific)
+- Fails on Windows even though server doesn't need sensor hardware
+- Potential solutions:
+  - Lazy import: defer hardware library imports until needed
+  - Separate packages: `tempsens-client` (with hardware) vs `tempsens-server` (no hardware)
+  - Mock `/proc/cpuinfo`: patch library for cross-platform compatibility
