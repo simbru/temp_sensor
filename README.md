@@ -21,35 +21,39 @@ This system uses a **client-server architecture**:
 
 ## Quick Start
 
-### Server Deployment (Lab Computer)
+### Server Deployment (Windows Lab Computer) - RECOMMENDED
 
-**What you need**: Lab server with campus network access
+**What you need**: Windows computer with campus network access
 
-```bash
+```powershell
 # 1. Clone repository
-cd ~
 git clone <your-repo-url> temp_sensor
 cd temp_sensor
 
-# 2. Install dependencies
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# Add uv to PATH (choose one):
-source $HOME/.local/bin/env              # sh, bash, zsh
-# source $HOME/.local/bin/env.fish       # fish
-# or restart your shell
+# 2. Install uv (PowerShell)
+irm https://astral.sh/uv/install.ps1 | iex
+
+# 3. Install dependencies
 uv sync --group server
 
-# 3. Configure sensors (first-time setup)
+# 4. Configure sensors (first-time setup)
 cp server/config_server.ini.example server/config_server.ini
-nano server/config_server.ini
-# Add your Pi sensors in [SENSORS] section:
-# Room_397 = http://100.64.0.5:5000
+# Edit server/config_server.ini and add your Pi sensors in [SENSORS] section:
+# Room_397 = http://139.184.162.15:5000
 
-# 4. Run dashboard (replace <SERVER_PUBLIC_IP> with your server's IP)
-uv run bokeh serve server/bokeh_app.py --port 5006 --allow-websocket-origin=<SERVER_PUBLIC_IP>:5006
+# 5. Set up port 80 forwarding (ONE TIME - PowerShell as Admin)
+netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=8000 connectaddress=127.0.0.1
+
+# Add firewall rule (ONE TIME - PowerShell as Admin)
+New-NetFirewallRule -DisplayName "Temperature Dashboard HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Any
+
+# 6. Run dashboard (replace 139.184.163.16 with your server's campus IP)
+uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=139.184.163.16:80
 ```
 
-**Access**: `http://<SERVER_PUBLIC_IP>:5006/bokeh_app` from any campus computer
+**Access**: `http://139.184.163.16/bokeh_app` from any campus computer (uses standard port 80)
+
+**Note**: Port forwarding (step 5) survives reboots. Only need to re-run step 6 after restart.
 
 ### Client Deployment (Raspberry Pi)
 

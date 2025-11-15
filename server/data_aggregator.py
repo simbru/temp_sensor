@@ -91,6 +91,8 @@ class DataAggregator:
             limit: Number of recent readings to fetch
         """
         table_name = self._get_table_name(sensor_name)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Fetching data from sensor: {sensor_name}")
         logger.info(f"Updating data for sensor: {sensor_name}")
 
         try:
@@ -272,6 +274,13 @@ class DataAggregator:
         self._stop_polling.clear()
         self._polling_thread = threading.Thread(target=self._polling_loop, daemon=True)
         self._polling_thread.start()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sensor_names = self.client.get_all_sensor_names()
+        print(f"\n{'='*60}")
+        print(f"[{timestamp}] Data Aggregator Started")
+        print(f"Monitoring {len(sensor_names)} sensor(s): {', '.join(sensor_names)}")
+        print(f"Poll interval: {self.poll_interval} seconds")
+        print(f"{'='*60}\n")
         logger.info("Started background polling")
 
     def stop_polling(self):
@@ -285,15 +294,20 @@ class DataAggregator:
         """Background polling loop."""
         while not self._stop_polling.is_set():
             try:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"[{timestamp}] Polling all sensors...")
                 logger.info("Polling all sensors...")
                 for sensor_name in self.client.get_all_sensor_names():
                     if self._stop_polling.is_set():
                         break
+                    print(f"[{timestamp}] Updating sensor: {sensor_name}")
                     self.update_sensor_data(sensor_name)
 
+                print(f"[{timestamp}] Polling complete. Next poll in {self.poll_interval} seconds.")
                 logger.info(f"Polling complete. Next poll in {self.poll_interval} seconds.")
 
             except Exception as e:
+                print(f"[{timestamp}] ERROR in polling loop: {e}")
                 logger.error(f"Error in polling loop: {e}")
 
             # Wait for next poll cycle (or until stop signal)

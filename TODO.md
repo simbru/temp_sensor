@@ -25,10 +25,16 @@
 - **PROBLEM**: WSL2 IP can change on Windows reboot!
 
 **What's Left:**
-- Fix WSL2 IP change issue (see below)
+- ~~Fix WSL2 IP change issue~~ ✅ **SOLVED: Running natively on Windows instead!**
 - ✅ **DHT22 sensor now working!** (needed RPi.GPIO dependency)
-- Set up systemd services for production
+- Set up auto-start services (systemd on Pi, Windows service on server)
 - Polish sensor logging (occasional bad reads are normal)
+
+**Major Breakthrough:**
+- ✅ Server now runs **natively on Windows** (no WSL needed!)
+- ✅ Port forwarding simplified: `127.0.0.1` instead of dynamic WSL IP
+- ✅ Cross-subnet access working via port 80
+- ✅ Setup survives Windows reboots without manual intervention
 
 ---
 
@@ -75,7 +81,38 @@ netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connect
 - [ ] Test if server code can run without importing sensor modules
 - [ ] Consider refactoring imports to be fully conditional
 
-## Current Setup (Working)
+## Native Windows Setup (CURRENT - RECOMMENDED)
+
+**Server Command:**
+```cmd
+uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=139.184.163.16:80
+```
+
+**Windows Port Forwarding (PowerShell as Admin - ONE TIME SETUP):**
+```powershell
+# Port 80 → 8000 forwarding (uses localhost, never changes!)
+netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=8000 connectaddress=127.0.0.1
+
+# Verify
+netsh interface portproxy show all
+
+# Firewall rule (if not already added)
+New-NetFirewallRule -DisplayName "Temperature Dashboard HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Any
+```
+
+**Access Dashboard:**
+- From office PC: `http://139.184.163.16/bokeh_app`
+- From server: `http://localhost:8000/bokeh_app`
+
+**Benefits over WSL2:**
+- No dynamic IP issues
+- Simpler networking
+- Survives reboots automatically
+- Easier to set up as Windows service
+
+---
+
+## Legacy WSL2 Setup (NOT RECOMMENDED - DEPRECATED)
 
 **Server Command (in WSL2):**
 ```bash

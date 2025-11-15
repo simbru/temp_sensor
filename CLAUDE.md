@@ -277,9 +277,40 @@ User Browser (139.184.163.16:5006)
 3. Run `bokeh serve server/bokeh_app.py` on lab server
 4. Access dashboard from campus network
 
-## Windows WSL2 Deployment
+## Windows Deployment
 
-### Critical: WSL2 Networking Quirks
+### Recommended: Native Windows (No WSL)
+
+**The server can run natively on Windows** without WSL, which is the preferred deployment method.
+
+**Setup:**
+```powershell
+# Install server dependencies
+uv sync --group server
+
+# Run server
+uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=<SERVER_IP>:80
+
+# Set up port 80 forwarding (one-time, PowerShell as Admin)
+netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=8000 connectaddress=127.0.0.1
+
+# Add firewall rule
+New-NetFirewallRule -DisplayName "Temperature Dashboard HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Any
+```
+
+**Advantages:**
+- Simple networking: `127.0.0.1` never changes (unlike WSL2 dynamic IP)
+- No virtualization overhead
+- Easier to set up as Windows service
+- Survives reboots without manual intervention
+
+**Note:** The server code doesn't import `adafruit-circuitpython-dht` or any Pi-specific libraries, so it runs fine on Windows. Only the client (Raspberry Pi) needs the hardware dependencies.
+
+---
+
+### Alternative: WSL2 Deployment (Legacy)
+
+### WSL2 Networking Quirks
 
 When running the server in WSL2 on Windows, network configuration is more complex than native Linux:
 
