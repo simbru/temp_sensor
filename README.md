@@ -159,6 +159,30 @@ Use Task Scheduler to run at startup.
 - **Moving average:** Adjustable smoothing
 - **CSV export:** Download current sensor's data
 
+### Gap Visualization
+
+The dashboard accurately represents missing data to ensure scientific accuracy:
+
+**How it works:**
+- **Raw data line:** Connects all successful readings, shows breaks only when client is offline > 60 seconds
+- **Moving average:** Smooths noise and interpolates over sensor glitches, breaks at large gaps
+- **Timestamp format:** Data stored in milliseconds since epoch for Bokeh plotting
+- **Gap detection:** Server-side insertion of NaN markers to break line continuity at outages
+
+**What you'll see:**
+1. **Sensor glitches** (< 60s): DHT22 sensors fail ~20% of reads due to checksum errors. Failed reads are NOT written to disk. Dashboard connects remaining successful readings with continuous lines. Small time jumps exist but no visual breaks appear.
+2. **Client outages** (> 60s): Network issues or Pi offline. Dashboard inserts proportional NaN markers to create visual breaks in both raw and averaged plots.
+
+**Storage efficiency:**
+- Failed sensor reads are skipped (not written to HDF5) to reduce lock contention
+- Gap detection runs server-side during plot rendering, not on raw data
+- This enables fast polling (2s sensor interval, 5s server polling) without performance degradation
+
+**Visual accuracy:**
+- Setting moving average window to 1 shows exact sensor behavior with gaps
+- Larger windows smooth noise while preserving gap visibility
+- Phantom lines connecting across outages are prevented by NaN insertion with interpolated timestamps
+
 ---
 
 ## API Reference

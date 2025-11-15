@@ -103,12 +103,23 @@ uv run python -m tempsens.sensor    # Run with real sensor
 - Stores data in SQLite database (one table per sensor)
 - Tracks sensor metadata (status, last update, errors)
 - Background polling thread with configurable interval
+- **Timestamp conversion**: Converts ISO strings from Pi APIs to milliseconds since epoch for Bokeh
+  - `get_sensor_data()` returns timestamps as `float` milliseconds, not ISO strings
+  - This format is required by Bokeh for efficient datetime plotting
+  - Dashboard gap detection must use `pd.to_datetime(timestamps, unit='ms')`
 
 **`server/bokeh_app.py`**: Multi-sensor dashboard
 - Dropdown to select which sensor to view
 - Temperature and humidity plots with moving averages
 - Fetches data from SQLite cache (not directly from Pis)
 - Real-time status indicators for each sensor
+- **Gap detection and visualization**: Server-side insertion of NaN markers to show data gaps
+  - Timestamps from `data_aggregator` are milliseconds since epoch (float), not ISO strings
+  - `_insert_gap_markers()` detects gaps > 60 seconds (client offline)
+  - Inserts proportional NaN with interpolated millisecond timestamps
+  - Prevents moving average from falsely interpolating across large gaps
+  - Small sensor glitches (< 60s): Lines connect successful readings with no visual breaks
+  - Large client outages (> 60s): Both raw and moving average lines show visual breaks
 
 **`server/config_server.ini`**: Server configuration
 - List of sensor names and API URLs (Headscale IPs)
