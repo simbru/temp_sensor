@@ -8,7 +8,10 @@
       "WebSearch",
       "WebFetch(domain:docs.bokeh.org)",
       "WebFetch(domain:stackoverflow.com)",
-      "Bash(timeout 10 uv run:*)"
+      "Bash(timeout 10 uv run:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []

@@ -11,7 +11,8 @@ import sched
 # Import handling based on RasPi/dev
 try:
     import adafruit_dht
-    from board import D4 as pin
+    import board
+    pin = board.D4
     print("found dht sensor")
     sensor_found = True
 except (ModuleNotFoundError, ImportError):

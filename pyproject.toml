@@ -37,6 +37,6 @@ server = [
 [project.optional-dependencies]
 # Pi-specific hardware (must be installed separately on Raspberry Pi)
 pi-hardware = [
-    "adafruit_dht; sys_platform == 'linux'",
+    "adafruit-circuitpython-dht; sys_platform == 'linux'",
 ]
 
