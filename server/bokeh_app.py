@@ -164,10 +164,10 @@ def prepare_source_data(raw_data, window_size):
     time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums)
 
     window = max(int(window_size), 1)
-    # Use min_periods=window so moving average shows NaN when insufficient data
-    # This prevents misleading flat lines when data drops out
-    temp_ma = pd.Series(temps).rolling(window=window, min_periods=window).mean().to_numpy()
-    hum_ma = pd.Series(hums).rolling(window=window, min_periods=window).mean().to_numpy()
+    # Use min_periods=1 so moving average smoothly interpolates across small gaps
+    # Raw data (with gap detection) shows the truth, moving average shows the trend
+    temp_ma = pd.Series(temps).rolling(window=window, min_periods=1).mean().to_numpy()
+    hum_ma = pd.Series(hums).rolling(window=window, min_periods=1).mean().to_numpy()
 
     return {
         "time": time_vals,
