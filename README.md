@@ -66,7 +66,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env              # sh, bash, zsh
 # source $HOME/.local/bin/env.fish       # fish
 # or restart your shell
-uv sync --group client --extra pi
+uv sync --group client --extra pi-hardware
 
 # 3. Configure sensor
 nano config.ini
@@ -130,7 +130,7 @@ source $HOME/.local/bin/env              # sh, bash, zsh
 #### 1.3 Install Dependencies
 ```bash
 # Install with Raspberry Pi hardware support (includes adafruit_dht)
-uv sync --group client --extra pi
+uv sync --group client --extra pi-hardware
 ```
 
 #### 1.4 Configure Client
