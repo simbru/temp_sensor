@@ -39,7 +39,8 @@ source $HOME/.local/bin/env              # sh, bash, zsh
 # or restart your shell
 uv sync --group server
 
-# 3. Configure sensors
+# 3. Configure sensors (first-time setup)
+cp server/config_server.ini.example server/config_server.ini
 nano server/config_server.ini
 # Add your Pi sensors in [SENSORS] section:
 # Room_397 = http://100.64.0.5:5000
@@ -68,7 +69,8 @@ source $HOME/.local/bin/env              # sh, bash, zsh
 # or restart your shell
 uv sync --group client --extra pi-hardware
 
-# 3. Configure sensor
+# 3. Configure sensor (first-time setup)
+cp config.ini.example config.ini
 nano config.ini
 # Set: device_name = "Room 397"
 
