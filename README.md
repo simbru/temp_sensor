@@ -33,8 +33,11 @@ cd temp_sensor
 
 # 2. Install dependencies
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.cargo/env
-uv sync
+# Add uv to PATH (choose one):
+source $HOME/.local/bin/env              # sh, bash, zsh
+# source $HOME/.local/bin/env.fish       # fish
+# or restart your shell
+uv sync --group server
 
 # 3. Configure sensors
 nano server/config_server.ini
@@ -59,8 +62,11 @@ cd temp_sensor
 
 # 2. Install dependencies
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.cargo/env
-uv sync --extra pi
+# Add uv to PATH (choose one):
+source $HOME/.local/bin/env              # sh, bash, zsh
+# source $HOME/.local/bin/env.fish       # fish
+# or restart your shell
+uv sync --group client --extra pi
 
 # 3. Configure sensor
 nano config.ini
@@ -115,13 +121,16 @@ cd temp_sensor
 ```bash
 # Install uv if not already installed
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.cargo/env
+# Add uv to PATH (choose one):
+source $HOME/.local/bin/env              # sh, bash, zsh
+# source $HOME/.local/bin/env.fish       # fish
+# or restart your shell
 ```
 
 #### 1.3 Install Dependencies
 ```bash
 # Install with Raspberry Pi hardware support (includes adafruit_dht)
-uv sync --extra pi
+uv sync --group client --extra pi
 ```
 
 #### 1.4 Configure Client
@@ -229,13 +238,16 @@ cd temp_sensor
 #### 2.2 Install uv Package Manager
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.cargo/env
+# Add uv to PATH (choose one):
+source $HOME/.local/bin/env              # sh, bash, zsh
+# source $HOME/.local/bin/env.fish       # fish
+# or restart your shell
 ```
 
 #### 2.3 Install Dependencies
 ```bash
-# Install without Pi hardware dependencies (server doesn't need sensor drivers)
-uv sync
+# Install server dependencies (no Pi hardware drivers)
+uv sync --group server
 ```
 
 #### 2.4 Configure Server
