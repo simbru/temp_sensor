@@ -19,13 +19,11 @@ except (ModuleNotFoundError, ImportError):
     print("no dht sensor, generated data")
     sensor_found = False
 
-#CONFIGPATH = r"/home/weatherstation/.config.ini"
 # Allow override via environment variable for running multiple test instances
 CONFIGPATH = os.environ.get('TEMPSENS_CONFIG', "config.ini")
 
 DEFAULT_CONFIG_VALUES = {
-    "loginterval_s": "1",
-    "remoteinterval_s": "86400",
+    "loginterval_s": "2",
     "outputfile": "templog.h5",
     "temperature_min_c": "0",
     "temperature_max_c": "40",
@@ -37,7 +35,6 @@ DEFAULT_CONFIG_VALUES = {
     "humidity_margin_pct": "0.05",
     "humidity_window_pct": "50",
     "humidity_range_update_s": "10",
-    "LastRead": "None",
     "device_name": "Temperature Sensor",
     "api_port": "5000",
 }
@@ -106,11 +103,10 @@ schedule = sched.scheduler(time.time, time.sleep)
 def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar = 5):
     temp = tempbaseline + np.random.randint(tempvar)
     hum = humbaseline + np.random.randint(humvar)
-    # Sensor fails read sometimes, simulate that:
+    # Sensor fails read sometimes, simulate that (20% chance)
     random_fail = np.random.randint(5)
     if random_fail == 1:
-        temp = None
-        hum = None
+        raise RuntimeError("Simulated sensor read failure (checksum error)")
     return temp, hum
 
 def print_to_console(timestamp, temperature, humidity):
@@ -127,13 +123,6 @@ def init_data_hdf5(filename = CONFIG["DEFAULT"]["outputfile"]):
             f.create_dataset("time", (0,), maxshape = (None,), dtype = h5py.string_dtype())
             f.create_dataset("temperature", (0,), maxshape = (None,), dtype = 'f')
             f.create_dataset("humidity", (0,), maxshape = (None,), dtype = 'f')
-# def write_data(temperature, humidity, filename = CONFIG["DEFAULT"]["outputfile"]):        
-#     if pathlib.Path(filename).exists() is False:
-#         with open(filename, "w") as f:
-#             f.write("time,temperature,humidity\n")
-#     with open(filename, "a") as f:
-#         f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')},{temperature},{humidity}\n")
-
 
 def write_data_hdf5(timestamp, temperature, humidity, filename = CONFIG["DEFAULT"]["outputfile"]):
     # Append to file and resize continously
@@ -146,64 +135,44 @@ def write_data_hdf5(timestamp, temperature, humidity, filename = CONFIG["DEFAULT
             f["temperature"][-1] = temperature
             f["humidity"][-1]  = humidity
 
-def log_data(filename = CONFIG["DEFAULT"]["outputfile"], gen_data = False):
-    # print("Im logging!")
+def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
     global sensor_found
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-    if sensor_found is False:
-        temperature, humidity = simulate_tempsens()
-    if sensor_found is True:
-        dht_device = adafruit_dht.DHT22(pin, use_pulseio=False)
-        good_read = False
-        while good_read is False:
-            try:
-                print("try")
+
+    # Common retry logic for both real and simulated sensors
+    good_read = False
+    retry_count = 0
+    max_retries = 5
+    temperature, humidity = None, None
+
+    while good_read is False and retry_count < max_retries:
+        try:
+            if sensor_found is False:
+                temperature, humidity = simulate_tempsens()
+            else:
+                dht_device = adafruit_dht.DHT22(pin, use_pulseio=False)
                 temperature = dht_device.temperature
                 humidity = dht_device.humidity
-            except RuntimeError:
-                print("BAD READ TRYING AGAIN")
-                continue
-            else:
-                break
-                # temperature = None
-                # humidity = None
-    # Append to file
-    write_data_hdf5(timestamp, temperature, humidity)
-    # Print to console
-    print_to_console(timestamp, temperature, humidity)
-    # # Schedule the next run
-    schedule.enter(LOGINTERVAL, 0, log_data)
-    return None 
+            good_read = True
+        except RuntimeError as e:
+            retry_count += 1
+            if retry_count == 1:
+                # Only print on first retry to reduce noise
+                print(f"[{timestamp}] Sensor read failed, retrying... (checksum/timeout error is normal)")
+            elif retry_count >= max_retries:
+                print(f"[{timestamp}] ERROR: Failed to read sensor after {max_retries} attempts")
+                temperature, humidity = None, None
+            time.sleep(0.1)  # Small delay between retries
+            continue
 
-latest_output_dict = None
-def _fetchlog(filename=FILENAME):
-    """
-    Fetches data from .h5 file and returns it as a dictionary.
-    Time is returned as milliseconds since epoch (float) for Bokeh compatibility.
-    """
-    with file_lock:
-        with h5py.File(filename, "r", locking = False) as f:
-            temps = np.array(f["temperature"], dtype = "float32")
-            hums  = np.array(f["humidity"], dtype = "float32")
-            times_dt64 = np.array(f["time"], dtype = np.datetime64)
+    # Append to file (only if we got valid data)
+    if temperature is not None and humidity is not None:
+        write_data_hdf5(timestamp, temperature, humidity)
+        print_to_console(timestamp, temperature, humidity)
 
-    # Convert datetime64 to milliseconds since epoch for Bokeh compatibility
-    # This prevents type mixing issues between datetime64 and float
-    times_ms = times_dt64.astype('datetime64[ms]').astype(np.int64).astype(np.float64)
-
-    # Assign to global variable only after processing
-    global latest_output_dict
-    latest_output_dict = {"time": times_ms, "temperature": temps, "humidity": hums}
-    return None
-
-def fetch_log_data():
     # Schedule the next run
-    schedule.enter(LOGINTERVAL, 1, fetch_log_data)
-    # Fetch immediately the first time to ensure data is loaded
-    _fetchlog()
-    # Return the latest data
-    global latest_output_dict
-    return latest_output_dict
+    schedule.enter(LOGINTERVAL, 0, log_data)
+    return None
 
 def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limit=None):
     """

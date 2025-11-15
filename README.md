@@ -252,19 +252,48 @@ Lab_Bench = http://<PI_IP_2>:5000
 
 ## Development & Testing
 
-**Test without hardware:**
+### Local Development (No Hardware Required)
+
+You can develop and test the entire system on your local machine using simulated sensors:
+
+**1. Start simulated sensors:**
 ```bash
-# Simulated sensors
-uv run python run_test_clients.py  # Starts 3 test sensors
-
-# Edit server/config_server.ini
-[SENSORS]
-Test_1 = http://localhost:5001
-Test_2 = http://localhost:5002
-
-# Run dashboard
-uv run bokeh serve server/bokeh_app.py --show
+# Starts 3 test sensors with simulated data on ports 5001-5003
+uv run python dev/run_test_clients.py
 ```
+
+This creates:
+- 3 simulated DHT22 sensors with random temperature/humidity
+- API servers at `http://localhost:5001`, `5002`, `5003`
+- Local HDF5 files: `dev/templog_test1.h5`, `dev/templog_test2.h5`, `dev/templog_test3.h5`
+
+**2. Configure server to use test sensors:**
+
+Edit `server/config_server.ini`:
+```ini
+[SENSORS]
+Test_Sensor_1 = http://localhost:5001
+Test_Sensor_2 = http://localhost:5002
+Test_Sensor_3 = http://localhost:5003
+```
+
+**3. Start dashboard:**
+```bash
+uv run bokeh serve server/bokeh_app.py --show
+# Opens at http://localhost:5006/bokeh_app
+```
+
+**4. Test features:**
+- Switch between sensors in dropdown
+- Adjust time windows and moving averages
+- Download CSV exports
+- Verify polling logs in server console
+
+**Dev folder contents:**
+- `dev/run_test_clients.py` - Multi-client test harness
+- `dev/config_test1.ini` - Test sensor 1 config (port 5001)
+- `dev/config_test2.ini` - Test sensor 2 config (port 5002)
+- `dev/config_test3.ini` - Test sensor 3 config (port 5003)
 
 ---
 

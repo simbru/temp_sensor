@@ -49,11 +49,11 @@ def main():
     print("Starting 3 Test Sensor Clients")
     print("=" * 80)
 
-    # Define test instances
+    # Define test instances (using dev/ folder)
     instances = [
-        ("config_test1.ini", "Test-1"),
-        ("config_test2.ini", "Test-2"),
-        ("config_test3.ini", "Test-3"),
+        ("dev/config_test1.ini", "Test-1"),
+        ("dev/config_test2.ini", "Test-2"),
+        ("dev/config_test3.ini", "Test-3"),
     ]
 
     # Start each instance in its own process
