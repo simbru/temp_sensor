@@ -207,6 +207,13 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
     gap_mask = time_diffs > gap_threshold_s
     gap_indices = np.where(gap_mask)[0]
 
+    # Debug logging
+    if len(gap_indices) > 0:
+        print(f"\n[GAP DETECTION] Found {len(gap_indices)} gaps:")
+        for idx in gap_indices:
+            gap_size = time_diffs[idx]
+            print(f"  Gap at index {idx}: {gap_size:.1f} seconds ({gap_size/60:.1f} minutes)")
+
     if len(gap_indices) == 0:
         return time_vals, temps, hums
 
@@ -233,6 +240,8 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
         # Insert enough NaN markers to prevent moving average from bridging the gap
         # Minimum of 5 ensures even moderate MA windows show the break
         num_nan_markers = max(num_missing, 5)
+
+        print(f"  Inserting {num_nan_markers} NaN markers for gap at index {gap_idx}")
 
         for _ in range(num_nan_markers):
             result_times.append(time_vals[gap_idx - 1])
