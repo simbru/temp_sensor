@@ -213,8 +213,12 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
         return time_vals, temps, hums
 
     # Convert to datetime and calculate time gaps
-    times_dt = pd.to_datetime(time_vals)
+    # time_vals are milliseconds since epoch
+    times_dt = pd.to_datetime(time_vals, unit='ms')
     time_diffs = times_dt.diff().total_seconds().to_numpy()
+
+    print(f"[DEBUG] Time range: {times_dt.min()} to {times_dt.max()}")
+    print(f"[DEBUG] Max gap found: {np.nanmax(time_diffs):.1f} seconds")
 
     # Detect gaps larger than threshold (e.g., client offline)
     gap_mask = time_diffs > gap_threshold_s
@@ -258,13 +262,13 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
 
         # Insert NaN with interpolated timestamps within the gap
         # This ensures Bokeh recognizes them as distinct points
-        gap_start_time = pd.to_datetime(time_vals[gap_idx - 1])
-        gap_end_time = pd.to_datetime(time_vals[gap_idx])
-        time_step = (gap_end_time - gap_start_time) / (num_nan_markers + 1)
+        gap_start_ms = time_vals[gap_idx - 1]
+        gap_end_ms = time_vals[gap_idx]
+        time_step_ms = (gap_end_ms - gap_start_ms) / (num_nan_markers + 1)
 
         for i in range(1, num_nan_markers + 1):
-            nan_timestamp = gap_start_time + (time_step * i)
-            result_times.append(nan_timestamp.isoformat())
+            nan_timestamp_ms = gap_start_ms + (time_step_ms * i)
+            result_times.append(nan_timestamp_ms)
             result_temps.append(np.nan)
             result_hums.append(np.nan)
 
