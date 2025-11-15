@@ -3,32 +3,38 @@
 ## Session Summary (2025-11-15)
 
 **What We Accomplished:**
-- ✅ Deployed server on Windows WSL2 (Ubuntu)
-- ✅ Deployed Raspberry Pi client with simulated sensor data
+- ✅ Deployed server on Windows (natively, no WSL!)
+- ✅ Deployed Raspberry Pi client with real DHT22 sensor
 - ✅ Confirmed Pi ↔ Server communication works over campus network (no Headscale needed!)
 - ✅ Set up CSV download functionality for multi-sensor dashboard
 - ✅ Resolved `uv` dependency group issues (client vs server groups)
 - ✅ Fixed `adafruit_dht` Windows build issues (switched to CircuitPython version)
-- ✅ Configured Windows Firewall for port 8000
+- ✅ Fixed missing RPi.GPIO dependency for sensor hardware
+- ✅ Configured Windows Firewall for port 80
 - ✅ **Got port 80 cross-subnet dashboard access working!** 🎉
+- ✅ **Comprehensive code cleanup** - removed ~100 lines of dead code
+- ✅ **Improved sensor logging** - cleaner retry messages, less noise
+- ✅ **Config file cleanup** - removed 8 unused parameters
+- ✅ **Better project structure** - moved test files to dev/ folder
 
 **Key Findings:**
 - Server and Pis can communicate directly via campus IPs (139.184.x.x) without Headscale
 - University network blocks port 8000 between subnets, but **port 80 works!**
-- Used Windows `netsh` port proxy: port 80 → WSL2 IP:8000
-- Dashboard now accessible at: `http://139.184.163.16/bokeh_app` (no SSH tunnel needed!)
+- Server runs natively on Windows using `--address 127.0.0.1` (no WSL complexity!)
+- Windows `netsh` port proxy: port 80 → localhost:8000 (never changes!)
+- Dashboard accessible at: `http://<SERVER_IP>/bokeh_app` from any campus PC
 
-**Critical Discovery - WSL2 Networking:**
-- WSL2 runs in separate virtualized network with its own IP (e.g., `172.22.87.2`)
-- Windows `127.0.0.1` ≠ WSL2 `127.0.0.1`
-- Port forwarding must use WSL2's actual IP: `netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=8000 connectaddress=172.22.87.2`
-- **PROBLEM**: WSL2 IP can change on Windows reboot!
+**Code Quality Improvements (2025-11-15):**
+- Removed unused functions: `tempsensor_subprocess()`, `cleanup()`
+- Consolidated duplicate code: `safe_float()` defined once in api_server.py
+- Fixed inconsistencies: HDF5 locking now uses `locking=False` everywhere
+- Cleaned config files: removed 8 unused parameters (temperature_min_c, margins, windows, ranges)
+- Improved logging: sensor retries now show clear, informative messages
+- Better test setup: fixed import path issues in dev/run_test_clients.py
 
 **What's Left:**
-- ~~Fix WSL2 IP change issue~~ ✅ **SOLVED: Running natively on Windows instead!**
-- ✅ **DHT22 sensor now working!** (needed RPi.GPIO dependency)
-- Set up auto-start services (systemd on Pi, Windows service on server)
-- Polish sensor logging (occasional bad reads are normal)
+- Set up auto-start services (systemd on Pi, Windows Task Scheduler on server)
+- Long-term stability testing (currently running...)
 
 **Major Breakthrough:**
 - ✅ Server now runs **natively on Windows** (no WSL needed!)
@@ -141,12 +147,16 @@ New-NetFirewallRule -DisplayName "Temperature Dashboard HTTP" -Direction Inbound
 
 ## Deployment Testing
 - [x] Verify server can poll Pi API over campus network (✅ confirmed working via campus IPs)
-- [x] Cross-subnet dashboard access working via port 80 (✅ `http://139.184.163.16/bokeh_app`)
-- [x] Test Raspberry Pi client with actual DHT22 sensor hardware (✅ Reading 23.1°C, 53.4% humidity)
-- [ ] Test dashboard with real sensor data from Pi (run client API + verify server polls it)
-- [ ] Verify CSV download functionality works with real data
-- [ ] Set up auto-start services (systemd on Pi, Windows service/task on server)
-- [ ] Test recovery after Windows reboot (WSL IP change)
+- [x] Cross-subnet dashboard access working via port 80 (✅ accessible from office PC)
+- [x] Test Raspberry Pi client with actual DHT22 sensor hardware (✅ Real sensor working)
+- [x] Test dashboard with real sensor data from Pi (✅ Server polling and displaying data)
+- [x] Verify CSV download functionality works with real data (✅ Working)
+- [x] Code cleanup and optimization (✅ Removed ~100 lines of dead code)
+- [ ] **Long-term stability test** (Currently running - let run for several hours)
+- [ ] **Set up auto-start services** (NEXT PRIORITY)
+  - [ ] Raspberry Pi: systemd service for client
+  - [ ] Windows Server: Task Scheduler for dashboard
+- [ ] Test recovery after Windows reboot (port forwarding persistence)
 
 ## Key Discovery - RPi.GPIO Dependency
 **Problem:** `adafruit-circuitpython-dht` failed to import on Pi, falling back to simulation mode
@@ -154,12 +164,24 @@ New-NetFirewallRule -DisplayName "Temperature Dashboard HTTP" -Direction Inbound
 **Solution:** Added `RPi.GPIO` to `pi-hardware` optional dependencies in `pyproject.toml`
 **Status:** ✅ Fixed - sensor now reading real data
 
-## Documentation
-- [ ] Update README with port 80 setup and WSL IP issue
-- [ ] Document Windows startup script for auto-updating WSL IP
-- [ ] Add troubleshooting section for WSL2 networking
+## Next Steps - Auto-Start Services
 
-## Future Improvements
-- [ ] Decide on Path A (WSL + auto-update script) vs Path B (native Windows)
-- [ ] If Path B: Investigate making server runnable on Windows without WSL
-- [ ] Set up proper Windows service for production
+### Raspberry Pi (systemd)
+README already has instructions at lines 110-140. Need to:
+1. Create `/etc/systemd/system/tempsensor.service`
+2. Enable and start the service
+3. Verify it survives reboot
+
+### Windows Server (Task Scheduler)
+README has batch file example at lines 142-150. Need to:
+1. Create `start_dashboard.bat` with proper server IP in --allow-websocket-origin
+2. Set up Task Scheduler job to run at startup
+3. Configure job to run even if user not logged in
+4. Test reboot persistence
+
+## Documentation
+- [x] README updated with native Windows deployment (lines 85-151)
+- [x] WSL2 networking documented as "Alternative" deployment (lines 331-333)
+- [x] Development & Testing section added (lines 252-296)
+- [x] Troubleshooting section comprehensive (lines 185-216)
+- [ ] Add auto-start service setup walkthrough (can reference existing README sections)
