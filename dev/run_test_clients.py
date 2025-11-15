@@ -7,6 +7,11 @@ import multiprocessing
 import sys
 import time
 import os
+from pathlib import Path
+
+# Add project root to Python path so imports work in subprocesses
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 # Override the config path for each instance
 def run_client_instance(config_file: str, instance_name: str):
