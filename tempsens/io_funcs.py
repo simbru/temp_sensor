@@ -178,11 +178,18 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
     Returns:
         Dictionary with keys 'time' (ISO strings), 'temperature', 'humidity'
     """
-    with file_lock:
+    # Use timeout on lock to prevent API hanging during sensor retries
+    lock_acquired = file_lock.acquire(timeout=5.0)
+    if not lock_acquired:
+        raise TimeoutError("Could not acquire file lock within 5 seconds")
+
+    try:
         with h5py.File(filename, "r", locking=False) as f:
             temps = np.array(f["temperature"], dtype="float32")
             hums = np.array(f["humidity"], dtype="float32")
             times_str = np.array(f["time"], dtype=str)
+    finally:
+        file_lock.release()
 
     # Convert string times to datetime64 for filtering
     times_dt64 = np.array(times_str, dtype=np.datetime64)
