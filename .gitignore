@@ -1,5 +1,6 @@
 # HDF5 data files (client-side)
 templog.h5
+templog_test*.h5
 dev/templog_test*.h5
 
 # SQLite database (server-side)
