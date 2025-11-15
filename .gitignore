@@ -15,6 +15,10 @@ tempsens_running.pid
 # User settings
 settings.ini
 
+# Configuration files (site-specific, don't overwrite on pull)
+config.ini
+server/config_server.ini
+
 # UV lock file (platform-specific, regenerate locally)
 uv.lock
 
