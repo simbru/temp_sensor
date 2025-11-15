@@ -275,21 +275,36 @@ Incubator = http://100.64.0.7:5000
 ```
 
 #### 2.5 Test Server Dashboard
+
+**On Windows Server with WSL2:**
+
 ```bash
-# Test run (will create sensor_data.db and start polling)
-# Replace <SERVER_PUBLIC_IP> with your server's actual IP address
-uv run bokeh serve server/bokeh_app.py --port 5006 --allow-websocket-origin=<SERVER_PUBLIC_IP>:5006
+# In WSL, run the dashboard
+uv run python -m bokeh serve server/bokeh_app.py --port 8000 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=127.0.0.1:8000 --address 127.0.0.1
 ```
+
+**Add Windows Firewall Rule (PowerShell as Admin):**
+```powershell
+New-NetFirewallRule -DisplayName "Temperature Dashboard" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Any
+```
+
+**Access Options:**
+
+1. **Same subnet**: `http://<SERVER_IP>:8000/bokeh_app`
+2. **Different subnet (SSH tunnel)**:
+   ```bash
+   # From your PC
+   ssh -L 8000:127.0.0.1:8000 user@<SERVER_IP>
+
+   # Then access: http://localhost:8000/bokeh_app
+   ```
+3. **Via Headscale VPN**: `http://<SERVER_HEADSCALE_IP>:8000/bokeh_app`
 
 You should see:
 - "Loaded N sensor configurations"
 - "Performing initial data poll..."
 - "Started background polling thread"
-- "Bokeh app running at: http://localhost:5006/bokeh_app"
-
-Open browser and navigate to:
-- `http://<SERVER_PUBLIC_IP>:5006/bokeh_app` (from campus network)
-- `http://localhost:5006/bokeh_app` (from server itself)
+- "Bokeh app running at: http://127.0.0.1:8000/bokeh_app"
 
 Press `Ctrl+C` to stop.
 
@@ -309,7 +324,7 @@ After=network.target
 Type=simple
 User=youruser
 WorkingDirectory=/home/youruser/temp_sensor
-ExecStart=/home/youruser/.cargo/bin/uv run bokeh serve server/bokeh_app.py --port 5006 --allow-websocket-origin=<SERVER_PUBLIC_IP>:5006
+ExecStart=/home/youruser/.local/bin/uv run python -m bokeh serve server/bokeh_app.py --port 8000 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=127.0.0.1:8000 --address 127.0.0.1
 Restart=always
 RestartSec=10
 
@@ -334,14 +349,39 @@ View logs:
 sudo journalctl -u tempserver.service -f
 ```
 
+#### 2.7 Optional: Configure SSH Tunnel Shortcut
+
+For easy access from different subnets, add to your SSH config (`~/.ssh/config`):
+
+```
+Host tempserver
+    HostName <SERVER_IP>
+    User <your-username>
+    LocalForward 8000 127.0.0.1:8000
+```
+
+Then simply run `ssh tempserver` and access dashboard at `http://localhost:8000/bokeh_app`
+
 ---
 
 ## Using the Dashboard
 
 ### Accessing the Dashboard
-From any campus computer, open a browser and navigate to:
+
+**Option 1: Same subnet**
 ```
-http://<SERVER_PUBLIC_IP>:5006/bokeh_app
+http://<SERVER_IP>:8000/bokeh_app
+```
+
+**Option 2: Different subnet (SSH tunnel)**
+```bash
+ssh -L 8000:127.0.0.1:8000 user@<SERVER_IP>
+# Then access: http://localhost:8000/bokeh_app
+```
+
+**Option 3: Via Headscale VPN**
+```
+http://<SERVER_HEADSCALE_IP>:8000/bokeh_app
 ```
 
 ### Dashboard Features
