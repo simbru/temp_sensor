@@ -155,10 +155,16 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
             time.sleep(0.1)  # Small delay between retries
             continue
 
-    # Append to file (only if we got valid data)
-    if temperature is not None and humidity is not None:
-        write_data_hdf5(timestamp, temperature, humidity)
-        print_to_console(timestamp, temperature, humidity)
+    # Write to file - including NaN for failed reads to show gaps in plots
+    # This maintains consistency with historical data and ensures CSV exports
+    # accurately reflect when sensor was operational vs. when reads failed
+    write_data_hdf5(timestamp, temperature, humidity)
+    print_to_console(timestamp, temperature, humidity)
+
+    # ALTERNATIVE: Skip writing failed reads to save storage (currently disabled)
+    # if temperature is not None and humidity is not None:
+    #     write_data_hdf5(timestamp, temperature, humidity)
+    #     print_to_console(timestamp, temperature, humidity)
 
     # Schedule the next run
     schedule.enter(LOGINTERVAL, 0, log_data)
