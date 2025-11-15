@@ -199,7 +199,7 @@ def _insert_gap_markers(time_vals, temps, hums, expected_interval_s=2):
 
     # Convert to datetime and calculate time gaps
     times_dt = pd.to_datetime(time_vals)
-    time_diffs = times_dt.diff().dt.total_seconds().to_numpy()
+    time_diffs = times_dt.diff().total_seconds().to_numpy()
 
     # Detect gaps (any interval > 1.5x expected)
     gap_threshold = expected_interval_s * 1.5
