@@ -160,8 +160,10 @@ def prepare_source_data(raw_data, window_size):
                 "temp_ma": temps, "hum_ma": hums}
 
     window = max(int(window_size), 1)
-    temp_ma = pd.Series(temps).rolling(window=window, min_periods=1).mean().to_numpy()
-    hum_ma = pd.Series(hums).rolling(window=window, min_periods=1).mean().to_numpy()
+    # Use min_periods=window so moving average shows NaN when insufficient data
+    # This prevents misleading flat lines when data drops out
+    temp_ma = pd.Series(temps).rolling(window=window, min_periods=window).mean().to_numpy()
+    hum_ma = pd.Series(hums).rolling(window=window, min_periods=window).mean().to_numpy()
 
     return {
         "time": time_vals,
