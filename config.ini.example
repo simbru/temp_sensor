@@ -1,15 +1,5 @@
 [DEFAULT]
 loginterval_s = 2
 outputfile = templog.h5
-temperature_min_c = 0
-temperature_max_c = 40
-temperature_margin_pct = 0.05
-temperature_window_c = 10
-temperature_range_update_s = 10
-humidity_min_pct = 0
-humidity_max_pct = 100
-humidity_margin_pct = 0.05
-humidity_window_pct = 50
-humidity_range_update_s = 10
 device_name = Temperature Sensor
 api_port = 5000

@@ -21,32 +21,6 @@ def run_tempsensor_test():
     while True:
         io_funcs.schedule.run()
 
-PID_FILE = 'tempsens_running.pid'
-# Launch tempsensor.py if not already launched
-def tempsensor_subprocess():
-    # If file doesn't exist, create it
-    io_funcs.init_data_hdf5()
-    # # If file doesn't exist, create it
-    # io_funcs.init_data_hdf5()
-    if os.path.isfile(PID_FILE):
-        try:
-            with open(PID_FILE, 'r') as f:
-                pid = int(f.read().strip())
-            # Check if process is running
-            if psutil.pid_exists(pid):
-                print("SUBPROCESS: Temperature sensor is already running.")
-                return
-            else:
-                print("SUBPROCESS: Stale PID file. Starting a new temperature sensor.")
-        except (OSError, ValueError):
-            print("Invalid PID or no process found.")
-    # Start the temperature sensor
-    process = subprocess.Popen(["python", "-m", "tempsens.sensor"])
-    with open(PID_FILE, 'w') as f:
-        f.write(str(process.pid))
-    print("SUBPROCESS: Spinning up tempsensor.")
-    return process
-
 def end_tempsensor():
     print("Shutting down temperature sensor logging.")
     try:

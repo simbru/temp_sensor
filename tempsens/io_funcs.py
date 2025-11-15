@@ -25,16 +25,6 @@ CONFIGPATH = os.environ.get('TEMPSENS_CONFIG', "config.ini")
 DEFAULT_CONFIG_VALUES = {
     "loginterval_s": "2",
     "outputfile": "templog.h5",
-    "temperature_min_c": "0",
-    "temperature_max_c": "40",
-    "temperature_margin_pct": "0.05",
-    "temperature_window_c": "10",
-    "temperature_range_update_s": "10",
-    "humidity_min_pct": "0",
-    "humidity_max_pct": "100",
-    "humidity_margin_pct": "0.05",
-    "humidity_window_pct": "50",
-    "humidity_range_update_s": "10",
     "device_name": "Temperature Sensor",
     "api_port": "5000",
 }
@@ -119,7 +109,7 @@ def init_data_hdf5(filename = CONFIG["DEFAULT"]["outputfile"]):
     # Create file if it doesn't exist
     if pathlib.Path(CONFIG["DEFAULT"]["outputfile"]).exists() is False:
         print("Save file doesn't exist, creating it at", CONFIG["DEFAULT"]["outputfile"])
-        with h5py.File(filename, "w", locking = True) as f:
+        with h5py.File(filename, "w", locking = False) as f:
             f.create_dataset("time", (0,), maxshape = (None,), dtype = h5py.string_dtype())
             f.create_dataset("temperature", (0,), maxshape = (None,), dtype = 'f')
             f.create_dataset("humidity", (0,), maxshape = (None,), dtype = 'f')
@@ -226,8 +216,3 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
         "temperature": temps.tolist(),
         "humidity": hums.tolist()
     }
-
-def cleanup(PID_FILE):
-    if os.path.isfile(PID_FILE):
-        os.remove(PID_FILE) 
-

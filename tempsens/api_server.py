@@ -2,6 +2,7 @@
 FastAPI server for Raspberry Pi temperature sensor clients.
 Exposes data from local HDF5 file via REST API for remote dashboard access.
 """
+import math
 import socket
 from datetime import datetime
 from typing import Optional
@@ -17,6 +18,12 @@ app = FastAPI(
     description="API for accessing DHT22 temperature and humidity data",
     version="1.0.0"
 )
+
+
+def safe_float(val):
+    """Convert to float and replace NaN/Inf with None for JSON compatibility."""
+    f = float(val)
+    return None if math.isnan(f) or math.isinf(f) else f
 
 
 def get_device_info():
@@ -101,12 +108,6 @@ async def get_latest_data(
         data = io_funcs.fetch_log_data_range(limit=limit)
         device_info = get_device_info()
 
-        # Convert to float and replace NaN with None for JSON compatibility
-        import math
-        def safe_float(val):
-            f = float(val)
-            return None if math.isnan(f) or math.isinf(f) else f
-
         return {
             "device_name": device_info["device_name"],
             "device_ip": device_info["ip_address"],
@@ -145,12 +146,6 @@ async def get_data_range(
     try:
         data = io_funcs.fetch_log_data_range(start_time=start, end_time=end)
         device_info = get_device_info()
-
-        # Convert to float and replace NaN with None for JSON compatibility
-        import math
-        def safe_float(val):
-            f = float(val)
-            return None if math.isnan(f) or math.isinf(f) else f
 
         return {
             "device_name": device_info["device_name"],
