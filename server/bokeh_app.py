@@ -210,6 +210,8 @@ def _insert_gap_markers(time_vals, temps, hums, expected_interval_s=2):
         return time_vals, temps, hums
 
     # Build arrays with NaN inserted at each gap
+    # Insert multiple NaN proportional to gap size to ensure even large moving
+    # average windows show breaks (prevents false interpolation across gaps)
     result_times = []
     result_temps = []
     result_hums = []
@@ -221,10 +223,18 @@ def _insert_gap_markers(time_vals, temps, hums, expected_interval_s=2):
         result_temps.extend(temps[prev_idx:gap_idx])
         result_hums.extend(hums[prev_idx:gap_idx])
 
-        # Insert NaN to break the line
-        result_times.append(time_vals[gap_idx - 1])
-        result_temps.append(np.nan)
-        result_hums.append(np.nan)
+        # Calculate how many intervals are missing in this gap
+        gap_size_seconds = time_diffs[gap_idx]
+        num_missing = int(gap_size_seconds / expected_interval_s) - 1
+
+        # Insert enough NaN markers to prevent moving average from bridging the gap
+        # Insert at least 2 NaN to break small moving average windows
+        num_nan_markers = max(num_missing, 2)
+
+        for _ in range(num_nan_markers):
+            result_times.append(time_vals[gap_idx - 1])
+            result_temps.append(np.nan)
+            result_hums.append(np.nan)
 
         prev_idx = gap_idx
 
