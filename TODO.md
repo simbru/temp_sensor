@@ -17,6 +17,7 @@
 - Cross-subnet dashboard access blocked by university network (need IT help OR SSH tunnel)
 - SSH tunnel command: `ssh -L 8000:127.0.0.1:8000 main@139.184.163.16`
 - Port 8000 chosen (instead of 5006) for consistency
+- Note: Headscale runs on server, and Pi is already connected to Headscale. Issue is: How to serve dashboard to office PCs with current IT setup? If we can avoid Headscale, that does make things easier.  
 
 **What's Left:**
 - Test with real DHT22 sensor hardware on Pi
