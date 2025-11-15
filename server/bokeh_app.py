@@ -178,18 +178,20 @@ def prepare_source_data(raw_data, window_size):
     }
 
 
-def _insert_gap_markers(time_vals, temps, hums, expected_interval_s=2):
+def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
     """
     Insert NaN at time gaps to show missing data in plots.
 
-    Detects where time between consecutive points exceeds expected interval
-    and inserts NaN markers to break line plots, making gaps visible.
+    Detects where time between consecutive points exceeds threshold and
+    inserts proportional NaN markers to prevent moving averages from
+    falsely interpolating across gaps.
 
     Args:
         time_vals: ISO timestamp strings
         temps: Temperature values
         hums: Humidity values
-        expected_interval_s: Expected sensor log interval (default 2s)
+        gap_threshold_s: Time gap threshold in seconds (default 60s = 1 minute)
+                        Gaps larger than this are considered client outages
 
     Returns:
         Tuple of (times, temps, hums) with NaN inserted at gaps
@@ -201,9 +203,8 @@ def _insert_gap_markers(time_vals, temps, hums, expected_interval_s=2):
     times_dt = pd.to_datetime(time_vals)
     time_diffs = times_dt.diff().total_seconds().to_numpy()
 
-    # Detect gaps (any interval > 1.5x expected)
-    gap_threshold = expected_interval_s * 1.5
-    gap_mask = time_diffs > gap_threshold
+    # Detect gaps larger than threshold (e.g., client offline)
+    gap_mask = time_diffs > gap_threshold_s
     gap_indices = np.where(gap_mask)[0]
 
     if len(gap_indices) == 0:
@@ -223,13 +224,15 @@ def _insert_gap_markers(time_vals, temps, hums, expected_interval_s=2):
         result_temps.extend(temps[prev_idx:gap_idx])
         result_hums.extend(hums[prev_idx:gap_idx])
 
-        # Calculate how many intervals are missing in this gap
+        # Calculate how many NaN markers to insert based on gap size
+        # For a 2-second interval sensor, insert one NaN per missing interval
         gap_size_seconds = time_diffs[gap_idx]
-        num_missing = int(gap_size_seconds / expected_interval_s) - 1
+        expected_interval_s = 2  # Typical sensor log interval
+        num_missing = int(gap_size_seconds / expected_interval_s)
 
         # Insert enough NaN markers to prevent moving average from bridging the gap
-        # Insert at least 2 NaN to break small moving average windows
-        num_nan_markers = max(num_missing, 2)
+        # Minimum of 5 ensures even moderate MA windows show the break
+        num_nan_markers = max(num_missing, 5)
 
         for _ in range(num_nan_markers):
             result_times.append(time_vals[gap_idx - 1])
