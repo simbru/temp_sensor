@@ -159,6 +159,10 @@ def prepare_source_data(raw_data, window_size):
         return {"time": time_vals, "temperature": temps, "humidity": hums,
                 "temp_ma": temps, "hum_ma": hums}
 
+    # Insert NaN markers at time gaps for visualization
+    # This shows gaps in plots without storing NaN in HDF5 (reduces lock contention)
+    time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums)
+
     window = max(int(window_size), 1)
     # Use min_periods=window so moving average shows NaN when insufficient data
     # This prevents misleading flat lines when data drops out
@@ -172,6 +176,66 @@ def prepare_source_data(raw_data, window_size):
         "temp_ma": temp_ma,
         "hum_ma": hum_ma,
     }
+
+
+def _insert_gap_markers(time_vals, temps, hums, expected_interval_s=2):
+    """
+    Insert NaN at time gaps to show missing data in plots.
+
+    Detects where time between consecutive points exceeds expected interval
+    and inserts NaN markers to break line plots, making gaps visible.
+
+    Args:
+        time_vals: ISO timestamp strings
+        temps: Temperature values
+        hums: Humidity values
+        expected_interval_s: Expected sensor log interval (default 2s)
+
+    Returns:
+        Tuple of (times, temps, hums) with NaN inserted at gaps
+    """
+    if len(time_vals) < 2:
+        return time_vals, temps, hums
+
+    # Convert to datetime and calculate time gaps
+    times_dt = pd.to_datetime(time_vals)
+    time_diffs = times_dt.diff().dt.total_seconds().to_numpy()
+
+    # Detect gaps (any interval > 1.5x expected)
+    gap_threshold = expected_interval_s * 1.5
+    gap_mask = time_diffs > gap_threshold
+    gap_indices = np.where(gap_mask)[0]
+
+    if len(gap_indices) == 0:
+        return time_vals, temps, hums
+
+    # Build arrays with NaN inserted at each gap
+    result_times = []
+    result_temps = []
+    result_hums = []
+
+    prev_idx = 0
+    for gap_idx in gap_indices:
+        # Add data up to gap
+        result_times.extend(time_vals[prev_idx:gap_idx])
+        result_temps.extend(temps[prev_idx:gap_idx])
+        result_hums.extend(hums[prev_idx:gap_idx])
+
+        # Insert NaN to break the line
+        result_times.append(time_vals[gap_idx - 1])
+        result_temps.append(np.nan)
+        result_hums.append(np.nan)
+
+        prev_idx = gap_idx
+
+    # Add remaining data
+    result_times.extend(time_vals[prev_idx:])
+    result_temps.extend(temps[prev_idx:])
+    result_hums.extend(hums[prev_idx:])
+
+    return (np.array(result_times),
+            np.array(result_temps, dtype=float),
+            np.array(result_hums, dtype=float))
 
 
 # Fetch initial data for first sensor

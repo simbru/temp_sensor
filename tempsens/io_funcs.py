@@ -155,16 +155,15 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
             time.sleep(0.1)  # Small delay between retries
             continue
 
-    # Write to file - including NaN for failed reads to show gaps in plots
-    # This maintains consistency with historical data and ensures CSV exports
-    # accurately reflect when sensor was operational vs. when reads failed
-    write_data_hdf5(timestamp, temperature, humidity)
-    print_to_console(timestamp, temperature, humidity)
+    # Skip writing failed reads to save storage and reduce lock contention
+    # Server-side dashboard will insert NaN for visualization where gaps exist
+    if temperature is not None and humidity is not None:
+        write_data_hdf5(timestamp, temperature, humidity)
+        print_to_console(timestamp, temperature, humidity)
 
-    # ALTERNATIVE: Skip writing failed reads to save storage (currently disabled)
-    # if temperature is not None and humidity is not None:
-    #     write_data_hdf5(timestamp, temperature, humidity)
-    #     print_to_console(timestamp, temperature, humidity)
+    # ALTERNATIVE: Write NaN for failed reads (increases lock contention with networked API)
+    # write_data_hdf5(timestamp, temperature, humidity)
+    # print_to_console(timestamp, temperature, humidity)
 
     # Schedule the next run
     schedule.enter(LOGINTERVAL, 0, log_data)
