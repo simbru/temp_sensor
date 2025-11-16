@@ -160,7 +160,7 @@ def prepare_source_data(raw_data, window_size):
                 "temp_ma": temps, "hum_ma": hums}
 
     # Insert NaN markers at time gaps for visualization
-    # This shows gaps in plots without storing NaN in HDF5 (reduces lock contention)
+    # This shows gaps in plots without storing NaN in SQLite database
     time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums)
 
     window = max(int(window_size), 1)

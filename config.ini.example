@@ -1,5 +1,7 @@
 [DEFAULT]
 loginterval_s = 2
-outputfile = templog.h5
+outputfile = templog.db
 device_name = Temperature Sensor
 api_port = 5000
+max_temp_delta_c = 3.0
+max_humidity_delta_pct = 10.0

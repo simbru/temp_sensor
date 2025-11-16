@@ -27,6 +27,8 @@ DEFAULT_CONFIG_VALUES = {
     "outputfile": "templog.db",
     "device_name": "Temperature Sensor",
     "api_port": "5000",
+    "max_temp_delta_c": "3.0",
+    "max_humidity_delta_pct": "10.0",
 }
 
 def gen_default_config(config_loc=CONFIGPATH, force=False):
@@ -88,6 +90,9 @@ FILENAME = CONFIG["DEFAULT"]["outputfile"]
 LOGINTERVAL = float(CONFIG["DEFAULT"]["loginterval_s"])
 schedule = sched.scheduler(time.time, time.sleep)
 
+# Store last valid reading for spike filtering
+last_valid_reading = {"temperature": None, "humidity": None}
+
 def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar = 5):
     temp = tempbaseline + np.random.randint(tempvar)
     hum = humbaseline + np.random.randint(humvar)
@@ -118,6 +123,12 @@ def init_database(filename=None):
 
         # Enable WAL mode for crash safety and better concurrency
         cursor.execute("PRAGMA journal_mode=WAL")
+
+        # SD card optimizations for Raspberry Pi
+        cursor.execute("PRAGMA synchronous=NORMAL")   # Balance safety/speed (still crash-safe with WAL)
+        cursor.execute("PRAGMA cache_size=-64000")     # 64MB cache to reduce SD wear
+        cursor.execute("PRAGMA temp_store=MEMORY")     # Use RAM for temporary tables
+        cursor.execute("PRAGMA mmap_size=268435456")   # 256MB memory-mapped I/O for faster reads
 
         # Create table if it doesn't exist
         cursor.execute("""
@@ -151,7 +162,7 @@ def write_data(timestamp, temperature, humidity, filename=None):
         conn.commit()
 
 def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
-    global sensor_found
+    global sensor_found, last_valid_reading
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
     # Common retry logic for both real and simulated sensors
@@ -180,11 +191,30 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
             time.sleep(0.1)  # Small delay between retries
             continue
 
-    # Skip writing failed reads to save storage
+    # Spike filtering: reject readings with unrealistic deltas from previous reading
+    # (DHT22 sensors sometimes produce spurious readings that pass checksum but are physically impossible)
+    if temperature is not None and humidity is not None:
+        max_temp_delta = float(CONFIG["DEFAULT"]["max_temp_delta_c"])
+        max_humidity_delta = float(CONFIG["DEFAULT"]["max_humidity_delta_pct"])
+
+        # Check if we have a previous valid reading to compare against
+        if last_valid_reading["temperature"] is not None:
+            temp_delta = abs(temperature - last_valid_reading["temperature"])
+            humidity_delta = abs(humidity - last_valid_reading["humidity"])
+
+            if temp_delta > max_temp_delta or humidity_delta > max_humidity_delta:
+                print(f"[{timestamp}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading")
+                # Skip this reading entirely - don't write to database
+                temperature, humidity = None, None
+
+    # Skip writing failed reads or spike-filtered reads to save storage
     # Server-side dashboard will insert NaN for visualization where gaps exist
     if temperature is not None and humidity is not None:
         write_data(timestamp, temperature, humidity, filename)
         print_to_console(timestamp, temperature, humidity)
+        # Update last valid reading after successful write
+        last_valid_reading["temperature"] = temperature
+        last_valid_reading["humidity"] = humidity
 
     # Schedule the next run
     schedule.enter(LOGINTERVAL, 0, log_data)

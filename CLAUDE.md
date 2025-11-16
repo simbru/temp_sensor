@@ -8,9 +8,10 @@ This is a **distributed** Raspberry Pi temperature and humidity monitoring syste
 
 ### Client Mode (Raspberry Pi)
 1. Reads data from a DHT22 sensor (via `adafruit_dht`)
-2. Logs measurements to a local HDF5 file (`templog.h5`)
-3. Exposes data via FastAPI REST API
-4. Can run standalone with local dashboard
+2. Logs measurements to a local SQLite database (`templog.db`)
+3. Implements spike filtering to reject spurious readings
+4. Exposes data via FastAPI REST API
+5. Can run standalone with local dashboard
 
 ### Server Mode (Lab Server)
 1. Polls multiple Raspberry Pi clients via their APIs
@@ -41,8 +42,9 @@ server/                      # Server-side components (central dashboard)
 
 config.ini                   # Client configuration
 run_client.py               # Client startup script (sensor + API)
-templog.h5                   # HDF5 data file (generated on Pi)
-sensor_data.db              # SQLite cache (generated on server)
+templog.db                   # SQLite database (generated on Pi)
+sensor_data.db              # SQLite database (generated on server)
+migrate_h5_to_sqlite.py     # Migration utility from legacy HDF5 format
 ```
 
 ## Cross-Platform Development
@@ -71,7 +73,11 @@ uv run python -m tempsens.sensor    # Run with real sensor
 **`tempsens/io_funcs.py`**: Central data I/O module
 - Configuration management (via `config.ini`)
 - Sensor reading (real DHT22 or simulated data)
-- HDF5 file operations with thread-safe locking
+- **Spike filtering**: Rejects readings with unrealistic deltas from previous valid reading
+  - Configurable thresholds: `max_temp_delta_c` (default 3°C), `max_humidity_delta_pct` (default 10%)
+  - Prevents DHT22 "bitshifted" errors and spurious readings from entering database
+- SQLite database operations with WAL mode for crash safety
+- SD card optimizations: `synchronous=NORMAL`, large cache, memory-mapped I/O
 - `fetch_log_data_range()`: Time-range filtering for API responses
 - Global `sensor_found` flag determines real vs simulated sensor
 
@@ -128,15 +134,21 @@ uv run python -m tempsens.sensor    # Run with real sensor
 ### Data Flow
 
 **Distributed Mode (Client + Server)**:
-1. **Pi Client**: `sensor.py` → `log_data()` → `write_data_hdf5()` → local HDF5
+1. **Pi Client**: `sensor.py` → `log_data()` → spike filtering → `write_data()` → local SQLite (WAL mode)
 2. **Pi Client**: `api_server.py` serves data via HTTP endpoints
-3. **Server**: `data_aggregator` polls Pi APIs every N seconds
-4. **Server**: Aggregator writes to SQLite database
+3. **Server**: `data_aggregator` polls Pi APIs every N seconds (with gap detection/resync)
+4. **Server**: Aggregator writes to SQLite database (WAL mode)
 5. **Server**: Dashboard reads from SQLite and updates Bokeh plots
 
 **Standalone Mode (Single Pi)**:
-1. `sensor.py` → `log_data()` → `write_data_hdf5()` → local HDF5
-2. `dashboard/bokeh_app.py` reads HDF5 directly
+1. `sensor.py` → `log_data()` → spike filtering → `write_data()` → local SQLite
+2. `dashboard/bokeh_app.py` reads SQLite directly
+
+**Spike Filtering Behavior**:
+- First reading after startup always accepted (no previous reading to compare)
+- Subsequent readings compared to last valid reading
+- Rejected readings logged to console but not written to database
+- Gaps appear in dashboard plots (visualized as breaks in line, not phantom connections)
 
 ### Configuration
 

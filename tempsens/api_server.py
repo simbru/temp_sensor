@@ -1,6 +1,6 @@
 """
 FastAPI server for Raspberry Pi temperature sensor clients.
-Exposes data from local HDF5 file via REST API for remote dashboard access.
+Exposes data from local SQLite database via REST API for remote dashboard access.
 """
 import math
 import socket

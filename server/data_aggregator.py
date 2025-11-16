@@ -46,6 +46,9 @@ class DataAggregator:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
+            # Enable WAL mode for crash safety and better concurrency
+            cursor.execute("PRAGMA journal_mode=WAL")
+
             # Create metadata table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS sensor_metadata (
