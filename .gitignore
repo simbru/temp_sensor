@@ -3,9 +3,11 @@ templog.h5
 templog_test*.h5
 dev/templog_test*.h5
 
-# SQLite database (server-side)
+# SQLite database (server-side and test files)
 sensor_data.db
 *.db
+*.db-shm
+*.db-wal
 
 # Process ID files
 tempsens_running.pid
