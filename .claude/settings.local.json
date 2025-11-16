@@ -11,7 +11,9 @@
       "Bash(timeout 10 uv run:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git mv:*)",
+      "Bash(ssh:*)"
     ],
     "deny": [],
     "ask": []

@@ -22,6 +22,8 @@ app = FastAPI(
 
 def safe_float(val):
     """Convert to float and replace NaN/Inf with None for JSON compatibility."""
+    if val is None:
+        return None
     f = float(val)
     return None if math.isnan(f) or math.isinf(f) else f
 
