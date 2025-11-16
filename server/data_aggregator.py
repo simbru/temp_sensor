@@ -116,12 +116,14 @@ class DataAggregator:
                 if peek_data and len(peek_data.get('data', {}).get('time', [])) > 0:
                     oldest_recent = peek_data['data']['time'][0]
                     # If our last record is older than sensor's oldest recent record,
-                    # there's a gap - fetch full dataset to resync
+                    # there's a gap - fetch large batch to resync
                     if last_timestamp < oldest_recent:
                         logger.warning(f"Gap detected for {sensor_name}: our last={last_timestamp}, sensor oldest recent={oldest_recent}")
-                        print(f"[{timestamp}] Gap detected, requesting full dataset for resync...")
-                        fetch_limit = None  # Request all data
-                        fetch_timeout = 30  # Use longer timeout for full resync (SD card can be slow)
+                        print(f"[{timestamp}] Gap detected, requesting large batch for resync...")
+                        # Request large limit instead of all data (limit=None is too slow on SD card)
+                        # At 2s interval: 10k records = ~5.5 hours, 20k records = ~11 hours
+                        fetch_limit = 20000  # Should cover most outages
+                        fetch_timeout = 15  # Reading 20k records should take ~5-8 seconds
 
             # Fetch new data from sensor
             data = self.client.get_sensor_data(sensor_name, limit=fetch_limit, timeout=fetch_timeout)
