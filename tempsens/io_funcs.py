@@ -1,11 +1,11 @@
 import configparser
 import pathlib
 import os
-import h5py
+import sqlite3
 import numpy as np
 import datetime
 import threading
-import time 
+import time
 import sched
 
 # Import handling based on RasPi/dev
@@ -24,12 +24,10 @@ CONFIGPATH = os.environ.get('TEMPSENS_CONFIG', "config.ini")
 
 DEFAULT_CONFIG_VALUES = {
     "loginterval_s": "2",
-    "outputfile": "templog.h5",
+    "outputfile": "templog.db",
     "device_name": "Temperature Sensor",
     "api_port": "5000",
 }
-
-file_lock = threading.Lock()
 
 def gen_default_config(config_loc=CONFIGPATH, force=False):
     """Write a default config file with sane parameters."""
@@ -105,25 +103,52 @@ def print_to_console(timestamp, temperature, humidity):
     else:
         print(timestamp, "failed read")
 
-def init_data_hdf5(filename = CONFIG["DEFAULT"]["outputfile"]):
-    # Create file if it doesn't exist
-    if pathlib.Path(CONFIG["DEFAULT"]["outputfile"]).exists() is False:
-        print("Save file doesn't exist, creating it at", CONFIG["DEFAULT"]["outputfile"])
-        with h5py.File(filename, "w", locking = False) as f:
-            f.create_dataset("time", (0,), maxshape = (None,), dtype = h5py.string_dtype())
-            f.create_dataset("temperature", (0,), maxshape = (None,), dtype = 'f')
-            f.create_dataset("humidity", (0,), maxshape = (None,), dtype = 'f')
+def init_database(filename=None):
+    """Initialize SQLite database with WAL mode for crash safety."""
+    if filename is None:
+        filename = CONFIG["DEFAULT"]["outputfile"]
 
-def write_data_hdf5(timestamp, temperature, humidity, filename = CONFIG["DEFAULT"]["outputfile"]):
-    # Append to file and resize continously
-    with file_lock:
-        with h5py.File(filename, "a", locking = False) as f:
-            f["time"].resize((f["time"].shape[0] + 1,))
-            f["temperature"].resize((f["temperature"].shape[0] + 1,))
-            f["humidity"].resize((f["humidity"].shape[0] + 1,))
-            f["time"][-1] = timestamp
-            f["temperature"][-1] = temperature
-            f["humidity"][-1]  = humidity
+    db_path = pathlib.Path(filename)
+
+    if not db_path.exists():
+        print(f"Database doesn't exist, creating it at {filename}")
+
+    with sqlite3.connect(filename) as conn:
+        cursor = conn.cursor()
+
+        # Enable WAL mode for crash safety and better concurrency
+        cursor.execute("PRAGMA journal_mode=WAL")
+
+        # Create table if it doesn't exist
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sensor_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL UNIQUE,
+                temperature REAL,
+                humidity REAL
+            )
+        """)
+
+        # Create index on timestamp for fast queries
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_timestamp
+            ON sensor_data(timestamp DESC)
+        """)
+
+        conn.commit()
+
+def write_data(timestamp, temperature, humidity, filename=None):
+    """Write sensor reading to SQLite database."""
+    if filename is None:
+        filename = CONFIG["DEFAULT"]["outputfile"]
+
+    with sqlite3.connect(filename) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO sensor_data (timestamp, temperature, humidity) VALUES (?, ?, ?)",
+            (timestamp, temperature, humidity)
+        )
+        conn.commit()
 
 def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
     global sensor_found
@@ -155,15 +180,11 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
             time.sleep(0.1)  # Small delay between retries
             continue
 
-    # Skip writing failed reads to save storage and reduce lock contention
+    # Skip writing failed reads to save storage
     # Server-side dashboard will insert NaN for visualization where gaps exist
     if temperature is not None and humidity is not None:
-        write_data_hdf5(timestamp, temperature, humidity)
+        write_data(timestamp, temperature, humidity, filename)
         print_to_console(timestamp, temperature, humidity)
-
-    # ALTERNATIVE: Write NaN for failed reads (increases lock contention with networked API)
-    # write_data_hdf5(timestamp, temperature, humidity)
-    # print_to_console(timestamp, temperature, humidity)
 
     # Schedule the next run
     schedule.enter(LOGINTERVAL, 0, log_data)
@@ -171,11 +192,11 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
 
 def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limit=None):
     """
-    Fetches data from .h5 file with optional time range filtering or limit.
+    Fetches data from SQLite database with optional time range filtering or limit.
     Returns data as a dictionary with ISO-formatted time strings (for API compatibility).
 
     Args:
-        filename: Path to HDF5 file
+        filename: Path to SQLite database file
         start_time: Start timestamp as string (ISO format: 'YYYY-MM-DD HH:MM:SS')
         end_time: End timestamp as string (ISO format: 'YYYY-MM-DD HH:MM:SS')
         limit: If specified, return only the last N readings (ignores time filters)
@@ -183,50 +204,53 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
     Returns:
         Dictionary with keys 'time' (ISO strings), 'temperature', 'humidity'
     """
-    # Use timeout on lock to prevent API hanging during sensor retries
-    lock_acquired = file_lock.acquire(timeout=5.0)
-    if not lock_acquired:
-        raise TimeoutError("Could not acquire file lock within 5 seconds")
+    with sqlite3.connect(filename) as conn:
+        cursor = conn.cursor()
 
-    try:
-        with h5py.File(filename, "r", locking=False) as f:
-            # Optimize: If limit specified, only read last N records from HDF5
-            # This avoids loading the entire file (which can be slow on SD cards)
-            if limit is not None:
-                total_records = len(f["time"])
-                start_idx = max(0, total_records - limit)
-                temps = np.array(f["temperature"][start_idx:], dtype="float32")
-                hums = np.array(f["humidity"][start_idx:], dtype="float32")
-                times_str = np.array(f["time"][start_idx:], dtype=str)
-            else:
-                # Read entire dataset (needed for time range filtering)
-                temps = np.array(f["temperature"], dtype="float32")
-                hums = np.array(f["humidity"], dtype="float32")
-                times_str = np.array(f["time"], dtype=str)
-    finally:
-        file_lock.release()
+        # Build query based on parameters
+        if limit is not None:
+            # Get last N readings in descending order, then reverse to chronological
+            query = """
+                SELECT timestamp, temperature, humidity
+                FROM (
+                    SELECT timestamp, temperature, humidity
+                    FROM sensor_data
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                )
+                ORDER BY timestamp ASC
+            """
+            cursor.execute(query, (limit,))
+        elif start_time or end_time:
+            conditions = []
+            params = []
 
-    # Convert string times to datetime64 for filtering
-    times_dt64 = np.array(times_str, dtype=np.datetime64)
+            if start_time:
+                conditions.append("timestamp >= ?")
+                params.append(start_time)
+            if end_time:
+                conditions.append("timestamp <= ?")
+                params.append(end_time)
 
-    # Apply time range filtering if specified (and no limit)
-    if start_time is not None or end_time is not None:
-        mask = np.ones(len(times_dt64), dtype=bool)
+            where_clause = " AND ".join(conditions)
+            query = f"SELECT timestamp, temperature, humidity FROM sensor_data WHERE {where_clause} ORDER BY timestamp"
+            cursor.execute(query, params)
+        else:
+            query = "SELECT timestamp, temperature, humidity FROM sensor_data ORDER BY timestamp"
+            cursor.execute(query)
 
-        if start_time is not None:
-            start_dt64 = np.datetime64(start_time)
-            mask &= times_dt64 >= start_dt64
+        rows = cursor.fetchall()
 
-        if end_time is not None:
-            end_dt64 = np.datetime64(end_time)
-            mask &= times_dt64 <= end_dt64
+    if not rows:
+        return {"time": [], "temperature": [], "humidity": []}
 
-        temps = temps[mask]
-        hums = hums[mask]
-        times_str = times_str[mask]
+    # Convert to lists
+    times_str = [row[0] for row in rows]
+    temps = [row[1] for row in rows]
+    hums = [row[2] for row in rows]
 
     return {
-        "time": times_str.tolist(),
-        "temperature": temps.tolist(),
-        "humidity": hums.tolist()
+        "time": times_str,
+        "temperature": temps,
+        "humidity": hums
     }
