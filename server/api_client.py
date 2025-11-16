@@ -51,12 +51,13 @@ class SensorAPIClient:
             self._last_error = str(e)
             return None
 
-    def get_latest_data(self, limit: int = 100) -> Optional[Dict]:
+    def get_latest_data(self, limit: int = 100, timeout: Optional[int] = None) -> Optional[Dict]:
         """
         Get the most recent N readings.
 
         Args:
             limit: Number of readings to fetch (1-10000)
+            timeout: Optional custom timeout in seconds (uses default if not specified)
 
         Returns:
             Data dictionary with 'device_name', 'device_ip', 'data', 'metadata' or None
@@ -65,7 +66,7 @@ class SensorAPIClient:
             response = requests.get(
                 f"{self.base_url}/data/latest",
                 params={"limit": limit},
-                timeout=self.timeout
+                timeout=timeout or self.timeout
             )
             response.raise_for_status()
             return response.json()
@@ -164,7 +165,8 @@ class MultiSensorClient:
         sensor_name: str,
         limit: Optional[int] = None,
         start: Optional[str] = None,
-        end: Optional[str] = None
+        end: Optional[str] = None,
+        timeout: Optional[int] = None
     ) -> Optional[Dict]:
         """
         Get data from a specific sensor.
@@ -174,6 +176,7 @@ class MultiSensorClient:
             limit: If specified, get last N readings (ignores time range)
             start: Start timestamp for range query
             end: End timestamp for range query
+            timeout: Optional custom timeout in seconds
 
         Returns:
             Data dictionary or None if sensor not found or request fails
@@ -185,7 +188,7 @@ class MultiSensorClient:
         client = self.sensors[sensor_name]
 
         if limit is not None:
-            return client.get_latest_data(limit)
+            return client.get_latest_data(limit, timeout=timeout)
         else:
             return client.get_data_range(start, end)
 

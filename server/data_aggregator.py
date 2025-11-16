@@ -109,6 +109,7 @@ class DataAggregator:
 
             # Detect if we need a full resync (gap in data)
             fetch_limit = limit
+            fetch_timeout = None  # Use default timeout
             if last_timestamp is not None:
                 # First, peek at sensor's recent data to check for gaps
                 peek_data = self.client.get_sensor_data(sensor_name, limit=10)
@@ -120,9 +121,10 @@ class DataAggregator:
                         logger.warning(f"Gap detected for {sensor_name}: our last={last_timestamp}, sensor oldest recent={oldest_recent}")
                         print(f"[{timestamp}] Gap detected, requesting full dataset for resync...")
                         fetch_limit = None  # Request all data
+                        fetch_timeout = 30  # Use longer timeout for full resync (SD card can be slow)
 
             # Fetch new data from sensor
-            data = self.client.get_sensor_data(sensor_name, limit=fetch_limit)
+            data = self.client.get_sensor_data(sensor_name, limit=fetch_limit, timeout=fetch_timeout)
 
             if data is None:
                 self._update_metadata(sensor_name, status="error", error="Failed to fetch data")
