@@ -190,25 +190,27 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
 
     try:
         with h5py.File(filename, "r", locking=False) as f:
-            temps = np.array(f["temperature"], dtype="float32")
-            hums = np.array(f["humidity"], dtype="float32")
-            times_str = np.array(f["time"], dtype=str)
+            # Optimize: If limit specified, only read last N records from HDF5
+            # This avoids loading the entire file (which can be slow on SD cards)
+            if limit is not None:
+                total_records = len(f["time"])
+                start_idx = max(0, total_records - limit)
+                temps = np.array(f["temperature"][start_idx:], dtype="float32")
+                hums = np.array(f["humidity"][start_idx:], dtype="float32")
+                times_str = np.array(f["time"][start_idx:], dtype=str)
+            else:
+                # Read entire dataset (needed for time range filtering)
+                temps = np.array(f["temperature"], dtype="float32")
+                hums = np.array(f["humidity"], dtype="float32")
+                times_str = np.array(f["time"], dtype=str)
     finally:
         file_lock.release()
 
     # Convert string times to datetime64 for filtering
     times_dt64 = np.array(times_str, dtype=np.datetime64)
 
-    # Apply limit if specified (get last N readings)
-    if limit is not None:
-        if limit < len(times_dt64):
-            temps = temps[-limit:]
-            hums = hums[-limit:]
-            times_str = times_str[-limit:]
-            times_dt64 = times_dt64[-limit:]
-
     # Apply time range filtering if specified (and no limit)
-    elif start_time is not None or end_time is not None:
+    if start_time is not None or end_time is not None:
         mask = np.ones(len(times_dt64), dtype=bool)
 
         if start_time is not None:
