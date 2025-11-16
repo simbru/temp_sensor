@@ -52,6 +52,12 @@ class DataAggregator:
 
             # Enable WAL mode for crash safety and better concurrency
             cursor.execute("PRAGMA journal_mode=WAL")
+            
+            # Performance optimizations for multi-sensor aggregation
+            cursor.execute("PRAGMA synchronous=NORMAL")  # Balance safety/speed
+            cursor.execute("PRAGMA cache_size=-64000")   # 64MB cache
+            cursor.execute("PRAGMA temp_store=MEMORY")   # Use RAM for temp tables
+            cursor.execute("PRAGMA mmap_size=268435456") # 256MB memory-mapped I/O
 
             # Create metadata table
             cursor.execute("""
@@ -78,7 +84,7 @@ class DataAggregator:
                 """)
                 cursor.execute(f"""
                     CREATE INDEX IF NOT EXISTS idx_{table_name}_timestamp
-                    ON {table_name}(timestamp)
+                    ON {table_name}(timestamp DESC)
                 """)
 
             conn.commit()
