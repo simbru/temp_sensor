@@ -86,9 +86,12 @@ class DataAggregator:
         """
         Fetch latest data from a sensor and update local database.
 
+        Implements intelligent resync: if gap detected, fetches full dataset once,
+        otherwise fetches only recent records for efficiency.
+
         Args:
             sensor_name: Name of sensor to update
-            limit: Number of recent readings to fetch
+            limit: Number of recent readings to fetch (default 1000)
         """
         table_name = self._get_table_name(sensor_name)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -104,8 +107,22 @@ class DataAggregator:
 
             logger.debug(f"Last timestamp in DB for {sensor_name}: {last_timestamp}")
 
+            # Detect if we need a full resync (gap in data)
+            fetch_limit = limit
+            if last_timestamp is not None:
+                # First, peek at sensor's recent data to check for gaps
+                peek_data = self.client.get_sensor_data(sensor_name, limit=10)
+                if peek_data and len(peek_data.get('data', {}).get('time', [])) > 0:
+                    oldest_recent = peek_data['data']['time'][0]
+                    # If our last record is older than sensor's oldest recent record,
+                    # there's a gap - fetch full dataset to resync
+                    if last_timestamp < oldest_recent:
+                        logger.warning(f"Gap detected for {sensor_name}: our last={last_timestamp}, sensor oldest recent={oldest_recent}")
+                        print(f"[{timestamp}] Gap detected, requesting full dataset for resync...")
+                        fetch_limit = None  # Request all data
+
             # Fetch new data from sensor
-            data = self.client.get_sensor_data(sensor_name, limit=limit)
+            data = self.client.get_sensor_data(sensor_name, limit=fetch_limit)
 
             if data is None:
                 self._update_metadata(sensor_name, status="error", error="Failed to fetch data")
