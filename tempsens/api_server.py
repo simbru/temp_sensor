@@ -93,13 +93,13 @@ async def get_status():
 
 @app.get("/data/latest")
 async def get_latest_data(
-    limit: int = Query(default=100, ge=1, le=10000, description="Number of most recent readings to return")
+    limit: int = Query(default=100, ge=1, le=50000, description="Number of most recent readings to return")
 ):
     """
     Get the most recent N readings from the sensor.
 
     Args:
-        limit: Number of readings to return (1-10000, default 100)
+        limit: Number of readings to return (1-50000, default 100)
 
     Returns:
         JSON with arrays of time (ISO format), temperature (°C), and humidity (%)
