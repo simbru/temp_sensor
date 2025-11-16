@@ -97,7 +97,7 @@ def get_system_metrics():
         import sqlite3
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM data")
+            cursor.execute("SELECT COUNT(*) FROM sensor_data")
             record_count = cursor.fetchone()[0]
     except Exception:
         record_count = 0
