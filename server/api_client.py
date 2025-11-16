@@ -23,12 +23,22 @@ class SensorAPIClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._last_error = None
+        # Use a session for connection pooling and reuse
+        self._session = requests.Session()
+        # Configure connection pooling
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=1,
+            pool_maxsize=2,
+            max_retries=0
+        )
+        self._session.mount('http://', adapter)
+        self._session.mount('https://', adapter)
 
     @property
     def is_available(self) -> bool:
         """Check if sensor is currently reachable."""
         try:
-            response = requests.get(f"{self.base_url}/", timeout=5)
+            response = self._session.get(f"{self.base_url}/", timeout=5)
             return response.status_code == 200
         except Exception as e:
             self._last_error = str(e)
@@ -42,7 +52,7 @@ class SensorAPIClient:
             Status dictionary or None if request fails
         """
         try:
-            response = requests.get(f"{self.base_url}/status", timeout=self.timeout)
+            response = self._session.get(f"{self.base_url}/status", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -62,7 +72,7 @@ class SensorAPIClient:
             Data dictionary with 'device_name', 'device_ip', 'data', 'metadata' or None
         """
         try:
-            response = requests.get(
+            response = self._session.get(
                 f"{self.base_url}/data/latest",
                 params={"limit": limit},
                 timeout=timeout or self.timeout
@@ -101,7 +111,7 @@ class SensorAPIClient:
             params["limit"] = limit
 
         try:
-            response = requests.get(
+            response = self._session.get(
                 f"{self.base_url}/data/range",
                 params=params,
                 timeout=timeout or self.timeout
@@ -121,7 +131,7 @@ class SensorAPIClient:
             Configuration dictionary or None if request fails
         """
         try:
-            response = requests.get(f"{self.base_url}/config", timeout=self.timeout)
+            response = self._session.get(f"{self.base_url}/config", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -133,6 +143,10 @@ class SensorAPIClient:
     def last_error(self) -> Optional[str]:
         """Get the last error message."""
         return self._last_error
+
+    def close(self):
+        """Close the session and cleanup resources."""
+        self._session.close()
 
 
 class MultiSensorClient:

@@ -246,63 +246,77 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
     if len(time_vals) < 2:
         return time_vals, temps, hums
 
-    # Convert millisecond timestamps to datetime and calculate time gaps
-    times_dt = pd.to_datetime(time_vals, unit='ms')
-    time_diffs = times_dt.diff().total_seconds().to_numpy()
-
+    # Calculate time gaps directly from milliseconds (avoid datetime conversion)
+    time_diffs_ms = np.diff(time_vals)
+    time_diffs_s = time_diffs_ms / 1000.0
+    
     # Detect gaps larger than threshold (e.g., client offline)
-    gap_mask = time_diffs > gap_threshold_s
-    gap_indices = np.where(gap_mask)[0]
-
+    gap_mask = time_diffs_s > gap_threshold_s
+    gap_indices = np.where(gap_mask)[0] + 1  # +1 because diff shifts indices
+    
     if len(gap_indices) == 0:
         return time_vals, temps, hums
-
-    # Build arrays with NaN inserted at each gap
-    # Insert multiple NaN proportional to gap size to ensure even large moving
-    # average windows show breaks (prevents false interpolation across gaps)
-    result_times = []
-    result_temps = []
-    result_hums = []
-
-    prev_idx = 0
+    
+    # Calculate exact size needed by examining each gap
+    total_nan_markers = 0
     for gap_idx in gap_indices:
-        # Add data up to gap
-        result_times.extend(time_vals[prev_idx:gap_idx])
-        result_temps.extend(temps[prev_idx:gap_idx])
-        result_hums.extend(hums[prev_idx:gap_idx])
-
+        gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
+        gap_size_seconds = gap_size_ms / 1000.0
+        expected_interval_s = 2
+        num_missing = int(gap_size_seconds / expected_interval_s)
+        num_nan_markers = max(min(num_missing, 100), 5)
+        total_nan_markers += num_nan_markers
+    
+    # Preallocate result arrays with exact size
+    result_size = len(time_vals) + total_nan_markers
+    result_times = np.empty(result_size, dtype=float)
+    result_temps = np.empty(result_size, dtype=float)
+    result_hums = np.empty(result_size, dtype=float)
+    
+    write_idx = 0
+    prev_idx = 0
+    
+    for gap_idx in gap_indices:
+        # Copy data up to gap
+        chunk_size = gap_idx - prev_idx
+        result_times[write_idx:write_idx+chunk_size] = time_vals[prev_idx:gap_idx]
+        result_temps[write_idx:write_idx+chunk_size] = temps[prev_idx:gap_idx]
+        result_hums[write_idx:write_idx+chunk_size] = hums[prev_idx:gap_idx]
+        write_idx += chunk_size
+        
         # Calculate how many NaN markers to insert based on gap size
-        # For a 2-second interval sensor, insert one NaN per missing interval
-        gap_size_seconds = time_diffs[gap_idx]
+        gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
+        gap_size_seconds = gap_size_ms / 1000.0
         expected_interval_s = 2  # Typical sensor log interval
         num_missing = int(gap_size_seconds / expected_interval_s)
-
+        
         # Insert enough NaN markers to prevent moving average from bridging the gap
         # Minimum of 5 ensures even moderate MA windows show the break
-        num_nan_markers = max(num_missing, 5)
-
+        num_nan_markers = max(min(num_missing, 100), 5)  # Cap at 100 to avoid huge gaps
+        
         # Insert NaN with interpolated millisecond timestamps within the gap
-        # This ensures Bokeh recognizes them as distinct points
         gap_start_ms = time_vals[gap_idx - 1]
-        gap_end_ms = time_vals[gap_idx]
-        time_step_ms = (gap_end_ms - gap_start_ms) / (num_nan_markers + 1)
-
+        time_step_ms = gap_size_ms / (num_nan_markers + 1)
+        
         for i in range(1, num_nan_markers + 1):
             nan_timestamp_ms = gap_start_ms + (time_step_ms * i)
-            result_times.append(nan_timestamp_ms)
-            result_temps.append(np.nan)
-            result_hums.append(np.nan)
-
+            result_times[write_idx] = nan_timestamp_ms
+            result_temps[write_idx] = np.nan
+            result_hums[write_idx] = np.nan
+            write_idx += 1
+        
         prev_idx = gap_idx
-
-    # Add remaining data
-    result_times.extend(time_vals[prev_idx:])
-    result_temps.extend(temps[prev_idx:])
-    result_hums.extend(hums[prev_idx:])
-
-    return (np.array(result_times),
-            np.array(result_temps, dtype=float),
-            np.array(result_hums, dtype=float))
+    
+    # Copy remaining data
+    remaining = len(time_vals) - prev_idx
+    result_times[write_idx:write_idx+remaining] = time_vals[prev_idx:]
+    result_temps[write_idx:write_idx+remaining] = temps[prev_idx:]
+    result_hums[write_idx:write_idx+remaining] = hums[prev_idx:]
+    write_idx += remaining
+    
+    return (result_times[:write_idx],
+            result_temps[:write_idx],
+            result_hums[:write_idx])
 
 
 # Fetch initial data for first sensor
