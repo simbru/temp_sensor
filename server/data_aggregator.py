@@ -120,8 +120,8 @@ class DataAggregator:
             else:
                 data = self.client.get_sensor_data(sensor_name, limit=limit)
                 if data is None:
-                    self._update_metadata(sensor_name, status="error", error="Failed to fetch data")
                     logger.warning(f"Failed to fetch data from {sensor_name}")
+                    self._handle_fetch_failure(sensor_name, last_timestamp, "Failed to fetch data")
                     return
 
                 sensor_data = data.get("data", {})
@@ -150,6 +150,36 @@ class DataAggregator:
         except Exception as e:
             logger.error(f"Error updating data for {sensor_name}: {e}")
             self._update_metadata(sensor_name, status="error", error=str(e))
+
+    def _handle_fetch_failure(
+        self,
+        sensor_name: str,
+        last_timestamp: Optional[str],
+        error_message: str
+    ) -> None:
+        """Mark short-lived fetch failures as idle, otherwise flag error."""
+        if last_timestamp is None:
+            self._update_metadata(sensor_name, status="error", error=error_message)
+            return
+
+        last_dt = self._parse_ts(last_timestamp)
+        if last_dt is None:
+            self._update_metadata(sensor_name, status="error", error=error_message)
+            return
+
+        now_dt = datetime.now()
+        transient_window_seconds = max(self.poll_interval * 2, self._min_gap_threshold)
+        if (now_dt - last_dt) <= timedelta(seconds=transient_window_seconds):
+            # Treat single missed polls as "connected · waiting" so dashboard shows 🟠 instead of 🔴.
+            logger.info(
+                "Transient fetch miss for %s (last sample %s); marking as idle",
+                sensor_name,
+                last_timestamp,
+            )
+            self._update_metadata(sensor_name, status="idle", error=None)
+            return
+
+        self._update_metadata(sensor_name, status="error", error=error_message)
 
     def _update_metadata(
         self,
