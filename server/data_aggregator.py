@@ -5,10 +5,9 @@ Uses SQLite for persistent storage of sensor data.
 import logging
 import sqlite3
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -113,6 +112,7 @@ class DataAggregator:
             # Detect if we need a full resync (gap in data)
             fetch_limit = limit
             fetch_timeout = None  # Use default timeout
+            gap_detected = False
             if last_timestamp is not None:
                 # First, peek at sensor's recent data to check for gaps
                 peek_data = self.client.get_sensor_data(sensor_name, limit=10)
@@ -127,6 +127,7 @@ class DataAggregator:
                         # At 2s interval: 10k records = ~5.5 hours, 20k records = ~11 hours
                         fetch_limit = 20000  # Should cover most outages
                         fetch_timeout = 15  # Reading 20k records should take ~5-8 seconds
+                        gap_detected = True
 
             # Fetch new data from sensor
             data = self.client.get_sensor_data(sensor_name, limit=fetch_limit, timeout=fetch_timeout)
@@ -164,11 +165,19 @@ class DataAggregator:
 
                 logger.info(f"Added {len(new_records)} new records for {sensor_name}")
 
+            # Determine status for metadata
+            if not new_records:
+                status_value = "idle"
+            elif gap_detected:
+                status_value = "syncing"
+            else:
+                status_value = "active"
+
             # Update metadata
             self._update_metadata(
                 sensor_name,
                 device_ip=device_ip,
-                status="active",
+                status=status_value,
                 error=None
             )
 

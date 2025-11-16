@@ -154,7 +154,7 @@ Use Task Scheduler to run at startup.
 ## Dashboard Features
 
 - **Sensor dropdown:** Switch between sensors
-- **Status indicator:** 🟢 Active / 🔴 Offline
+- **Status indicator:** 🟢 receiving data · 🟠 connected/waiting · 🟡 syncing backlog · 🔴 offline/error
 - **Time window:** Preset buttons (10min - 1 week) or custom
 - **Moving average:** Adjustable smoothing
 - **CSV export:** Download current sensor's data

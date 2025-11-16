@@ -104,6 +104,35 @@ status_state = {
     "ma_text": "",
 }
 
+STATUS_DISPLAY = {
+    "active": {"icon": "🟢", "label": "Receiving data"},
+    "idle": {"icon": "🟠", "label": "Connected · waiting"},
+    "syncing": {"icon": "🟡", "label": "Syncing backlog"},
+    "error": {"icon": "🔴", "label": "Offline or unreachable"},
+    "unknown": {"icon": "🔴", "label": "Status unavailable"},
+}
+
+DEFAULT_STATUS_DISPLAY = STATUS_DISPLAY["unknown"]
+
+
+def _resolve_status_display(metadata: dict | None) -> tuple[str, str]:
+    """Return emoji and label for current sensor status."""
+    status_value = (metadata or {}).get("status") or "unknown"
+    status_key = status_value.lower() if isinstance(status_value, str) else "unknown"
+    display = STATUS_DISPLAY.get(status_key, DEFAULT_STATUS_DISPLAY)
+    if metadata and metadata.get("last_error"):
+        display = STATUS_DISPLAY["error"]
+    return display["icon"], display["label"]
+
+
+def _format_metadata_timestamp(timestamp_str: str | None) -> str:
+    if not timestamp_str:
+        return "—"
+    try:
+        return pd.to_datetime(timestamp_str).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return str(timestamp_str)
+
 
 def _coerce_window(value, fallback: float, minimum: float, maximum: float | None = None) -> float:
     try:
@@ -869,22 +898,34 @@ def update_data():
 
         # Get sensor metadata
         metadata = aggregator.get_sensor_metadata(sensor_name)
-        status_indicator = "🟢" if metadata and metadata["status"] == "active" else "🔴"
-        device_ip = metadata["device_ip"] if metadata else "unknown"
+        status_icon, status_label = _resolve_status_display(metadata)
+        metadata_safe = metadata or {}
+        device_ip = metadata_safe.get("device_ip") or "unknown"
+        last_sync_str = _format_metadata_timestamp(metadata_safe.get("last_update"))
+        last_error = metadata_safe.get("last_error")
+        error_html = ""
+        if last_error:
+            error_html = f"<p style='font-size:13px;margin:4px 0 0;color:#c0392b;'>Last error: {last_error}</p>"
 
         current_readings.text = f"""
         <div style="background-color:#f0f0f0;padding:18px;border-radius:5px;margin-bottom:18px;display:flex;flex-wrap:wrap;gap:24px;align-items:center;">
             <div style="min-width:150px;">
                 <h3 style="margin:0 0 6px 0;font-size:16px;">Sensor</h3>
-                <p style="font-size:18px;margin:0;">{status_indicator} {sensor_name}</p>
+                <p style="font-size:18px;margin:0;">{status_icon} {sensor_name}</p>
+                <p style="font-size:13px;margin:4px 0 0;color:#555;">{status_label}</p>
             </div>
             <div style="min-width:150px;">
                 <h3 style="margin:0 0 6px 0;font-size:16px;">IP Address</h3>
                 <p style="font-size:16px;margin:0;">{device_ip}</p>
             </div>
             <div style="min-width:150px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">Time</h3>
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Data Time</h3>
                 <p style="font-size:18px;margin:0;">{curr_time_str}</p>
+            </div>
+            <div style="min-width:150px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Last Sync</h3>
+                <p style="font-size:16px;margin:0;">{last_sync_str}</p>
+                {error_html}
             </div>
             <div style="min-width:150px;">
                 <h3 style="margin:0 0 6px 0;font-size:16px;">Readings</h3>
