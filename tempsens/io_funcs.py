@@ -238,8 +238,8 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
         cursor = conn.cursor()
 
         # Build query based on parameters
-        if limit is not None:
-            # Get last N readings in descending order, then reverse to chronological
+        if limit is not None and not start_time and not end_time:
+            # Original behavior: get last N readings regardless of range
             query = """
                 SELECT timestamp, temperature, humidity
                 FROM (
@@ -251,7 +251,7 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
                 ORDER BY timestamp ASC
             """
             cursor.execute(query, (limit,))
-        elif start_time or end_time:
+        else:
             conditions = []
             params = []
 
@@ -262,12 +262,14 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
                 conditions.append("timestamp <= ?")
                 params.append(end_time)
 
-            where_clause = " AND ".join(conditions)
-            query = f"SELECT timestamp, temperature, humidity FROM sensor_data WHERE {where_clause} ORDER BY timestamp"
+            where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+            query = f"SELECT timestamp, temperature, humidity FROM sensor_data{where_clause} ORDER BY timestamp"
+
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
+
             cursor.execute(query, params)
-        else:
-            query = "SELECT timestamp, temperature, humidity FROM sensor_data ORDER BY timestamp"
-            cursor.execute(query)
 
         rows = cursor.fetchall()
 

@@ -133,7 +133,8 @@ async def get_latest_data(
 @app.get("/data/range")
 async def get_data_range(
     start: Optional[str] = Query(default=None, description="Start timestamp (ISO format: YYYY-MM-DD HH:MM:SS)"),
-    end: Optional[str] = Query(default=None, description="End timestamp (ISO format: YYYY-MM-DD HH:MM:SS)")
+    end: Optional[str] = Query(default=None, description="End timestamp (ISO format: YYYY-MM-DD HH:MM:SS)"),
+    limit: Optional[int] = Query(default=None, ge=1, le=50000, description="Optional cap on returned rows")
 ):
     """
     Get readings within a specific time range.
@@ -146,7 +147,7 @@ async def get_data_range(
         JSON with arrays of time (ISO format), temperature (°C), and humidity (%)
     """
     try:
-        data = io_funcs.fetch_log_data_range(start_time=start, end_time=end)
+        data = io_funcs.fetch_log_data_range(start_time=start, end_time=end, limit=limit)
         device_info = get_device_info()
 
         return {
@@ -161,7 +162,8 @@ async def get_data_range(
                 "count": len(data["time"]),
                 "start": start,
                 "end": end,
-                "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"])
+                "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"]),
+                "limit": limit
             }
         }
     except Exception as e:

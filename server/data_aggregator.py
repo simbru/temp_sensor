@@ -5,9 +5,9 @@ Uses SQLite for persistent storage of sensor data.
 import logging
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -36,6 +36,10 @@ class DataAggregator:
         self.client = multi_sensor_client
         self.db_path = Path(db_path)
         self.poll_interval = poll_interval
+        self._resync_batch_limit = 5000
+        self._resync_timeout = max(15, poll_interval * 2)
+        self._min_gap_threshold = 60  # seconds
+        self._start_of_time = "0001-01-01 00:00:00"
         self._stop_polling = threading.Event()
         self._polling_thread = None
         self._init_database()
@@ -101,59 +105,30 @@ class DataAggregator:
         logger.info(f"Updating data for sensor: {sensor_name}")
 
         try:
-            # Get latest timestamp in our database
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute(f"SELECT MAX(timestamp) FROM {table_name}")
-                last_timestamp = cursor.fetchone()[0]
-
+            last_timestamp = self._fetch_last_timestamp(table_name)
             logger.debug(f"Last timestamp in DB for {sensor_name}: {last_timestamp}")
 
-            # Detect if we need a full resync (gap in data)
-            fetch_limit = limit
-            fetch_timeout = None  # Use default timeout
-            gap_detected = False
-            if last_timestamp is not None:
-                # First, peek at sensor's recent data to check for gaps
-                peek_data = self.client.get_sensor_data(sensor_name, limit=10)
-                if peek_data and len(peek_data.get('data', {}).get('time', [])) > 0:
-                    oldest_recent = peek_data['data']['time'][0]
-                    # If our last record is older than sensor's oldest recent record,
-                    # there's a gap - fetch large batch to resync
-                    if last_timestamp < oldest_recent:
-                        logger.warning(f"Gap detected for {sensor_name}: our last={last_timestamp}, sensor oldest recent={oldest_recent}")
-                        print(f"[{timestamp}] Gap detected, requesting large batch for resync...")
-                        # Request large limit instead of all data (limit=None is too slow on SD card)
-                        # At 2s interval: 10k records = ~5.5 hours, 20k records = ~11 hours
-                        fetch_limit = 20000  # Should cover most outages
-                        fetch_timeout = 15  # Reading 20k records should take ~5-8 seconds
-                        gap_detected = True
+            device_ip = "unknown"
+            status_value = "idle"
+            new_records: List[Tuple[str, float, float]] = []
 
-            # Fetch new data from sensor
-            data = self.client.get_sensor_data(sensor_name, limit=fetch_limit, timeout=fetch_timeout)
+            if self._should_resync(sensor_name, last_timestamp):
+                logger.warning(f"Gap detected for {sensor_name}; initiating ranged resync")
+                print(f"[{timestamp}] Gap detected, streaming backlog for {sensor_name}...")
+                new_records, device_ip = self._resync_sensor(sensor_name, last_timestamp)
+                status_value = "syncing" if new_records else "idle"
+            else:
+                data = self.client.get_sensor_data(sensor_name, limit=limit)
+                if data is None:
+                    self._update_metadata(sensor_name, status="error", error="Failed to fetch data")
+                    logger.warning(f"Failed to fetch data from {sensor_name}")
+                    return
 
-            if data is None:
-                self._update_metadata(sensor_name, status="error", error="Failed to fetch data")
-                logger.warning(f"Failed to fetch data from {sensor_name}")
-                return
+                sensor_data = data.get("data", {})
+                device_ip = data.get("device_ip", "unknown")
+                new_records = self._extract_new_records(sensor_data, last_timestamp)
+                status_value = "active" if new_records else "idle"
 
-            logger.debug(f"Fetched {len(data.get('data', {}).get('time', []))} records from {sensor_name}")
-
-            sensor_data = data["data"]
-            device_ip = data.get("device_ip", "unknown")
-
-            # Filter to only new data points
-            new_records = []
-            for i in range(len(sensor_data["time"])):
-                timestamp = sensor_data["time"][i]
-                if last_timestamp is None or timestamp > last_timestamp:
-                    new_records.append((
-                        timestamp,
-                        sensor_data["temperature"][i],
-                        sensor_data["humidity"][i]
-                    ))
-
-            # Insert new records
             if new_records:
                 with sqlite3.connect(self.db_path) as conn:
                     cursor = conn.cursor()
@@ -165,15 +140,6 @@ class DataAggregator:
 
                 logger.info(f"Added {len(new_records)} new records for {sensor_name}")
 
-            # Determine status for metadata
-            if not new_records:
-                status_value = "idle"
-            elif gap_detected:
-                status_value = "syncing"
-            else:
-                status_value = "active"
-
-            # Update metadata
             self._update_metadata(
                 sensor_name,
                 device_ip=device_ip,
@@ -350,3 +316,84 @@ class DataAggregator:
         """Poll all sensors once (synchronous)."""
         for sensor_name in self.client.get_all_sensor_names():
             self.update_sensor_data(sensor_name)
+
+    def _fetch_last_timestamp(self, table_name: str) -> Optional[str]:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT MAX(timestamp) FROM {table_name}")
+            return cursor.fetchone()[0]
+
+    def _should_resync(self, sensor_name: str, last_timestamp: Optional[str]) -> bool:
+        if last_timestamp is None:
+            return True
+
+        peek_data = self.client.get_sensor_data(sensor_name, limit=10)
+        if not peek_data:
+            return False
+
+        peek_times = peek_data.get("data", {}).get("time", [])
+        if not peek_times:
+            return False
+
+        newest_dt = self._parse_ts(peek_times[-1])
+        last_dt = self._parse_ts(last_timestamp)
+        if newest_dt is None or last_dt is None:
+            return False
+
+        gap_threshold = max(self.poll_interval * 6, self._min_gap_threshold)
+        return (newest_dt - last_dt) > timedelta(seconds=gap_threshold)
+
+    def _resync_sensor(self, sensor_name: str, start_timestamp: Optional[str]) -> Tuple[List[Tuple[str, float, float]], Optional[str]]:
+        records: List[Tuple[str, float, float]] = []
+        current_last = start_timestamp
+        device_ip: Optional[str] = None
+
+        while True:
+            request_start = current_last if current_last is not None else self._start_of_time
+            data = self.client.get_sensor_data(
+                sensor_name,
+                start=request_start,
+                range_limit=self._resync_batch_limit,
+                timeout=self._resync_timeout
+            )
+
+            if data is None:
+                break
+
+            device_ip = data.get("device_ip", device_ip)
+            sensor_data = data.get("data", {})
+            chunk = self._extract_new_records(sensor_data, current_last)
+
+            if not chunk:
+                break
+
+            records.extend(chunk)
+            current_last = chunk[-1][0]
+
+            if len(sensor_data.get("time", [])) < self._resync_batch_limit:
+                break
+
+        return records, device_ip
+
+    @staticmethod
+    def _extract_new_records(sensor_data: Dict, last_timestamp: Optional[str]) -> List[Tuple[str, float, float]]:
+        times = sensor_data.get("time", [])
+        temps = sensor_data.get("temperature", [])
+        hums = sensor_data.get("humidity", [])
+
+        new_records: List[Tuple[str, float, float]] = []
+        for i in range(len(times)):
+            timestamp = times[i]
+            if last_timestamp is None or timestamp > last_timestamp:
+                new_records.append((timestamp, temps[i], hums[i]))
+
+        return new_records
+
+    @staticmethod
+    def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts)
+        except ValueError:
+            return None

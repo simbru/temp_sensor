@@ -4,6 +4,7 @@ Run with: bokeh serve --show server/bokeh_app.py
 """
 import configparser
 import logging
+import math
 import pathlib
 import sys
 import time
@@ -88,6 +89,8 @@ DEFAULT_TEMP_CENTER = 20.0
 DEFAULT_HUM_CENTER = 50.0
 TEMP_CENTER_DEADBAND = 0.25
 HUM_CENTER_DEADBAND = 2.0
+MAX_FETCH_SAMPLES = 200000
+FETCH_PADDING_SAMPLES = 200
 
 UPDATE_INTERVAL = dashboard_update_ms
 SAMPLE_INTERVAL_SECONDS = poll_interval  # Approximate
@@ -103,6 +106,18 @@ status_state = {
     "sample_text": SAMPLE_RATE_TEXT,
     "ma_text": "",
 }
+
+
+def _determine_fetch_limit() -> int | None:
+    minutes = current_window.get("minutes")
+    if minutes is None:
+        return None
+
+    seconds = max(float(minutes) * 60.0, float(SAMPLE_INTERVAL_SECONDS))
+    sample_interval = max(float(SAMPLE_INTERVAL_SECONDS), 1.0)
+    estimated_samples = int(math.ceil(seconds / sample_interval)) + FETCH_PADDING_SAMPLES
+    estimated_samples = max(estimated_samples, 1000)
+    return min(estimated_samples, MAX_FETCH_SAMPLES)
 
 STATUS_DISPLAY = {
     "active": {"icon": "🟢", "label": "Receiving data"},
@@ -825,8 +840,8 @@ def update_data():
         sensor_name = current_sensor_state["name"]
         logger.debug(f"update_data() called for sensor: {sensor_name}")
 
-        # Fetch data from aggregator
-        new_data = aggregator.get_sensor_data(sensor_name, limit=10000)
+        fetch_limit = _determine_fetch_limit()
+        new_data = aggregator.get_sensor_data(sensor_name, limit=fetch_limit)
 
         if not new_data or len(new_data.get("time", [])) == 0:
             logger.warning(f"No data available for sensor: {sensor_name}")

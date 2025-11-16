@@ -3,7 +3,6 @@ HTTP client for fetching data from Raspberry Pi temperature sensor APIs.
 """
 import logging
 from typing import Dict, List, Optional
-from datetime import datetime
 
 import requests
 
@@ -79,6 +78,7 @@ class SensorAPIClient:
         self,
         start: Optional[str] = None,
         end: Optional[str] = None,
+        limit: Optional[int] = None,
         timeout: Optional[int] = None
     ) -> Optional[Dict]:
         """
@@ -97,6 +97,8 @@ class SensorAPIClient:
             params["start"] = start
         if end:
             params["end"] = end
+        if limit is not None:
+            params["limit"] = limit
 
         try:
             response = requests.get(
@@ -168,6 +170,7 @@ class MultiSensorClient:
         limit: Optional[int] = None,
         start: Optional[str] = None,
         end: Optional[str] = None,
+        range_limit: Optional[int] = None,
         timeout: Optional[int] = None
     ) -> Optional[Dict]:
         """
@@ -192,7 +195,7 @@ class MultiSensorClient:
         if limit is not None:
             return client.get_latest_data(limit, timeout=timeout)
         else:
-            return client.get_data_range(start, end, timeout=timeout)
+            return client.get_data_range(start, end, limit=range_limit, timeout=timeout)
 
     def get_available_sensors(self) -> List[str]:
         """

@@ -158,6 +158,8 @@ Use Task Scheduler to run at startup.
 - **Time window:** Preset buttons (10min - 1 week) or custom
 - **Moving average:** Adjustable smoothing
 - **CSV export:** Download current sensor's data
+- **Backlog resync:** Server automatically streams missing data in chunks via `/data/range`, so even long outages resync fully (no 20k cap)
+- **All-data view:** Selecting "All data" fetches the entire SQLite history for that sensor so you can inspect multi-day/month trends without truncation
 
 ### Gap Visualization
 
