@@ -81,26 +81,47 @@ class TestSimulatedSensor:
     
     def test_simulate_tempsens_returns_values(self):
         """Test that simulated sensor returns temperature and humidity."""
-        temp, hum = io_funcs.simulate_tempsens()
+        # Try multiple times since sensor can fail randomly (simulates real behavior)
+        success = False
+        for _ in range(10):
+            try:
+                temp, hum = io_funcs.simulate_tempsens()
+                # Check return types
+                assert isinstance(temp, (int, float))
+                assert isinstance(hum, (int, float))
+                success = True
+                break
+            except RuntimeError:
+                # Simulated sensor failure, expected 20% of the time
+                continue
         
-        # Check return types
-        assert isinstance(temp, (int, float)) or temp is None
-        assert isinstance(hum, (int, float)) or hum is None
+        # At least one of 10 attempts should succeed
+        assert success, "Simulated sensor failed 10 times in a row (very unlikely)"
     
     def test_simulate_tempsens_baseline_params(self):
         """Test simulated sensor with custom baseline parameters."""
-        temp, hum = io_funcs.simulate_tempsens(
-            tempbaseline=25, 
-            tempvar=2, 
-            humbaseline=60, 
-            humvar=3
-        )
+        # Try multiple times since sensor can fail randomly
+        success = False
+        for _ in range(10):
+            try:
+                temp, hum = io_funcs.simulate_tempsens(
+                    tempbaseline=25, 
+                    tempvar=2, 
+                    humbaseline=60, 
+                    humvar=3
+                )
+                
+                # Values should be in expected ranges
+                assert 23 <= temp <= 29  # 25 ± 4 (generous range)
+                assert 57 <= hum <= 66  # 60 ± 6 (generous range)
+                success = True
+                break
+            except RuntimeError:
+                # Simulated sensor failure, expected 20% of the time
+                continue
         
-        # Values should be in expected ranges when not None
-        if temp is not None:
-            assert 23 <= temp <= 29  # 25 ± 4 (generous range)
-        if hum is not None:
-            assert 57 <= hum <= 66  # 60 ± 6 (generous range)
+        # At least one of 10 attempts should succeed
+        assert success, "Simulated sensor failed 10 times in a row (very unlikely)"
 
 
 class TestDatabaseOperations:
