@@ -516,7 +516,7 @@ temp_plot.x_range.on_change('start', range_change_callback)
 temp_plot.x_range.on_change('end', range_change_callback)
 
 # UI widgets
-current_readings = Div(text="<h3>Loading...</h3>", sizing_mode="stretch_width", height=120)
+current_readings = Div(text="<h3>Loading...</h3>", sizing_mode="stretch_width")
 
 # Sensor selection dropdown
 sensor_names = [cfg["name"] for cfg in sensor_configs]
@@ -936,29 +936,63 @@ def update_data():
         if last_error:
             error_html = f"<p style='font-size:13px;margin:4px 0 0;color:#c0392b;'>Last error: {last_error}</p>"
 
+        # Get server uptime
+        uptime = aggregator.get_uptime()
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        if days > 0:
+            uptime_str = f"{days}d {hours}h {minutes}m"
+        elif hours > 0:
+            uptime_str = f"{hours}h {minutes}m {seconds}s"
+        else:
+            uptime_str = f"{minutes}m {seconds}s"
+
+        # Get server metrics
+        server_metrics = aggregator.get_server_metrics()
+        server_db_size = server_metrics.get("database_size_mb", 0)
+        total_records = server_metrics.get("total_records", 0)
+
+        # Format records count (e.g., 125432 -> 125K)
+        if total_records >= 1000000:
+            records_str = f"{total_records / 1000000:.1f}M"
+        elif total_records >= 1000:
+            records_str = f"{total_records / 1000:.0f}K"
+        else:
+            records_str = str(total_records)
+
+        # Get client metrics from metadata
+        cpu_str = f"{metadata_safe.get('cpu_percent', 0):.0f}%" if metadata_safe.get('cpu_percent') is not None else "—"
+        mem_str = f"{metadata_safe.get('memory_percent', 0):.0f}%" if metadata_safe.get('memory_percent') is not None else "—"
+        client_db_str = f"{metadata_safe.get('client_db_size_mb', 0):.1f} MB" if metadata_safe.get('client_db_size_mb') is not None else "—"
+        sensor_type_str = metadata_safe.get('sensor_type', 'Unknown')
+
         current_readings.text = f"""
-        <div style="background-color:#f0f0f0;padding:18px;border-radius:5px;margin-bottom:18px;display:flex;flex-wrap:wrap;gap:24px;align-items:center;">
-            <div style="min-width:150px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">Sensor</h3>
+        <div style="background-color:#f0f0f0;padding:18px;border-radius:5px;margin-bottom:18px;display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;">
+            <div style="flex:1 1 180px;min-width:180px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Status</h3>
                 <p style="font-size:18px;margin:0;">{status_icon} {sensor_name}</p>
                 <p style="font-size:13px;margin:4px 0 0;color:#555;">{status_label}</p>
+                <p style="font-size:13px;margin:4px 0 0;color:#555;">{sensor_type_str}</p>
             </div>
-            <div style="min-width:150px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">IP Address</h3>
-                <p style="font-size:16px;margin:0;">{device_ip}</p>
-            </div>
-            <div style="min-width:150px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">Data Time</h3>
-                <p style="font-size:18px;margin:0;">{curr_time_str}</p>
-            </div>
-            <div style="min-width:150px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">Last Sync</h3>
-                <p style="font-size:16px;margin:0;">{last_sync_str}</p>
-                {error_html}
-            </div>
-            <div style="min-width:150px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">Readings</h3>
+            <div style="flex:1 1 200px;min-width:200px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Last reading</h3>
                 <p style="font-size:18px;margin:0;">{curr_temp:.1f}°C · {curr_hum:.1f}%</p>
+                <p style="font-size:13px;margin:4px 0 0;color:#555;">{curr_time_str}</p>
+            </div>
+            <div style="flex:1 1 200px;min-width:200px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Client Info</h3>
+                <p style="font-size:18px;margin:0;font-family:monospace;">{device_ip}</p>
+                <p style="font-size:13px;margin:4px 0 0;color:#555;">CPU: {cpu_str} | Memory: {mem_str}</p>
+                <p style="font-size:13px;margin:4px 0 0;color:#555;">Database: {client_db_str}</p>
+            </div>
+            <div style="flex:1 1 220px;min-width:220px;">
+                <h3 style="margin:0 0 6px 0;font-size:16px;">Server Info</h3>
+                <p style="font-size:18px;margin:0;">Uptime: {uptime_str}</p>
+                <p style="font-size:13px;margin:4px 0 0;color:#555;">Last Sync: {last_sync_str}</p>
+                <p style="font-size:13px;margin:4px 0 0;color:#555;">Database: {server_db_size:.1f} MB | Records: {records_str}</p>
+                {error_html}
             </div>
         </div>
         """

@@ -139,6 +139,22 @@ class SensorAPIClient:
             self._last_error = str(e)
             return None
 
+    def get_metrics(self) -> Optional[Dict]:
+        """
+        Get system metrics (CPU, memory, database size).
+
+        Returns:
+            Metrics dictionary or None if request fails
+        """
+        try:
+            response = self._session.get(f"{self.base_url}/metrics", timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get metrics from {self.base_url}: {e}")
+            self._last_error = str(e)
+            return None
+
     @property
     def last_error(self) -> Optional[str]:
         """Get the last error message."""
@@ -226,3 +242,20 @@ class MultiSensorClient:
     def get_all_sensor_names(self) -> List[str]:
         """Get list of all configured sensor names."""
         return list(self.sensors.keys())
+
+    def get_sensor_metrics(self, sensor_name: str) -> Optional[Dict]:
+        """
+        Get system metrics from a specific sensor.
+
+        Args:
+            sensor_name: Name of sensor to query
+
+        Returns:
+            Metrics dictionary or None if sensor not found or request fails
+        """
+        if sensor_name not in self.sensors:
+            logger.error(f"Sensor '{sensor_name}' not found")
+            return None
+
+        client = self.sensors[sensor_name]
+        return client.get_metrics()

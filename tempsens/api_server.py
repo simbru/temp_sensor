@@ -4,7 +4,9 @@ Exposes data from local SQLite database via REST API for remote dashboard access
 """
 import math
 import socket
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import psutil
@@ -26,6 +28,14 @@ def safe_float(val):
         return None
     f = float(val)
     return None if math.isnan(f) or math.isinf(f) else f
+
+
+# Metrics caching to reduce overhead
+_metrics_cache = {
+    "data": None,
+    "timestamp": 0,
+    "cache_duration": 10  # Cache for 10 seconds
+}
 
 
 def get_device_info():
@@ -55,13 +65,57 @@ def get_device_info():
     }
 
 
+def get_system_metrics():
+    """
+    Get system metrics (CPU, memory, database size).
+    Results are cached for 10 seconds to reduce overhead.
+    """
+    current_time = time.time()
+
+    # Return cached data if still fresh
+    if (_metrics_cache["data"] is not None and
+        current_time - _metrics_cache["timestamp"] < _metrics_cache["cache_duration"]):
+        return _metrics_cache["data"]
+
+    # Get CPU and memory usage
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
+    memory_percent = memory.percent
+
+    # Get database size
+    config = io_funcs.fetch_config()
+    db_path = Path(config["DEFAULT"].get("database_path", "templog.db"))
+
+    try:
+        db_size_bytes = db_path.stat().st_size
+        db_size_mb = db_size_bytes / (1024 * 1024)
+    except Exception:
+        db_size_mb = 0.0
+
+    # Get sensor type
+    sensor_type = "DHT22" if io_funcs.sensor_found else "simulated"
+
+    metrics = {
+        "cpu_percent": round(cpu_percent, 1),
+        "memory_percent": round(memory_percent, 1),
+        "database_size_mb": round(db_size_mb, 2),
+        "sensor_type": sensor_type
+    }
+
+    # Update cache
+    _metrics_cache["data"] = metrics
+    _metrics_cache["timestamp"] = current_time
+
+    return metrics
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
     return {
         "message": "Temperature Sensor API",
         "version": "1.0.0",
-        "endpoints": ["/status", "/data/latest", "/data/range", "/config"]
+        "endpoints": ["/status", "/data/latest", "/data/range", "/config", "/metrics"]
     }
 
 
@@ -187,6 +241,22 @@ async def get_config():
         "output_file": config["DEFAULT"]["outputfile"],
         "sensor_type": "DHT22" if io_funcs.sensor_found else "simulated"
     }
+
+
+@app.get("/metrics")
+async def get_metrics():
+    """
+    Get system metrics including CPU usage, memory usage, and database size.
+    Results are cached for 10 seconds to reduce overhead on the Raspberry Pi.
+    """
+    try:
+        metrics = get_system_metrics()
+        return metrics
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to fetch metrics: {str(e)}"}
+        )
 
 
 if __name__ == "__main__":

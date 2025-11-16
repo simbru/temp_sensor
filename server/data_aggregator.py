@@ -43,6 +43,7 @@ class DataAggregator:
         self._start_of_time = "0001-01-01 00:00:00"
         self._stop_polling = threading.Event()
         self._polling_thread = None
+        self._start_time = datetime.now()  # Track when aggregator started
         self._init_database()
 
     def _init_database(self):
@@ -66,9 +67,29 @@ class DataAggregator:
                     device_ip TEXT,
                     last_update TEXT,
                     last_error TEXT,
-                    status TEXT
+                    status TEXT,
+                    cpu_percent REAL,
+                    memory_percent REAL,
+                    client_db_size_mb REAL,
+                    sensor_type TEXT,
+                    total_records INTEGER
                 )
             """)
+
+            # Migrate existing databases: add new columns if they don't exist
+            cursor.execute("PRAGMA table_info(sensor_metadata)")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+            new_columns = {
+                "cpu_percent": "REAL",
+                "memory_percent": "REAL",
+                "client_db_size_mb": "REAL",
+                "sensor_type": "TEXT",
+                "total_records": "INTEGER"
+            }
+            for col_name, col_type in new_columns.items():
+                if col_name not in existing_columns:
+                    cursor.execute(f"ALTER TABLE sensor_metadata ADD COLUMN {col_name} {col_type}")
+                    logger.info(f"Added column {col_name} to sensor_metadata table")
 
             # Create a table for each sensor
             for sensor_name in self.client.get_all_sensor_names():
@@ -128,10 +149,17 @@ class DataAggregator:
 
             sensor_data = data.get("data", {})
             device_ip = data.get("device_ip", "unknown")
-            
+
+            # Fetch system metrics from client
+            metrics = self.client.get_sensor_metrics(sensor_name)
+            cpu_percent = metrics.get("cpu_percent") if metrics else None
+            memory_percent = metrics.get("memory_percent") if metrics else None
+            client_db_size_mb = metrics.get("database_size_mb") if metrics else None
+            sensor_type = metrics.get("sensor_type") if metrics else None
+
             # Check if resync needed based on fetched data
             needs_resync = self._check_gap_in_data(sensor_data, last_timestamp)
-            
+
             if needs_resync:
                 logger.warning(f"Gap detected for {sensor_name}; initiating ranged resync")
                 print(f"[{timestamp}] Gap detected, streaming backlog for {sensor_name}...")
@@ -156,7 +184,11 @@ class DataAggregator:
                 sensor_name,
                 device_ip=device_ip,
                 status=status_value,
-                error=None
+                error=None,
+                cpu_percent=cpu_percent,
+                memory_percent=memory_percent,
+                client_db_size_mb=client_db_size_mb,
+                sensor_type=sensor_type
             )
 
         except Exception as e:
@@ -198,16 +230,25 @@ class DataAggregator:
         sensor_name: str,
         device_ip: Optional[str] = None,
         status: str = "unknown",
-        error: Optional[str] = None
+        error: Optional[str] = None,
+        cpu_percent: Optional[float] = None,
+        memory_percent: Optional[float] = None,
+        client_db_size_mb: Optional[float] = None,
+        sensor_type: Optional[str] = None
     ):
         """Update sensor metadata in database."""
+        # Get total records count
+        total_records = self.get_total_records(sensor_name)
+
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO sensor_metadata
-                (sensor_name, device_ip, last_update, last_error, status)
-                VALUES (?, ?, ?, ?, ?)
-            """, (sensor_name, device_ip, datetime.now().isoformat(), error, status))
+                (sensor_name, device_ip, last_update, last_error, status,
+                 cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (sensor_name, device_ip, datetime.now().isoformat(), error, status,
+                  cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records))
             conn.commit()
 
     def get_sensor_data(
@@ -291,7 +332,10 @@ class DataAggregator:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT device_ip, last_update, last_error, status FROM sensor_metadata WHERE sensor_name = ?",
+                """SELECT device_ip, last_update, last_error, status,
+                          cpu_percent, memory_percent, client_db_size_mb,
+                          sensor_type, total_records
+                   FROM sensor_metadata WHERE sensor_name = ?""",
                 (sensor_name,)
             )
             row = cursor.fetchone()
@@ -303,7 +347,55 @@ class DataAggregator:
             "device_ip": row[0],
             "last_update": row[1],
             "last_error": row[2],
-            "status": row[3]
+            "status": row[3],
+            "cpu_percent": row[4],
+            "memory_percent": row[5],
+            "client_db_size_mb": row[6],
+            "sensor_type": row[7],
+            "total_records": row[8]
+        }
+
+    def get_uptime(self) -> timedelta:
+        """Get server uptime as a timedelta."""
+        return datetime.now() - self._start_time
+
+    def get_total_records(self, sensor_name: str) -> int:
+        """Get total number of records for a specific sensor."""
+        table_name = self._get_table_name(sensor_name)
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+            count = cursor.fetchone()[0]
+        return count
+
+    def get_server_metrics(self) -> Dict:
+        """Get server-side metrics (database size, active connections, etc)."""
+        # Get database size in MB
+        try:
+            db_size_bytes = self.db_path.stat().st_size
+            db_size_mb = db_size_bytes / (1024 * 1024)
+        except Exception:
+            db_size_mb = 0.0
+
+        # Count active sensors
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM sensor_metadata WHERE status = 'active'")
+            active_sensors = cursor.fetchone()[0]
+
+            # Get total records across all sensors
+            cursor.execute("SELECT sensor_name FROM sensor_metadata")
+            all_sensors = [row[0] for row in cursor.fetchall()]
+
+        total_records = sum(self.get_total_records(sensor) for sensor in all_sensors)
+        total_sensors = len(self.client.get_all_sensor_names())
+
+        return {
+            "database_size_mb": round(db_size_mb, 2),
+            "total_records": total_records,
+            "active_sensors": active_sensors,
+            "total_sensors": total_sensors,
+            "uptime": self.get_uptime()
         }
 
     def start_polling(self):
