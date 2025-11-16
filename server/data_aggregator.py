@@ -5,6 +5,7 @@ Uses SQLite for persistent storage of sensor data.
 import logging
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -112,20 +113,25 @@ class DataAggregator:
             status_value = "idle"
             new_records: List[Tuple[str, float, float]] = []
 
-            if self._should_resync(sensor_name, last_timestamp):
+            # Fetch data first (single request instead of peek + fetch)
+            data = self.client.get_sensor_data(sensor_name, limit=limit)
+            if data is None:
+                logger.warning(f"Failed to fetch data from {sensor_name}")
+                self._handle_fetch_failure(sensor_name, last_timestamp, "Failed to fetch data")
+                return
+
+            sensor_data = data.get("data", {})
+            device_ip = data.get("device_ip", "unknown")
+            
+            # Check if resync needed based on fetched data
+            needs_resync = self._check_gap_in_data(sensor_data, last_timestamp)
+            
+            if needs_resync:
                 logger.warning(f"Gap detected for {sensor_name}; initiating ranged resync")
                 print(f"[{timestamp}] Gap detected, streaming backlog for {sensor_name}...")
                 new_records, device_ip = self._resync_sensor(sensor_name, last_timestamp)
                 status_value = "syncing" if new_records else "idle"
             else:
-                data = self.client.get_sensor_data(sensor_name, limit=limit)
-                if data is None:
-                    logger.warning(f"Failed to fetch data from {sensor_name}")
-                    self._handle_fetch_failure(sensor_name, last_timestamp, "Failed to fetch data")
-                    return
-
-                sensor_data = data.get("data", {})
-                device_ip = data.get("device_ip", "unknown")
                 new_records = self._extract_new_records(sensor_data, last_timestamp)
                 status_value = "active" if new_records else "idle"
 
@@ -320,17 +326,35 @@ class DataAggregator:
         logger.info("Stopped background polling")
 
     def _polling_loop(self):
-        """Background polling loop."""
+        """Background polling loop with parallel sensor updates."""
+        # Create a thread pool for parallel sensor polling
+        # Use max_workers based on sensor count (but cap at 10 to avoid overwhelming)
+        max_workers = min(len(self.client.get_all_sensor_names()), 10)
+        
         while not self._stop_polling.is_set():
             try:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{timestamp}] Polling all sensors...")
-                logger.info("Polling all sensors...")
-                for sensor_name in self.client.get_all_sensor_names():
-                    if self._stop_polling.is_set():
-                        break
-                    print(f"[{timestamp}] Updating sensor: {sensor_name}")
-                    self.update_sensor_data(sensor_name)
+                print(f"[{timestamp}] Polling all sensors in parallel (max {max_workers} concurrent)...")
+                logger.info("Polling all sensors in parallel...")
+                
+                sensor_names = self.client.get_all_sensor_names()
+                
+                # Poll sensors in parallel using ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all sensor updates
+                    futures = {
+                        executor.submit(self.update_sensor_data, sensor_name): sensor_name
+                        for sensor_name in sensor_names
+                    }
+                    
+                    # Wait for all to complete and log any errors
+                    for future in as_completed(futures):
+                        sensor_name = futures[future]
+                        try:
+                            future.result()
+                        except Exception as e:
+                            logger.error(f"Error polling {sensor_name}: {e}")
+                            print(f"[{timestamp}] ERROR polling {sensor_name}: {e}")
 
                 print(f"[{timestamp}] Polling complete. Next poll in {self.poll_interval} seconds.")
                 logger.info(f"Polling complete. Next poll in {self.poll_interval} seconds.")
@@ -343,9 +367,22 @@ class DataAggregator:
             self._stop_polling.wait(self.poll_interval)
 
     def poll_once(self):
-        """Poll all sensors once (synchronous)."""
-        for sensor_name in self.client.get_all_sensor_names():
-            self.update_sensor_data(sensor_name)
+        """Poll all sensors once (synchronous but in parallel)."""
+        sensor_names = self.client.get_all_sensor_names()
+        max_workers = min(len(sensor_names), 10)
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self.update_sensor_data, sensor_name): sensor_name
+                for sensor_name in sensor_names
+            }
+            
+            for future in as_completed(futures):
+                sensor_name = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Error in poll_once for {sensor_name}: {e}")
 
     def _fetch_last_timestamp(self, table_name: str) -> Optional[str]:
         with sqlite3.connect(self.db_path) as conn:
@@ -353,7 +390,46 @@ class DataAggregator:
             cursor.execute(f"SELECT MAX(timestamp) FROM {table_name}")
             return cursor.fetchone()[0]
 
+    def _check_gap_in_data(self, sensor_data: Dict, last_timestamp: Optional[str]) -> bool:
+        """
+        Check if there's a significant gap between last DB timestamp and fetched data.
+        This method uses already-fetched data to avoid an extra HTTP request.
+        
+        Args:
+            sensor_data: Data dict with 'time', 'temperature', 'humidity' arrays
+            last_timestamp: Last timestamp in database
+            
+        Returns:
+            True if a resync is needed, False otherwise
+        """
+        if last_timestamp is None:
+            return True
+            
+        times = sensor_data.get("time", [])
+        if not times:
+            return False
+            
+        # Check the oldest timestamp in the fetched data
+        oldest_fetched = times[0] if times else None
+        if not oldest_fetched:
+            return False
+            
+        oldest_dt = self._parse_ts(oldest_fetched)
+        last_dt = self._parse_ts(last_timestamp)
+        
+        if oldest_dt is None or last_dt is None:
+            return False
+            
+        # If oldest fetched data is newer than our last timestamp by more than threshold,
+        # we have a gap and need to resync
+        gap_threshold = max(self.poll_interval * 6, self._min_gap_threshold)
+        return (oldest_dt - last_dt) > timedelta(seconds=gap_threshold)
+
     def _should_resync(self, sensor_name: str, last_timestamp: Optional[str]) -> bool:
+        """
+        DEPRECATED: This method is kept for backward compatibility but is no longer used.
+        Use _check_gap_in_data instead to avoid extra HTTP requests.
+        """
         if last_timestamp is None:
             return True
 
