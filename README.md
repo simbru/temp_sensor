@@ -278,6 +278,32 @@ Lab_Bench = http://<PI_IP_2>:5000
 
 ## Development & Testing
 
+### Automated Testing
+
+The project includes a comprehensive test suite covering core functionality and API endpoints:
+
+```bash
+# Run all tests
+python3 -m pytest tests/ -v
+
+# Run with coverage report
+python3 -m pytest tests/ --cov=tempsens --cov=server --cov-report=term-missing
+
+# Run specific test file
+python3 -m pytest tests/test_io_funcs.py -v
+```
+
+**Test coverage includes:**
+- Configuration management
+- Database operations (SQLite read/write)
+- Simulated sensor data generation
+- API endpoints and responses
+- Error handling
+
+**No hardware required** - tests use simulated sensor data and run on any platform.
+
+See [tests/README.md](tests/README.md) for detailed testing documentation.
+
 ### Local Development (No Hardware Required)
 
 You can develop and test the entire system on your local machine using simulated sensors:

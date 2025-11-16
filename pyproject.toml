@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "tempsens"
 version = "0.1.0"
@@ -32,6 +36,12 @@ server = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
 ]
+test = [
+    # Testing dependencies
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "httpx>=0.25.0",  # For testing FastAPI endpoints
+]
 
 [project.optional-dependencies]
 # Pi-specific hardware (must be installed separately on Raspberry Pi)
@@ -39,4 +49,16 @@ pi-hardware = [
     "adafruit-circuitpython-dht; sys_platform == 'linux'",
     "RPi.GPIO; sys_platform == 'linux'",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tempsens*", "server*"]
+exclude = ["dev*", "tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --cov=tempsens --cov=server --cov-report=term-missing"
 

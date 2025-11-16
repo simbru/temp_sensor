@@ -27,3 +27,9 @@ uv.lock
 .venv/
 
 # Test config files - now in dev/ folder
+
+# Testing artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+*.egg-info/

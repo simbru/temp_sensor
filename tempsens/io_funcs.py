@@ -220,13 +220,13 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
     schedule.enter(LOGINTERVAL, 0, log_data)
     return None
 
-def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limit=None):
+def fetch_log_data_range(filename=None, start_time=None, end_time=None, limit=None):
     """
     Fetches data from SQLite database with optional time range filtering or limit.
     Returns data as a dictionary with ISO-formatted time strings (for API compatibility).
 
     Args:
-        filename: Path to SQLite database file
+        filename: Path to SQLite database file (defaults to CONFIG["DEFAULT"]["outputfile"])
         start_time: Start timestamp as string (ISO format: 'YYYY-MM-DD HH:MM:SS')
         end_time: End timestamp as string (ISO format: 'YYYY-MM-DD HH:MM:SS')
         limit: If specified, return only the last N readings (ignores time filters)
@@ -234,6 +234,9 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
     Returns:
         Dictionary with keys 'time' (ISO strings), 'temperature', 'humidity'
     """
+    if filename is None:
+        filename = CONFIG["DEFAULT"]["outputfile"]
+    
     with sqlite3.connect(filename) as conn:
         cursor = conn.cursor()
 
