@@ -78,7 +78,8 @@ class SensorAPIClient:
     def get_data_range(
         self,
         start: Optional[str] = None,
-        end: Optional[str] = None
+        end: Optional[str] = None,
+        timeout: Optional[int] = None
     ) -> Optional[Dict]:
         """
         Get readings within a time range.
@@ -86,6 +87,7 @@ class SensorAPIClient:
         Args:
             start: Start timestamp (ISO format: 'YYYY-MM-DD HH:MM:SS')
             end: End timestamp (ISO format: 'YYYY-MM-DD HH:MM:SS')
+            timeout: Optional custom timeout in seconds
 
         Returns:
             Data dictionary with 'device_name', 'device_ip', 'data', 'metadata' or None
@@ -100,7 +102,7 @@ class SensorAPIClient:
             response = requests.get(
                 f"{self.base_url}/data/range",
                 params=params,
-                timeout=self.timeout
+                timeout=timeout or self.timeout
             )
             response.raise_for_status()
             return response.json()
@@ -190,7 +192,7 @@ class MultiSensorClient:
         if limit is not None:
             return client.get_latest_data(limit, timeout=timeout)
         else:
-            return client.get_data_range(start, end)
+            return client.get_data_range(start, end, timeout=timeout)
 
     def get_available_sensors(self) -> List[str]:
         """
