@@ -968,6 +968,17 @@ def update_data():
         client_db_str = f"{metadata_safe.get('client_db_size_mb', 0):.1f} MB" if metadata_safe.get('client_db_size_mb') is not None else "—"
         sensor_type_str = metadata_safe.get('sensor_type', 'Unknown')
 
+        # Format client record count
+        client_total_records = metadata_safe.get('client_total_records', 0)
+        if client_total_records is not None and client_total_records >= 1000000:
+            client_records_str = f"{client_total_records / 1000000:.1f}M"
+        elif client_total_records is not None and client_total_records >= 1000:
+            client_records_str = f"{client_total_records / 1000:.0f}K"
+        elif client_total_records is not None:
+            client_records_str = str(client_total_records)
+        else:
+            client_records_str = "—"
+
         current_readings.text = f"""
         <div style="background-color:#f0f0f0;padding:18px;border-radius:5px;margin-bottom:18px;display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;">
             <div style="flex:1 1 180px;min-width:180px;">
@@ -985,7 +996,7 @@ def update_data():
                 <h3 style="margin:0 0 6px 0;font-size:16px;">Client Info</h3>
                 <p style="font-size:18px;margin:0;font-family:monospace;">{device_ip}</p>
                 <p style="font-size:13px;margin:4px 0 0;color:#555;">CPU: {cpu_str} | Memory: {mem_str}</p>
-                <p style="font-size:13px;margin:4px 0 0;color:#555;">Database: {client_db_str}</p>
+                <p style="font-size:13px;margin:4px 0 0;color:#555;">Database: {client_db_str} | Records: {client_records_str}</p>
             </div>
             <div style="flex:1 1 220px;min-width:220px;">
                 <h3 style="margin:0 0 6px 0;font-size:16px;">Server Info</h3>

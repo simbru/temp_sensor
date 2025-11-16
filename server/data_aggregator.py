@@ -72,7 +72,8 @@ class DataAggregator:
                     memory_percent REAL,
                     client_db_size_mb REAL,
                     sensor_type TEXT,
-                    total_records INTEGER
+                    total_records INTEGER,
+                    client_total_records INTEGER
                 )
             """)
 
@@ -84,7 +85,8 @@ class DataAggregator:
                 "memory_percent": "REAL",
                 "client_db_size_mb": "REAL",
                 "sensor_type": "TEXT",
-                "total_records": "INTEGER"
+                "total_records": "INTEGER",
+                "client_total_records": "INTEGER"
             }
             for col_name, col_type in new_columns.items():
                 if col_name not in existing_columns:
@@ -116,12 +118,74 @@ class DataAggregator:
         # Replace spaces and special chars with underscores
         return "sensor_" + "".join(c if c.isalnum() else "_" for c in sensor_name).lower()
 
+    def _backfill_all_historical_data(self, sensor_name: str) -> bool:
+        """
+        Backfill all historical data from a sensor on initial sync.
+
+        Fetches all data from client in batches to avoid memory issues.
+
+        Args:
+            sensor_name: Name of sensor to backfill
+
+        Returns:
+            True if successful, False otherwise
+        """
+        table_name = self._get_table_name(sensor_name)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Starting full historical backfill for {sensor_name}...")
+        logger.info(f"Backfilling all historical data for {sensor_name}")
+
+        try:
+            # Fetch all data from client (no limit)
+            data = self.client.get_sensor_data(sensor_name, limit=None)
+            if data is None:
+                logger.error(f"Failed to fetch historical data from {sensor_name}")
+                return False
+
+            sensor_data = data.get("data", {})
+            times = sensor_data.get("time", [])
+            temperatures = sensor_data.get("temperature", [])
+            humidities = sensor_data.get("humidity", [])
+
+            if len(times) == 0:
+                logger.warning(f"No historical data available for {sensor_name}")
+                return False
+
+            # Prepare records for insertion
+            records = list(zip(times, temperatures, humidities))
+            total_records = len(records)
+
+            # Insert in batches to avoid memory issues
+            batch_size = 10000
+            inserted_count = 0
+
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                for i in range(0, total_records, batch_size):
+                    batch = records[i:i + batch_size]
+                    cursor.executemany(
+                        f"INSERT OR IGNORE INTO {table_name} (timestamp, temperature, humidity) VALUES (?, ?, ?)",
+                        batch
+                    )
+                    inserted_count += len(batch)
+                    if (i + batch_size) % 50000 == 0:
+                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Backfilled {inserted_count:,} / {total_records:,} records...")
+                conn.commit()
+
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Backfill complete: {total_records:,} records synced for {sensor_name}")
+            logger.info(f"Successfully backfilled {total_records} records for {sensor_name}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error during historical backfill for {sensor_name}: {e}")
+            return False
+
     def update_sensor_data(self, sensor_name: str, limit: int = 1000):
         """
         Fetch latest data from a sensor and update local database.
 
-        Implements intelligent resync: if gap detected, fetches full dataset once,
-        otherwise fetches only recent records for efficiency.
+        On first sync, performs full historical backfill of all client data.
+        Subsequent syncs fetch only recent data for efficiency.
 
         Args:
             sensor_name: Name of sensor to update
@@ -135,6 +199,17 @@ class DataAggregator:
         try:
             last_timestamp = self._fetch_last_timestamp(table_name)
             logger.debug(f"Last timestamp in DB for {sensor_name}: {last_timestamp}")
+
+            # If this is the first sync (no data in server DB), do full historical backfill
+            if last_timestamp is None:
+                logger.info(f"First sync detected for {sensor_name}, initiating full historical backfill")
+                print(f"[{timestamp}] First sync - backfilling all historical data for {sensor_name}...")
+                success = self._backfill_all_historical_data(sensor_name)
+                if not success:
+                    self._update_metadata(sensor_name, status="error", error="Failed to backfill historical data")
+                    return
+                # After backfill, update last_timestamp
+                last_timestamp = self._fetch_last_timestamp(table_name)
 
             device_ip = "unknown"
             status_value = "idle"
@@ -156,6 +231,7 @@ class DataAggregator:
             memory_percent = metrics.get("memory_percent") if metrics else None
             client_db_size_mb = metrics.get("database_size_mb") if metrics else None
             sensor_type = metrics.get("sensor_type") if metrics else None
+            client_total_records = metrics.get("total_records") if metrics else None
 
             # Check if resync needed based on fetched data
             needs_resync = self._check_gap_in_data(sensor_data, last_timestamp)
@@ -188,7 +264,8 @@ class DataAggregator:
                 cpu_percent=cpu_percent,
                 memory_percent=memory_percent,
                 client_db_size_mb=client_db_size_mb,
-                sensor_type=sensor_type
+                sensor_type=sensor_type,
+                client_total_records=client_total_records
             )
 
         except Exception as e:
@@ -234,10 +311,11 @@ class DataAggregator:
         cpu_percent: Optional[float] = None,
         memory_percent: Optional[float] = None,
         client_db_size_mb: Optional[float] = None,
-        sensor_type: Optional[str] = None
+        sensor_type: Optional[str] = None,
+        client_total_records: Optional[int] = None
     ):
         """Update sensor metadata in database."""
-        # Get total records count
+        # Get total records count (server-side)
         total_records = self.get_total_records(sensor_name)
 
         with sqlite3.connect(self.db_path) as conn:
@@ -245,10 +323,10 @@ class DataAggregator:
             cursor.execute("""
                 INSERT OR REPLACE INTO sensor_metadata
                 (sensor_name, device_ip, last_update, last_error, status,
-                 cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records, client_total_records)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (sensor_name, device_ip, datetime.now().isoformat(), error, status,
-                  cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records))
+                  cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records, client_total_records))
             conn.commit()
 
     def get_sensor_data(
@@ -334,7 +412,7 @@ class DataAggregator:
             cursor.execute(
                 """SELECT device_ip, last_update, last_error, status,
                           cpu_percent, memory_percent, client_db_size_mb,
-                          sensor_type, total_records
+                          sensor_type, total_records, client_total_records
                    FROM sensor_metadata WHERE sensor_name = ?""",
                 (sensor_name,)
             )
@@ -352,7 +430,8 @@ class DataAggregator:
             "memory_percent": row[5],
             "client_db_size_mb": row[6],
             "sensor_type": row[7],
-            "total_records": row[8]
+            "total_records": row[8],
+            "client_total_records": row[9]
         }
 
     def get_uptime(self) -> timedelta:

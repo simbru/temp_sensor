@@ -92,6 +92,16 @@ def get_system_metrics():
     except Exception:
         db_size_mb = 0.0
 
+    # Get record count from database
+    try:
+        import sqlite3
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM data")
+            record_count = cursor.fetchone()[0]
+    except Exception:
+        record_count = 0
+
     # Get sensor type
     sensor_type = "DHT22" if io_funcs.sensor_found else "simulated"
 
@@ -99,6 +109,7 @@ def get_system_metrics():
         "cpu_percent": round(cpu_percent, 1),
         "memory_percent": round(memory_percent, 1),
         "database_size_mb": round(db_size_mb, 2),
+        "total_records": record_count,
         "sensor_type": sensor_type
     }
 
