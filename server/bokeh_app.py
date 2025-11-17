@@ -18,7 +18,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from bokeh.plotting import figure, curdoc
-from bokeh.models import ColumnDataSource, Button, Spinner, Range1d, Toggle, CustomJS, Select, DaysTicker
+from bokeh.models import ColumnDataSource, Button, Spinner, Range1d, Toggle, CustomJS, Select, Span
 from bokeh.layouts import column, row
 from bokeh.models.widgets import Div
 
@@ -403,11 +403,16 @@ temp_raw_renderer = temp_plot.line('time', 'temperature', source=source, line_wi
 temp_ma_renderer = temp_plot.line('time', 'temp_ma', source=source, line_width=3,
                                   color='red', alpha=0.9)
 
-# Configure gridlines: major lines at day boundaries
-temp_plot.xgrid.ticker = DaysTicker(days=[1])
-temp_plot.xgrid.grid_line_color = "navy"
+# Configure gridlines: automatic ticks with minor gridlines
+temp_plot.xgrid.grid_line_color = "gray"
 temp_plot.xgrid.grid_line_alpha = 0.3
-temp_plot.xgrid.grid_line_width = 2
+temp_plot.xgrid.grid_line_width = 1
+temp_plot.xgrid.minor_grid_line_color = "lightgray"
+temp_plot.xgrid.minor_grid_line_alpha = 0.15
+temp_plot.xaxis.ticker.num_minor_ticks = 5
+
+# Store day boundary spans for dynamic updates
+day_boundary_spans_temp = []
 
 humidity_plot = figure(
     title=f"Humidity - {current_sensor_state['name']}",
@@ -428,11 +433,61 @@ hum_raw_renderer = humidity_plot.line('time', 'humidity', source=source, line_wi
 hum_ma_renderer = humidity_plot.line('time', 'hum_ma', source=source, line_width=3,
                                      color='navy', alpha=0.9)
 
-# Configure gridlines: major lines at day boundaries
-humidity_plot.xgrid.ticker = DaysTicker(days=[1])
-humidity_plot.xgrid.grid_line_color = "navy"
+# Configure gridlines: automatic ticks with minor gridlines
+humidity_plot.xgrid.grid_line_color = "gray"
 humidity_plot.xgrid.grid_line_alpha = 0.3
-humidity_plot.xgrid.grid_line_width = 2
+humidity_plot.xgrid.grid_line_width = 1
+humidity_plot.xgrid.minor_grid_line_color = "lightgray"
+humidity_plot.xgrid.minor_grid_line_alpha = 0.15
+humidity_plot.xaxis.ticker.num_minor_ticks = 5
+
+# Store day boundary spans for dynamic updates
+day_boundary_spans_hum = []
+
+
+def _update_day_boundaries(data_times):
+    """Add vertical lines at midnight (day boundaries) within the data range."""
+    if len(data_times) == 0:
+        return
+
+    from datetime import datetime, timedelta
+    import pandas as pd
+
+    # Convert milliseconds to datetime
+    start_dt = pd.Timestamp(data_times[0], unit='ms')
+    end_dt = pd.Timestamp(data_times[-1], unit='ms')
+
+    # Find all midnight boundaries in range
+    current_date = start_dt.normalize() + timedelta(days=1)  # Next midnight after start
+    midnight_times = []
+
+    while current_date <= end_dt:
+        midnight_ms = current_date.value / 1e6  # Convert to milliseconds
+        midnight_times.append(midnight_ms)
+        current_date += timedelta(days=1)
+
+    # Remove old spans
+    global day_boundary_spans_temp, day_boundary_spans_hum
+    for span in day_boundary_spans_temp:
+        temp_plot.renderers.remove(span)
+    for span in day_boundary_spans_hum:
+        humidity_plot.renderers.remove(span)
+
+    day_boundary_spans_temp.clear()
+    day_boundary_spans_hum.clear()
+
+    # Add new spans at midnight boundaries
+    for midnight_ms in midnight_times:
+        span_temp = Span(location=midnight_ms, dimension='height',
+                         line_color='navy', line_width=2, line_alpha=0.4)
+        span_hum = Span(location=midnight_ms, dimension='height',
+                        line_color='navy', line_width=2, line_alpha=0.4)
+
+        temp_plot.add_layout(span_temp)
+        humidity_plot.add_layout(span_hum)
+
+        day_boundary_spans_temp.append(span_temp)
+        day_boundary_spans_hum.append(span_hum)
 
 
 def _set_temp_y_range(center: float | None, window: float, *, record_auto: bool = False) -> None:
@@ -925,6 +980,9 @@ def update_data():
 
         # Replace dataset
         source.data = prepared
+
+        # Update day boundary markers
+        _update_day_boundaries(prepared["time"])
 
         latest_temp_ma = float(prepared["temp_ma"][-1]) if len(prepared["temp_ma"]) else None
         if latest_temp_ma is not None and np.isnan(latest_temp_ma):
