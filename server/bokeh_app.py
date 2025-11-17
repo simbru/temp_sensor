@@ -18,7 +18,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from bokeh.plotting import figure, curdoc
-from bokeh.models import ColumnDataSource, Button, Spinner, Range1d, Toggle, CustomJS, Select
+from bokeh.models import ColumnDataSource, Button, Spinner, Range1d, Toggle, CustomJS, Select, DaysTicker
 from bokeh.layouts import column, row
 from bokeh.models.widgets import Div
 
@@ -403,6 +403,12 @@ temp_raw_renderer = temp_plot.line('time', 'temperature', source=source, line_wi
 temp_ma_renderer = temp_plot.line('time', 'temp_ma', source=source, line_width=3,
                                   color='red', alpha=0.9)
 
+# Configure gridlines: major lines at day boundaries
+temp_plot.xgrid.ticker = DaysTicker(days=[1])
+temp_plot.xgrid.grid_line_color = "navy"
+temp_plot.xgrid.grid_line_alpha = 0.3
+temp_plot.xgrid.grid_line_width = 2
+
 humidity_plot = figure(
     title=f"Humidity - {current_sensor_state['name']}",
     x_axis_label="Time",
@@ -421,6 +427,12 @@ hum_raw_renderer = humidity_plot.line('time', 'humidity', source=source, line_wi
                                       color='#6fa8ff', alpha=0.6)
 hum_ma_renderer = humidity_plot.line('time', 'hum_ma', source=source, line_width=3,
                                      color='navy', alpha=0.9)
+
+# Configure gridlines: major lines at day boundaries
+humidity_plot.xgrid.ticker = DaysTicker(days=[1])
+humidity_plot.xgrid.grid_line_color = "navy"
+humidity_plot.xgrid.grid_line_alpha = 0.3
+humidity_plot.xgrid.grid_line_width = 2
 
 
 def _set_temp_y_range(center: float | None, window: float, *, record_auto: bool = False) -> None:
@@ -886,8 +898,20 @@ def update_data():
         sensor_name = current_sensor_state["name"]
         logger.debug(f"update_data() called for sensor: {sensor_name}")
 
-        fetch_limit = _determine_fetch_limit()
-        new_data = aggregator.get_sensor_data(sensor_name, limit=fetch_limit)
+        # Always fetch a generous amount of data so users can zoom/pan beyond the initial window
+        # The spinners control the VIEW window, not the DATA fetch
+        from datetime import datetime, timedelta
+        now = datetime.now()
+
+        # Fetch last 7 days of data (or all data if less)
+        fetch_window = timedelta(days=7)
+        start_time = now - fetch_window
+
+        new_data = aggregator.get_sensor_data(
+            sensor_name,
+            start_time=start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            end_time=now.strftime("%Y-%m-%d %H:%M:%S")
+        )
 
         if not new_data or len(new_data.get("time", [])) == 0:
             logger.warning(f"No data available for sensor: {sensor_name}")
