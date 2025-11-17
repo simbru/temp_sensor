@@ -80,7 +80,7 @@ aggregator.start_polling()
 logger.info("Started background polling thread")
 
 # Constants (adapted from original dashboard)
-TOLERANCE_MS = 2000
+TOLERANCE_MS = 500
 DEFAULT_MA_WINDOW = 10
 MIN_TEMP_WINDOW = 1.0
 MIN_HUM_WINDOW = 1.0
@@ -377,7 +377,10 @@ current_window = {
     "data_max": None,
 }
 
-range_update_state = {"pending": 0}
+range_update_state = {
+    "programmatic": False,
+    "programmatic_until": 0.0
+}
 
 # Create plots
 temp_plot = figure(
@@ -386,8 +389,9 @@ temp_plot = figure(
     y_axis_label="Temperature (°C)",
     x_axis_type="datetime",
     y_range=Range1d(start=TEMP_Y_START, end=TEMP_Y_END),
-    height=400,
-    sizing_mode="stretch_width",
+    height=200,
+    sizing_mode="scale_width",
+    max_width=1000,
     tools="pan,wheel_zoom,box_zoom,reset,save",
     active_drag=None,
     active_scroll=None,
@@ -404,8 +408,9 @@ humidity_plot = figure(
     y_axis_label="Humidity (%)",
     x_axis_type="datetime",
     y_range=Range1d(start=HUM_Y_START, end=HUM_Y_END),
-    height=400,
-    sizing_mode="stretch_width",
+    height=200,
+    sizing_mode="scale_width",
+    max_width=1000,
     tools="pan,wheel_zoom,box_zoom,reset,save",
     active_drag=None,
     active_scroll=None,
@@ -475,7 +480,8 @@ def _should_auto_update_hum(center: float | None) -> bool:
 
 def set_programmatic_range(start_ms, end_ms):
     """Set the x-range while suppressing user-interaction detection."""
-    range_update_state["pending"] = 2
+    range_update_state["programmatic"] = True
+    range_update_state["programmatic_until"] = time.time() + 0.5  # 500ms window
     current_window["last_set_start"] = start_ms
     current_window["last_set_end"] = end_ms
     temp_plot.x_range.start = start_ms
@@ -484,14 +490,17 @@ def set_programmatic_range(start_ms, end_ms):
 
 def range_change_callback(attr, old, new):
     """Detect if range change was from user or programmatic."""
-    if range_update_state["pending"] > 0:
-        range_update_state["pending"] = max(range_update_state["pending"] - 1, 0)
+    # Check if we're in programmatic window (500ms after set_programmatic_range)
+    if range_update_state["programmatic"] and time.time() < range_update_state["programmatic_until"]:
         current_window[f"last_set_{attr}"] = new
         return
 
+    # Clear programmatic flag if window expired
+    range_update_state["programmatic"] = False
+
+    # Check tolerance against expected value
     expected_key = f"last_set_{attr}"
     expected = current_window.get(expected_key)
-    diff = None
 
     if expected is not None:
         diff = abs(new - expected)
@@ -499,6 +508,7 @@ def range_change_callback(attr, old, new):
             current_window[expected_key] = new
             return
 
+    # Check against data boundaries
     data_min = current_window.get("data_min")
     data_max = current_window.get("data_max")
     if attr == "start" and data_min is not None and abs(new - data_min) <= TOLERANCE_MS:
@@ -508,8 +518,10 @@ def range_change_callback(attr, old, new):
         current_window[expected_key] = new
         return
 
+    # Genuine user interaction detected - disable auto-range
     if current_window["auto_range"]:
         current_window["auto_range"] = False
+        logger.info("Auto-scroll disabled: user zoomed/panned the plot")
 
 
 temp_plot.x_range.on_change('start', range_change_callback)
@@ -546,22 +558,25 @@ window_hours = Spinner(title="Hours", low=0, step=1, value=0, width=90)
 window_minutes = Spinner(title="Minutes", low=0, step=1, value=10, width=90)
 window_seconds = Spinner(title="Seconds", low=0, step=1, value=0, width=90)
 
-ma_spinner = Spinner(title="Moving average window (samples)", low=1, high=500, step=1,
-                     value=DEFAULT_MA_WINDOW, width=180)
+ma_spinner = Spinner(title="Average samples", low=1, high=9999, step=1,
+                     value=DEFAULT_MA_WINDOW, width=90)
 show_raw_toggle = Toggle(label="Raw data: ON", button_type="success", active=True, width=140)
 
+# Auto-scroll toggle
+auto_scroll_toggle = Toggle(label="Auto-scroll: ON", button_type="success", active=True, width=140)
+
 # CSV download button
-btn_download_csv = Button(label="📥 Download CSV", button_type="success", width=230)
+btn_download_csv = Button(label="Download CSV", button_type="success", width=150, height=40)
 
 # Window width spinners
-temp_window_spinner = Spinner(title="Temperature window (°C)", low=MIN_TEMP_WINDOW,
-                              high=None, step=0.5,
-                              value=temp_window_state["value"], width=180)
-hum_window_spinner = Spinner(title="Humidity window (%)", low=MIN_HUM_WINDOW,
-                             high=MAX_HUM_WINDOW, step=1,
-                             value=hum_window_state["value"], width=180)
-temp_window_range_display = Div(text="", width=200, height=40)
-hum_window_range_display = Div(text="", width=200, height=40)
+temp_window_spinner = Spinner(title="Temperature range (°C)", low=MIN_TEMP_WINDOW,
+                            high=None, step=0.5,
+                            value=temp_window_state["value"], width=120)
+hum_window_spinner = Spinner(title="Humidity range (%)", low=MIN_HUM_WINDOW,
+                            high=MAX_HUM_WINDOW, step=1,
+                            value=hum_window_state["value"], width=120)
+# temp_window_range_display = Div(text="", width=20, height=40)
+# hum_window_range_display = Div(text="", width=20, height=40)
 
 window_control_state = {
     "temp_syncing": False,
@@ -734,24 +749,24 @@ def on_custom_time_change(attr, old, new):
     update_time_window(minutes, sync_inputs=False)
 
 
-def _update_window_displays():
-    temp_start = temp_plot.y_range.start
-    temp_end = temp_plot.y_range.end
-    hum_start = humidity_plot.y_range.start
-    hum_end = humidity_plot.y_range.end
+# def _update_window_displays():
+#     temp_start = temp_plot.y_range.start
+#     temp_end = temp_plot.y_range.end
+#     hum_start = humidity_plot.y_range.start
+#     hum_end = humidity_plot.y_range.end
 
-    if temp_start is None or temp_end is None:
-        temp_html = "<p style='margin:0;font-size:14px;'>Range: —</p>"
-    else:
-        temp_html = f"<p style='margin:0;font-size:14px;'>Range: {temp_start:.1f}°C – {temp_end:.1f}°C</p>"
+#     if temp_start is None or temp_end is None:
+#         temp_html = "<p style='margin:0;font-size:8px;'>Range: —</p>"
+#     else:
+#         temp_html = f"<p style='margin:0;font-size:8px;'>Range: {temp_start:.1f}°C – {temp_end:.1f}°C</p>"
 
-    if hum_start is None or hum_end is None:
-        hum_html = "<p style='margin:0;font-size:14px;'>Range: —</p>"
-    else:
-        hum_html = f"<p style='margin:0;font-size:14px;'>Range: {hum_start:.0f}% – {hum_end:.0f}%</p>"
+#     if hum_start is None or hum_end is None:
+#         hum_html = "<p style='margin:0;font-size:8px;'>Range: —</p>"
+#     else:
+#         hum_html = f"<p style='margin:0;font-size:8px;'>Range: {hum_start:.0f}% – {hum_end:.0f}%</p>"
 
-    temp_window_range_display.text = temp_html
-    hum_window_range_display.text = hum_html
+#     temp_window_range_display.text = temp_html
+#     hum_window_range_display.text = hum_html
 
 
 def _on_temp_window_change(attr, old, new):
@@ -768,7 +783,7 @@ def _on_temp_window_change(attr, old, new):
     finally:
         window_control_state["temp_syncing"] = False
     _set_temp_y_range(latest_values["temp"], value, record_auto=True)
-    _update_window_displays()
+    # _update_window_displays()
 
 
 def _on_hum_window_change(attr, old, new):
@@ -785,7 +800,7 @@ def _on_hum_window_change(attr, old, new):
     finally:
         window_control_state["hum_syncing"] = False
     _set_hum_y_range(latest_values["hum"], value, record_auto=True)
-    _update_window_displays()
+    # _update_window_displays()
 
 
 # Initialize custom inputs to current preset
@@ -805,6 +820,9 @@ btn_all.on_click(lambda: (set_button_active(btn_all), update_time_window(None)))
 
 temp_window_spinner.on_change("value", _on_temp_window_change)
 hum_window_spinner.on_change("value", _on_hum_window_change)
+
+# Initialize window displays with current values
+# _update_window_displays()
 
 # Wire up CSV download callback
 btn_download_csv.js_on_event("button_click", build_download_callback())
@@ -833,6 +851,19 @@ def on_raw_toggle_change(attr, old, new):
 
 show_raw_toggle.on_change("active", on_raw_toggle_change)
 on_raw_toggle_change("active", True, show_raw_toggle.active)
+
+
+def on_auto_scroll_toggle(attr, old, new):
+    """Handle auto-scroll toggle changes."""
+    current_window["auto_range"] = bool(new)
+    auto_scroll_toggle.button_type = "success" if new else "default"
+    auto_scroll_toggle.label = f"Auto-scroll: {'ON' if new else 'OFF'}"
+    if new:
+        logger.info("Auto-scroll re-enabled by user")
+        update_data()  # Force immediate update to current time
+
+
+auto_scroll_toggle.on_change("active", on_auto_scroll_toggle)
 
 
 def on_sensor_change(attr, old, new):
@@ -908,6 +939,12 @@ def update_data():
                 end_ms = latest_time_ms
                 set_programmatic_range(start_ms, end_ms)
 
+        # Sync toggle state with auto-range flag
+        if not current_window["auto_range"] and auto_scroll_toggle.active:
+            auto_scroll_toggle.active = False
+            auto_scroll_toggle.button_type = "default"
+            auto_scroll_toggle.label = "Auto-scroll: OFF"
+
         # Update current readings display - use LATEST values
         curr_datetime = pd.Timestamp(latest_time_ms, unit='ms')
         curr_time_str = curr_datetime.strftime('%Y-%m-%d %H:%M:%S')
@@ -934,7 +971,7 @@ def update_data():
         last_error = metadata_safe.get("last_error")
         error_html = ""
         if last_error:
-            error_html = f"<p style='font-size:13px;margin:4px 0 0;color:#c0392b;'>Last error: {last_error}</p>"
+            error_html = f"<p style='font-size:12px;margin:6px 0 0;color:#c0392b;background-color:#fdecea;padding:4px 8px;border-radius:3px;'>Last error: {last_error}</p>"
 
         # Get server uptime
         uptime = aggregator.get_uptime()
@@ -980,29 +1017,29 @@ def update_data():
             client_records_str = "—"
 
         current_readings.text = f"""
-        <div style="background-color:#f0f0f0;padding:18px;border-radius:5px;margin-bottom:18px;display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;">
+        <div style="background-color:#f0f0f0;padding:14px;border-radius:5px;margin-bottom:18px;box-shadow:0 2px 4px rgba(0,0,0,0.1);display:flex;flex-wrap:wrap;gap:2px;align-items:flex-start;max-width:1200px;">
             <div style="flex:1 1 180px;min-width:180px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">Status</h3>
-                <p style="font-size:18px;margin:0;">{status_icon} {sensor_name}</p>
-                <p style="font-size:13px;margin:4px 0 0;color:#555;">{status_label}</p>
-                <p style="font-size:13px;margin:4px 0 0;color:#555;">{sensor_type_str}</p>
+                <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Status</h3>
+                <p style="font-size:16px;margin:0;">{status_icon} {sensor_name}</p>
+                <p style="font-size:12px;margin:4px 0 0;color:#555;">{status_label}</p>
+                <p style="font-size:12px;margin:4px 0 0;color:#555;">{sensor_type_str}</p>
             </div>
             <div style="flex:1 1 200px;min-width:200px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">Last reading</h3>
-                <p style="font-size:18px;margin:0;">{curr_temp:.1f}°C · {curr_hum:.1f}%</p>
-                <p style="font-size:13px;margin:4px 0 0;color:#555;">{curr_time_str}</p>
+                <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Last reading</h3>
+                <p style="font-size:16px;margin:0;">{curr_temp:.1f}°C · {curr_hum:.1f}%</p>
+                <p style="font-size:12px;margin:4px 0 0;color:#555;">{curr_time_str}</p>
             </div>
             <div style="flex:1 1 200px;min-width:200px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">Client Info</h3>
-                <p style="font-size:18px;margin:0;font-family:monospace;">{device_ip}</p>
-                <p style="font-size:13px;margin:4px 0 0;color:#555;">CPU: {cpu_str} | Memory: {mem_str}</p>
-                <p style="font-size:13px;margin:4px 0 0;color:#555;">Database: {client_db_str} | Records: {client_records_str}</p>
+                <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Client Info</h3>
+                <p style="font-size:16px;margin:0;font-family:monospace;">{device_ip}</p>
+                <p style="font-size:12px;margin:4px 0 0;color:#555;">CPU: {cpu_str} | Memory: {mem_str}</p>
+                <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {client_db_str} | Records: {client_records_str}</p>
             </div>
             <div style="flex:1 1 220px;min-width:220px;">
-                <h3 style="margin:0 0 6px 0;font-size:16px;">Server Info</h3>
-                <p style="font-size:18px;margin:0;">Uptime: {uptime_str}</p>
-                <p style="font-size:13px;margin:4px 0 0;color:#555;">Last Sync: {last_sync_str}</p>
-                <p style="font-size:13px;margin:4px 0 0;color:#555;">Database: {server_db_size:.1f} MB | Records: {records_str}</p>
+                <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Server Info</h3>
+                <p style="font-size:16px;margin:0;">Uptime: {uptime_str}</p>
+                <p style="font-size:12px;margin:4px 0 0;color:#555;">Last Sync: {last_sync_str}</p>
+                <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {server_db_size:.1f} MB | Records: {records_str}</p>
                 {error_html}
             </div>
         </div>
@@ -1018,33 +1055,42 @@ update_data()
 curdoc().add_periodic_callback(update_data, UPDATE_INTERVAL)
 
 # Layout
-sensor_selection_row = row(sensor_selector, sizing_mode="scale_width")
-time_button_row = row(btn_10min, btn_1h, btn_3h, btn_12h, btn_24h, btn_1week, btn_all,
-                      sizing_mode="scale_width")
-custom_time_row = row(window_days, window_hours, window_minutes, window_seconds,
-                      sizing_mode="scale_width")
-ma_controls_row = row(ma_spinner, show_raw_toggle, btn_download_csv, sizing_mode="scale_width")
+sensor_selection_row = row(sensor_selector, btn_download_csv, sizing_mode="scale_width")
+time_button_row = row(btn_10min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all,
+                    sizing_mode="scale_width")#btn_1h,
+# custom_time_row = row(
+#                     sizing_mode="scale_width")
+window_control_row = row(
+    window_days,
+    window_hours,
+    window_minutes,
+    window_seconds,
+    column(Div(text="&nbsp;", height=10), auto_scroll_toggle),  # Empty title space for alignment
+    sizing_mode="scale_width"
+)
 display_range_row = row(
+    ma_spinner,
     temp_window_spinner,
-    temp_window_range_display,
+    #temp_window_range_display,
     hum_window_spinner,
-    hum_window_range_display,
+    #hum_window_range_display,
+    column(Div(text="&nbsp;", height=10), show_raw_toggle),  # Empty title space for alignment
     sizing_mode="scale_width"
 )
 
 layout = column(
-    Div(text="<h1>🌡️ Multi-Sensor Temperature Monitor</h1>", sizing_mode="stretch_width", height=60),
-    Div(text="<h3>Sensor Selection</h3>", sizing_mode="stretch_width", height=30),
+    Div(text="<h1> Multi-sensor temperature monitor</h1>", sizing_mode="stretch_width", height=60),
+    Div(text="<h3>Sensor Selection</h3>", sizing_mode="stretch_width", height=25),
     sensor_selection_row,
     Div(text="<br>", sizing_mode="stretch_width", height=10),
     current_readings,
-    Div(text="<h4>Time Window:</h4>", sizing_mode="stretch_width", height=30),
+    Div(text="<h4>Quick set time window:</h4>", sizing_mode="stretch_width", height=25),
     time_button_row,
-    Div(text="<h4>Custom Window:</h4>", sizing_mode="stretch_width", height=30),
-    custom_time_row,
-    Div(text="<h4>Moving Average:</h4>", sizing_mode="stretch_width", height=30),
-    ma_controls_row,
-    Div(text="<h4>Display Range:</h4>", sizing_mode="stretch_width", height=30),
+    # Div(text="<h4>Custom Window:</h4>", sizing_mode="stretch_width", height=25),
+    # custom_time_row,
+    Div(text="<h4>Window control:</h4>", sizing_mode="stretch_width", height=25),
+    window_control_row,
+    Div(text="<h4>Display control:</h4>", sizing_mode="stretch_width", height=25),
     display_range_row,
     Div(text="<br>", sizing_mode="stretch_width", height=10),
     temp_plot,
