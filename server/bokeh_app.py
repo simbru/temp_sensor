@@ -378,6 +378,15 @@ current_window = {
     "data_max": None,
 }
 
+# Data cache to avoid re-fetching on every button click
+data_cache = {
+    "sensor_name": None,
+    "raw_data": None,
+    "prepared_data": None,
+    "last_fetch_time": 0,
+    "fetch_interval_ms": 5000,  # Re-fetch every 5 seconds max
+}
+
 range_update_state = {
     "programmatic": False,
     "programmatic_until": 0.0
@@ -964,30 +973,41 @@ def update_data():
         sensor_name = current_sensor_state["name"]
         logger.debug(f"update_data() called for sensor: {sensor_name}")
 
-        # Always fetch a generous amount of data so users can zoom/pan beyond the initial window
-        # The spinners control the VIEW window, not the DATA fetch
-        from datetime import datetime, timedelta
-        now = datetime.now()
+        # Check if we need to re-fetch data or can use cache
+        import time
+        current_time_ms = time.time() * 1000
+        time_since_fetch = current_time_ms - data_cache["last_fetch_time"]
+        sensor_changed = data_cache["sensor_name"] != sensor_name
+        should_fetch = sensor_changed or time_since_fetch > data_cache["fetch_interval_ms"]
 
-        # Fetch last 7 days of data (or all data if less)
-        fetch_window = timedelta(days=7)
-        start_time = now - fetch_window
+        if should_fetch:
+            # Always fetch ALL data from database (no arbitrary limits)
+            # Users can zoom/pan to any point in history
+            # Cache ensures this only happens once per 5 seconds
+            new_data = aggregator.get_sensor_data(sensor_name)
+            logger.debug("Fetching all available data from database")
 
-        new_data = aggregator.get_sensor_data(
-            sensor_name,
-            start_time=start_time.strftime("%Y-%m-%d %H:%M:%S"),
-            end_time=now.strftime("%Y-%m-%d %H:%M:%S")
-        )
+            if not new_data or len(new_data.get("time", [])) == 0:
+                logger.warning(f"No data available for sensor: {sensor_name}")
+                current_readings.text = f"<h3>⚠️ No data available for {sensor_name}</h3>"
+                return
 
-        if not new_data or len(new_data.get("time", [])) == 0:
-            logger.warning(f"No data available for sensor: {sensor_name}")
-            current_readings.text = f"<h3>⚠️ No data available for {sensor_name}</h3>"
-            return
+            logger.debug(f"Fetched {len(new_data.get('time', []))} data points from database")
 
-        logger.debug(f"Fetched {len(new_data.get('time', []))} data points")
+            window = max(int(ma_spinner.value), 1)
+            prepared = prepare_source_data(new_data, window)
 
-        window = max(int(ma_spinner.value), 1)
-        prepared = prepare_source_data(new_data, window)
+            # Update cache
+            data_cache["sensor_name"] = sensor_name
+            data_cache["raw_data"] = new_data
+            data_cache["prepared_data"] = prepared
+            data_cache["last_fetch_time"] = current_time_ms
+        else:
+            # Use cached data - just update moving average if window changed
+            window = max(int(ma_spinner.value), 1)
+            prepared = prepare_source_data(data_cache["raw_data"], window)
+            data_cache["prepared_data"] = prepared
+            logger.debug(f"Using cached data ({len(prepared['time'])} points)")
 
         # Replace dataset
         source.data = prepared
