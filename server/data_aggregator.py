@@ -24,7 +24,8 @@ class DataAggregator:
         self,
         multi_sensor_client: MultiSensorClient,
         db_path: str = "sensor_data.db",
-        poll_interval: int = 30
+        poll_interval: int = 30,
+        min_gap_threshold: int = 60
     ):
         """
         Initialize data aggregator.
@@ -33,13 +34,14 @@ class DataAggregator:
             multi_sensor_client: Client for fetching data from sensors
             db_path: Path to SQLite database file
             poll_interval: Seconds between polling cycles
+            min_gap_threshold: Minimum seconds before marking sensor as offline (default 60)
         """
         self.client = multi_sensor_client
         self.db_path = Path(db_path)
         self.poll_interval = poll_interval
         self._resync_batch_limit = 5000
         self._resync_timeout = max(15, poll_interval * 2)
-        self._min_gap_threshold = 60  # seconds
+        self._min_gap_threshold = min_gap_threshold
         self._start_of_time = "0001-01-01 00:00:00"
         self._stop_polling = threading.Event()
         self._polling_thread = None

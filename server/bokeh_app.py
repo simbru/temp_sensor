@@ -51,13 +51,14 @@ def load_server_config():
         raise ValueError("No sensors configured in config_server.ini")
 
     poll_interval = int(config.get("SERVER", "poll_interval_s", fallback="30"))
+    min_gap_threshold = int(config.get("SERVER", "min_gap_threshold_s", fallback="60"))
     db_path = config.get("SERVER", "database_path", fallback="sensor_data.db")
     update_ms = int(config.get("SERVER", "dashboard_update_ms", fallback="10000"))
 
-    return sensor_configs, poll_interval, db_path, update_ms
+    return sensor_configs, poll_interval, min_gap_threshold, db_path, update_ms
 
 try:
-    sensor_configs, poll_interval, db_path, dashboard_update_ms = load_server_config()
+    sensor_configs, poll_interval, min_gap_threshold, db_path, dashboard_update_ms = load_server_config()
     logger.info(f"Loaded {len(sensor_configs)} sensor configurations")
 except Exception as e:
     logger.error(f"Failed to load server configuration: {e}")
@@ -65,7 +66,7 @@ except Exception as e:
 
 # Initialize multi-sensor client and data aggregator
 multi_client = MultiSensorClient(sensor_configs)
-aggregator = DataAggregator(multi_client, db_path=db_path, poll_interval=poll_interval)
+aggregator = DataAggregator(multi_client, db_path=db_path, poll_interval=poll_interval, min_gap_threshold=min_gap_threshold)
 
 # Do initial poll to populate database
 logger.info("Performing initial data poll...")
