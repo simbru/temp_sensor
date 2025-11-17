@@ -369,7 +369,7 @@ HUM_Y_START, HUM_Y_END = _compute_window_bounds(initial_hum_center, hum_window_s
 
 # Time window settings (in minutes)
 current_window = {
-    "minutes": 10,
+    "minutes": 1440,  # 24 hours
     "force_update": True,
     "auto_range": True,
     "last_set_start": None,
@@ -541,11 +541,11 @@ sensor_selector = Select(
 )
 
 # Time window buttons
-btn_10min = Button(label="10 min", button_type="success", width=100)
+btn_10min = Button(label="10 min", button_type="default", width=100)
 btn_1h = Button(label="1 hour", button_type="default", width=100)
 btn_3h = Button(label="3 hours", button_type="default", width=100)
 btn_12h = Button(label="12 hours", button_type="default", width=100)
-btn_24h = Button(label="24 hours", button_type="default", width=100)
+btn_24h = Button(label="24 hours", button_type="success", width=100)
 btn_1week = Button(label="1 week", button_type="default", width=100)
 btn_all = Button(label="All data", button_type="default", width=100)
 
@@ -555,8 +555,8 @@ time_buttons = [btn_10min, btn_1h, btn_3h, btn_12h, btn_24h, btn_1week, btn_all]
 # Note: No hard limits - you can enter any value (e.g., 120 minutes, 48 hours, etc.)
 time_input_state = {"updating": False}
 window_days = Spinner(title="Days", low=0, step=1, value=0, width=90)
-window_hours = Spinner(title="Hours", low=0, step=1, value=0, width=90)
-window_minutes = Spinner(title="Minutes", low=0, step=1, value=10, width=90)
+window_hours = Spinner(title="Hours", low=0, step=1, value=24, width=90)
+window_minutes = Spinner(title="Minutes", low=0, step=1, value=0, width=90)
 window_seconds = Spinner(title="Seconds", low=0, step=1, value=0, width=90)
 
 ma_spinner = Spinner(title="Average samples", low=1, high=9999, step=1,
