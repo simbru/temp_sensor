@@ -447,47 +447,57 @@ day_boundary_spans_hum = []
 
 def _update_day_boundaries(data_times):
     """Add vertical lines at midnight (day boundaries) within the data range."""
-    if len(data_times) == 0:
-        return
+    try:
+        if len(data_times) == 0:
+            return
 
-    from datetime import datetime, timedelta
-    import pandas as pd
+        from datetime import datetime, timedelta
+        import pandas as pd
 
-    # Convert milliseconds to datetime
-    start_dt = pd.Timestamp(data_times[0], unit='ms')
-    end_dt = pd.Timestamp(data_times[-1], unit='ms')
+        # Convert milliseconds to datetime
+        start_dt = pd.Timestamp(data_times[0], unit='ms')
+        end_dt = pd.Timestamp(data_times[-1], unit='ms')
 
-    # Find all midnight boundaries in range
-    current_date = start_dt.normalize() + timedelta(days=1)  # Next midnight after start
-    midnight_times = []
+        # Find all midnight boundaries in range
+        current_date = start_dt.normalize() + timedelta(days=1)  # Next midnight after start
+        midnight_times = []
 
-    while current_date <= end_dt:
-        midnight_ms = current_date.value / 1e6  # Convert to milliseconds
-        midnight_times.append(midnight_ms)
-        current_date += timedelta(days=1)
+        while current_date <= end_dt:
+            midnight_ms = current_date.value / 1e6  # Convert to milliseconds
+            midnight_times.append(midnight_ms)
+            current_date += timedelta(days=1)
 
-    # Remove old spans
-    global day_boundary_spans_temp, day_boundary_spans_hum
-    for span in day_boundary_spans_temp:
-        temp_plot.renderers.remove(span)
-    for span in day_boundary_spans_hum:
-        humidity_plot.renderers.remove(span)
+        # Remove old spans
+        global day_boundary_spans_temp, day_boundary_spans_hum
+        for span in day_boundary_spans_temp:
+            try:
+                temp_plot.renderers.remove(span)
+            except Exception:
+                pass
+        for span in day_boundary_spans_hum:
+            try:
+                humidity_plot.renderers.remove(span)
+            except Exception:
+                pass
 
-    day_boundary_spans_temp.clear()
-    day_boundary_spans_hum.clear()
+        day_boundary_spans_temp.clear()
+        day_boundary_spans_hum.clear()
 
-    # Add new spans at midnight boundaries
-    for midnight_ms in midnight_times:
-        span_temp = Span(location=midnight_ms, dimension='height',
-                         line_color='navy', line_width=2, line_alpha=0.4)
-        span_hum = Span(location=midnight_ms, dimension='height',
-                        line_color='navy', line_width=2, line_alpha=0.4)
+        # Add new spans at midnight boundaries
+        for midnight_ms in midnight_times:
+            span_temp = Span(location=midnight_ms, dimension='height',
+                             line_color='navy', line_width=2, line_alpha=0.4)
+            span_hum = Span(location=midnight_ms, dimension='height',
+                            line_color='navy', line_width=2, line_alpha=0.4)
 
-        temp_plot.add_layout(span_temp)
-        humidity_plot.add_layout(span_hum)
+            temp_plot.add_layout(span_temp)
+            humidity_plot.add_layout(span_hum)
 
-        day_boundary_spans_temp.append(span_temp)
-        day_boundary_spans_hum.append(span_hum)
+            day_boundary_spans_temp.append(span_temp)
+            day_boundary_spans_hum.append(span_hum)
+    except Exception as e:
+        logger.warning(f"Failed to update day boundaries: {e}")
+        # Non-critical - continue without day boundaries
 
 
 def _set_temp_y_range(center: float | None, window: float, *, record_auto: bool = False) -> None:
@@ -737,6 +747,7 @@ def set_button_active(active_btn):
 
 def update_time_window(minutes, sync_inputs=True):
     """Update the time window."""
+    logger.info(f"update_time_window called with minutes={minutes}")
     current_window["minutes"] = minutes
     current_window["force_update"] = True
     current_window["auto_range"] = True
