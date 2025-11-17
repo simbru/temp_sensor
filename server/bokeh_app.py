@@ -44,8 +44,17 @@ def load_server_config():
     # Parse sensor configurations
     sensor_configs = []
     if "SENSORS" in config:
-        for name, url in config["SENSORS"].items():
-            sensor_configs.append({"name": name.replace("_", " "), "url": url})
+        for name, value in config["SENSORS"].items():
+            # Parse format: "url" or "url, poll_interval_s"
+            parts = [p.strip() for p in value.split(',')]
+            url = parts[0]
+            poll_interval = int(parts[1]) if len(parts) > 1 else 30  # Default 30s
+
+            sensor_configs.append({
+                "name": name.replace("_", " "),
+                "url": url,
+                "poll_interval_s": poll_interval
+            })
 
     if not sensor_configs:
         raise ValueError("No sensors configured in config_server.ini")
@@ -54,19 +63,27 @@ def load_server_config():
     min_gap_threshold = int(config.get("SERVER", "min_gap_threshold_s", fallback="60"))
     db_path = config.get("SERVER", "database_path", fallback="sensor_data.db")
     update_ms = int(config.get("SERVER", "dashboard_update_ms", fallback="10000"))
+    max_plot_points = int(config.get("SERVER", "max_plot_points", fallback="50000"))
 
-    return sensor_configs, poll_interval, min_gap_threshold, db_path, update_ms
+    return sensor_configs, poll_interval, min_gap_threshold, db_path, update_ms, max_plot_points
 
 try:
-    sensor_configs, poll_interval, min_gap_threshold, db_path, dashboard_update_ms = load_server_config()
+    sensor_configs, poll_interval, min_gap_threshold, db_path, dashboard_update_ms, max_plot_points = load_server_config()
     logger.info(f"Loaded {len(sensor_configs)} sensor configurations")
+    logger.info(f"Max plot points: {max_plot_points:,}")
 except Exception as e:
     logger.error(f"Failed to load server configuration: {e}")
     raise
 
 # Initialize multi-sensor client and data aggregator
 multi_client = MultiSensorClient(sensor_configs)
-aggregator = DataAggregator(multi_client, db_path=db_path, poll_interval=poll_interval, min_gap_threshold=min_gap_threshold)
+aggregator = DataAggregator(
+    multi_client,
+    sensor_configs=sensor_configs,
+    db_path=db_path,
+    poll_interval=poll_interval,
+    min_gap_threshold=min_gap_threshold
+)
 
 # Do initial poll to populate database
 logger.info("Performing initial data poll...")
@@ -191,8 +208,15 @@ def _compute_window_bounds(center: float, width: float, *, minimum: float | None
 
 
 # Initialize data
-def prepare_source_data(raw_data, window_size):
-    """Return CDS-compatible dict with moving-average columns added."""
+def prepare_source_data(raw_data, window_size, max_points=None):
+    """
+    Return CDS-compatible dict with moving-average columns added.
+
+    Args:
+        raw_data: Raw sensor data dict
+        window_size: Moving average window size
+        max_points: Not used (reserved for future LTTB implementation)
+    """
     if not raw_data or len(raw_data.get("time", [])) == 0:
         return {"time": [], "temperature": [], "humidity": [], "temp_ma": [], "hum_ma": []}
 
@@ -203,6 +227,10 @@ def prepare_source_data(raw_data, window_size):
     if len(temps) == 0:
         return {"time": time_vals, "temperature": temps, "humidity": hums,
                 "temp_ma": temps, "hum_ma": hums}
+
+    # Note: Removed simple downsampling as it caused "snaking" artifacts
+    # Smart windowing now limits data at fetch time instead
+    # Future: Could implement LTTB algorithm here for "All data" view
 
     # Insert NaN markers at time gaps for visualization
     # This shows gaps in plots without storing NaN in SQLite database
@@ -296,15 +324,15 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
         num_nan_markers = max(min(num_missing, 100), 5)  # Cap at 100 to avoid huge gaps
         
         # Insert NaN with interpolated millisecond timestamps within the gap
+        # Vectorized: create all NaN markers at once instead of loop
         gap_start_ms = time_vals[gap_idx - 1]
-        time_step_ms = gap_size_ms / (num_nan_markers + 1)
-        
-        for i in range(1, num_nan_markers + 1):
-            nan_timestamp_ms = gap_start_ms + (time_step_ms * i)
-            result_times[write_idx] = nan_timestamp_ms
-            result_temps[write_idx] = np.nan
-            result_hums[write_idx] = np.nan
-            write_idx += 1
+        gap_end_ms = time_vals[gap_idx]
+        nan_times = np.linspace(gap_start_ms, gap_end_ms, num_nan_markers + 2)[1:-1]  # Exclude endpoints
+
+        result_times[write_idx:write_idx+num_nan_markers] = nan_times
+        result_temps[write_idx:write_idx+num_nan_markers] = np.nan
+        result_hums[write_idx:write_idx+num_nan_markers] = np.nan
+        write_idx += num_nan_markers
         
         prev_idx = gap_idx
     
@@ -322,7 +350,7 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
 
 # Fetch initial data for first sensor
 initial_data_raw = aggregator.get_sensor_data(current_sensor_state["name"], limit=1000)
-initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW)
+initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW, max_plot_points)
 source = ColumnDataSource(data=initial_data)
 
 initial_temp_ma = float(initial_data["temp_ma"][-1]) if len(initial_data["temp_ma"]) else None
@@ -383,8 +411,13 @@ data_cache = {
     "sensor_name": None,
     "raw_data": None,
     "prepared_data": None,
+    "last_timestamp": None,  # Track last timestamp for incremental fetch
     "last_fetch_time": 0,
     "fetch_interval_ms": 5000,  # Re-fetch every 5 seconds max
+    # Cache keys for prepared data to avoid recomputation
+    "prep_ma_window": None,
+    "prep_max_points": None,
+    "prep_raw_hash": None,  # Hash of raw data to detect changes
 }
 
 range_update_state = {
@@ -405,7 +438,8 @@ temp_plot = figure(
     tools="pan,wheel_zoom,box_zoom,reset,save",
     active_drag=None,
     active_scroll=None,
-    x_range=Range1d()
+    x_range=Range1d(),
+    output_backend="webgl"  # Hardware-accelerated rendering
 )
 temp_raw_renderer = temp_plot.line('time', 'temperature', source=source, line_width=2,
                                    color='#ff7a7a', alpha=0.6)
@@ -435,7 +469,8 @@ humidity_plot = figure(
     tools="pan,wheel_zoom,box_zoom,reset,save",
     active_drag=None,
     active_scroll=None,
-    x_range=temp_plot.x_range
+    x_range=temp_plot.x_range,
+    output_backend="webgl"  # Hardware-accelerated rendering
 )
 hum_raw_renderer = humidity_plot.line('time', 'humidity', source=source, line_width=2,
                                       color='#6fa8ff', alpha=0.6)
@@ -476,8 +511,17 @@ def _update_day_boundaries(data_times):
             midnight_times.append(midnight_ms)
             current_date += timedelta(days=1)
 
+        # Check if boundaries changed - skip expensive renderer updates if same
+        global day_boundary_spans_temp, day_boundary_spans_hum, _last_midnight_times
+        if '_last_midnight_times' not in globals():
+            _last_midnight_times = None
+
+        if _last_midnight_times == midnight_times:
+            return  # No change, skip update
+
+        _last_midnight_times = midnight_times
+
         # Remove old spans
-        global day_boundary_spans_temp, day_boundary_spans_hum
         for span in day_boundary_spans_temp:
             try:
                 temp_plot.renderers.remove(span)
@@ -755,14 +799,39 @@ def set_button_active(active_btn):
 
 
 def update_time_window(minutes, sync_inputs=True):
-    """Update the time window."""
+    """
+    Update the time window.
+    Triggers data refetch if window expanded beyond cached data.
+    """
     logger.info(f"update_time_window called with minutes={minutes}")
+
+    # Check if we need to refetch data (window changed significantly)
+    old_minutes = current_window.get("minutes")
+    needs_refetch = False
+
+    if minutes != old_minutes:
+        # Switching between "All data" and windowed, or vice versa
+        if (minutes is None) != (old_minutes is None):
+            needs_refetch = True
+            logger.info(f"Window type changed (all data <-> windowed), refetching")
+        # Expanding window beyond cached range
+        elif minutes is not None and old_minutes is not None and minutes > old_minutes * 1.5:
+            needs_refetch = True
+            logger.info(f"Window expanded significantly ({old_minutes}m → {minutes}m), refetching")
+
     current_window["minutes"] = minutes
     current_window["force_update"] = True
     current_window["auto_range"] = True
+
     if sync_inputs:
         set_time_inputs_from_minutes(minutes)
-    update_data()
+
+    if needs_refetch:
+        # Refetch data with new window
+        sensor_name = current_sensor_state["name"]
+        fetch_initial_data(sensor_name)
+
+    update_view()  # Update view with (possibly new) data
 
 
 def format_minutes(minutes):
@@ -923,7 +992,7 @@ def on_ma_change(attr, old, new):
     except (TypeError, ValueError):
         return
     current_window["force_update"] = True
-    update_data()
+    update_view()  # Recalculate moving average from cached data
 
 
 ma_spinner.on_change("value", on_ma_change)
@@ -948,7 +1017,7 @@ def on_auto_scroll_toggle(attr, old, new):
     auto_scroll_toggle.label = f"Auto-scroll: {'ON' if new else 'OFF'}"
     if new:
         logger.info("Auto-scroll re-enabled by user")
-        update_data()  # Force immediate update to current time
+        update_view()  # Force immediate view update to current time
 
 
 auto_scroll_toggle.on_change("active", on_auto_scroll_toggle)
@@ -960,54 +1029,201 @@ def on_sensor_change(attr, old, new):
     temp_plot.title.text = f"Temperature - {new}"
     humidity_plot.title.text = f"Humidity - {new}"
     current_window["force_update"] = True
-    update_data()
+
+    # Sensor changed - need to fetch all historical data for new sensor
+    fetch_initial_data(new)
+    update_view()
+
     logger.info(f"Switched to sensor: {new}")
 
 
 sensor_selector.on_change("value", on_sensor_change)
 
 
-def update_data():
-    """Update the data source with new readings from selected sensor."""
+def fetch_initial_data(sensor_name):
+    """
+    Fetch data for a sensor from database with smart windowing.
+    - If viewing specific time window: fetches that window + margin
+    - If "All data": fetches everything
+    Called on startup, sensor change, or window change.
+    """
+    from datetime import datetime, timedelta
+    import pandas as pd
+
+    # Determine fetch strategy based on time window
+    window_minutes = current_window.get("minutes")
+
+    if window_minutes is None:
+        # "All data" mode - fetch everything
+        logger.info(f"Fetching ALL historical data for {sensor_name}")
+        try:
+            new_data = aggregator.get_sensor_data(sensor_name)
+            fetch_type = "all"
+        except Exception as e:
+            logger.error(f"Error fetching all data: {e}")
+            return None
+    else:
+        # Smart windowing - fetch only visible window + 2x margin
+        margin_factor = 2.0  # Fetch 2x the visible window for smooth panning
+        fetch_window_minutes = window_minutes * margin_factor
+
+        logger.info(f"Fetching last {fetch_window_minutes:.0f} minutes of data for {sensor_name} (window: {window_minutes:.0f}m)")
+
+        try:
+            # Calculate time range (from now back to fetch_window_minutes ago)
+            end_time = datetime.now()
+            start_time = end_time - timedelta(minutes=fetch_window_minutes)
+
+            # Convert to ISO strings for database query
+            start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+            end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+
+            new_data = aggregator.get_sensor_data(sensor_name, start_time=start_str, end_time=end_str)
+            fetch_type = "windowed"
+        except Exception as e:
+            logger.error(f"Error fetching windowed data: {e}")
+            return None
+
+    try:
+        if not new_data or len(new_data.get("time", [])) == 0:
+            logger.warning(f"No data available for sensor: {sensor_name}")
+            return None
+
+        record_count = len(new_data.get('time', []))
+        logger.info(f"Fetched {record_count:,} records ({fetch_type})")
+
+        # Update cache
+        data_cache["sensor_name"] = sensor_name
+        data_cache["raw_data"] = new_data
+        data_cache["last_timestamp"] = new_data["time"][-1] if len(new_data["time"]) > 0 else None
+        data_cache["last_fetch_time"] = time.time() * 1000
+
+        return new_data
+    except Exception as e:
+        logger.error(f"Error processing fetched data: {e}")
+        return None
+
+
+def fetch_incremental_data(sensor_name):
+    """
+    Fetch only NEW data since last known timestamp.
+    Called by periodic refresh to get latest readings.
+    """
+    # If no cache or sensor changed, do full fetch
+    if data_cache["sensor_name"] != sensor_name or data_cache["last_timestamp"] is None:
+        return fetch_initial_data(sensor_name)
+
+    try:
+        from datetime import datetime
+        import pandas as pd
+
+        # Convert last timestamp (ms) to datetime string
+        last_dt = pd.Timestamp(data_cache["last_timestamp"], unit='ms')
+        last_timestamp_str = last_dt.strftime('%Y-%m-%d %H:%M:%S')
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Fetch only new records
+        new_records = aggregator.get_sensor_data(
+            sensor_name,
+            start_time=last_timestamp_str,
+            end_time=now_str
+        )
+
+        if not new_records or len(new_records.get("time", [])) == 0:
+            logger.debug(f"No new data for {sensor_name}")
+            return data_cache["raw_data"]  # Return cached data
+
+        # Append new records to cache
+        if len(new_records["time"]) > 0:
+            logger.debug(f"Fetched {len(new_records['time'])} new records for {sensor_name}")
+
+            # Convert to lists for extension
+            data_cache["raw_data"]["time"] = list(data_cache["raw_data"]["time"]) + list(new_records["time"])
+            data_cache["raw_data"]["temperature"] = list(data_cache["raw_data"]["temperature"]) + list(new_records["temperature"])
+            data_cache["raw_data"]["humidity"] = list(data_cache["raw_data"]["humidity"]) + list(new_records["humidity"])
+
+            # Trim old data to prevent endless accumulation (only for windowed mode)
+            window_minutes = current_window.get("minutes")
+            if window_minutes is not None:
+                # Keep 3x the window size to allow for smooth panning
+                keep_window_minutes = window_minutes * 3
+                keep_window_ms = keep_window_minutes * 60 * 1000
+
+                # Find cutoff time
+                latest_time = data_cache["raw_data"]["time"][-1]
+                cutoff_time = latest_time - keep_window_ms
+
+                # Find index of first point to keep
+                times = np.array(data_cache["raw_data"]["time"])
+                keep_indices = times >= cutoff_time
+                first_keep_idx = np.argmax(keep_indices)
+
+                if first_keep_idx > 0:
+                    # Trim old data
+                    data_cache["raw_data"]["time"] = data_cache["raw_data"]["time"][first_keep_idx:]
+                    data_cache["raw_data"]["temperature"] = data_cache["raw_data"]["temperature"][first_keep_idx:]
+                    data_cache["raw_data"]["humidity"] = data_cache["raw_data"]["humidity"][first_keep_idx:]
+                    logger.debug(f"Trimmed {first_keep_idx} old points from cache")
+
+            # Update last timestamp
+            data_cache["last_timestamp"] = new_records["time"][-1]
+            data_cache["last_fetch_time"] = time.time() * 1000
+
+        return data_cache["raw_data"]
+    except Exception as e:
+        logger.error(f"Error fetching incremental data: {e}")
+        return data_cache["raw_data"]  # Fall back to cached data
+
+
+def update_view():
+    """
+    Update plot view and UI elements using cached data.
+    Does NOT fetch from database - instant response.
+    """
     try:
         sensor_name = current_sensor_state["name"]
-        logger.debug(f"update_data() called for sensor: {sensor_name}")
 
-        # Check if we need to re-fetch data or can use cache
-        import time
-        current_time_ms = time.time() * 1000
-        time_since_fetch = current_time_ms - data_cache["last_fetch_time"]
-        sensor_changed = data_cache["sensor_name"] != sensor_name
-        should_fetch = sensor_changed or time_since_fetch > data_cache["fetch_interval_ms"]
-
-        if should_fetch:
-            # Always fetch ALL data from database (no arbitrary limits)
-            # Users can zoom/pan to any point in history
-            # Cache ensures this only happens once per 5 seconds
-            new_data = aggregator.get_sensor_data(sensor_name)
-            logger.debug("Fetching all available data from database")
-
-            if not new_data or len(new_data.get("time", [])) == 0:
-                logger.warning(f"No data available for sensor: {sensor_name}")
+        if data_cache["raw_data"] is None or data_cache["sensor_name"] != sensor_name:
+            logger.warning("No cached data available, triggering initial fetch")
+            fetch_initial_data(sensor_name)
+            if data_cache["raw_data"] is None:
                 current_readings.text = f"<h3>⚠️ No data available for {sensor_name}</h3>"
                 return
 
-            logger.debug(f"Fetched {len(new_data.get('time', []))} data points from database")
+        # Use cached data
+        raw_data = data_cache["raw_data"]
 
-            window = max(int(ma_spinner.value), 1)
-            prepared = prepare_source_data(new_data, window)
+        # Check if we need to recompute prepared data
+        window = max(int(ma_spinner.value), 1)
 
-            # Update cache
-            data_cache["sensor_name"] = sensor_name
-            data_cache["raw_data"] = new_data
-            data_cache["prepared_data"] = prepared
-            data_cache["last_fetch_time"] = current_time_ms
+        # Create a simple hash of the data (length + first/last timestamps)
+        # Avoids expensive hashing of large arrays
+        if raw_data and raw_data.get("time") is not None and len(raw_data.get("time", [])) > 0:
+            times = raw_data["time"]
+            raw_hash = (len(times), times[0] if len(times) > 0 else 0, times[-1] if len(times) > 0 else 0)
         else:
-            # Use cached data - just update moving average if window changed
-            window = max(int(ma_spinner.value), 1)
-            prepared = prepare_source_data(data_cache["raw_data"], window)
+            raw_hash = None
+
+        # Only recompute if parameters or data changed
+        cache_valid = (
+            data_cache["prepared_data"] is not None and
+            data_cache["prep_ma_window"] == window and
+            data_cache["prep_max_points"] == max_plot_points and
+            data_cache["prep_raw_hash"] == raw_hash
+        )
+
+        if cache_valid:
+            # Use cached prepared data - no recomputation needed!
+            logger.debug("Using cached prepared data")
+            prepared = data_cache["prepared_data"]
+        else:
+            # Recompute and cache
+            logger.debug(f"Recomputing prepared data (MA window: {window}, max points: {max_plot_points})")
+            prepared = prepare_source_data(raw_data, window, max_plot_points)
             data_cache["prepared_data"] = prepared
-            logger.debug(f"Using cached data ({len(prepared['time'])} points)")
+            data_cache["prep_ma_window"] = window
+            data_cache["prep_max_points"] = max_plot_points
+            data_cache["prep_raw_hash"] = raw_hash
 
         # Replace dataset
         source.data = prepared
@@ -1030,8 +1246,8 @@ def update_data():
             _set_hum_y_range(latest_hum_ma, hum_window_state["value"], record_auto=True)
 
         # Track current data extents
-        current_window["data_min"] = prepared["time"][0]
-        current_window["data_max"] = prepared["time"][-1]
+        current_window["data_min"] = prepared["time"][0] if len(prepared["time"]) > 0 else None
+        current_window["data_max"] = prepared["time"][-1] if len(prepared["time"]) > 0 else None
 
         if current_window.get("force_update", False):
             current_window["force_update"] = False
@@ -1041,7 +1257,7 @@ def update_data():
             logger.warning("No time data in prepared dataset")
             return
 
-        latest_time_ms = prepared["time"][-1]  # Get the LAST (most recent) timestamp
+        latest_time_ms = prepared["time"][-1]
 
         if current_window["auto_range"]:
             if current_window["minutes"] is not None:
@@ -1059,107 +1275,133 @@ def update_data():
             auto_scroll_toggle.button_type = "default"
             auto_scroll_toggle.label = "Auto-scroll: OFF"
 
-        # Update current readings display - use LATEST values
-        curr_datetime = pd.Timestamp(latest_time_ms, unit='ms')
-        curr_time_str = curr_datetime.strftime('%Y-%m-%d %H:%M:%S')
+        # Update current readings display
+        _update_status_display(sensor_name, prepared, latest_time_ms)
 
-        # Make sure we're getting the last values
-        if len(prepared["temp_ma"]) > 0:
-            curr_temp = prepared["temp_ma"][-1]
-        else:
-            curr_temp = 0.0
-
-        if len(prepared["hum_ma"]) > 0:
-            curr_hum = prepared["hum_ma"][-1]
-        else:
-            curr_hum = 0.0
-
-        logger.debug(f"Latest reading: {curr_time_str}, {curr_temp:.1f}°C, {curr_hum:.1f}%")
-
-        # Get sensor metadata
-        metadata = aggregator.get_sensor_metadata(sensor_name)
-        status_icon, status_label = _resolve_status_display(metadata)
-        metadata_safe = metadata or {}
-        device_ip = metadata_safe.get("device_ip") or "unknown"
-        last_sync_str = _format_metadata_timestamp(metadata_safe.get("last_update"))
-        last_error = metadata_safe.get("last_error")
-        error_html = ""
-        if last_error:
-            error_html = f"<p style='font-size:12px;margin:6px 0 0;color:#c0392b;background-color:#fdecea;padding:4px 8px;border-radius:3px;'>Last error: {last_error}</p>"
-
-        # Get server uptime
-        uptime = aggregator.get_uptime()
-        days = uptime.days
-        hours, remainder = divmod(uptime.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-
-        if days > 0:
-            uptime_str = f"{days}d {hours}h {minutes}m"
-        elif hours > 0:
-            uptime_str = f"{hours}h {minutes}m {seconds}s"
-        else:
-            uptime_str = f"{minutes}m {seconds}s"
-
-        # Get server metrics
-        server_metrics = aggregator.get_server_metrics()
-        server_db_size = server_metrics.get("database_size_mb", 0)
-        total_records = server_metrics.get("total_records", 0)
-
-        # Format records count (e.g., 125432 -> 125K)
-        if total_records >= 1000000:
-            records_str = f"{total_records / 1000000:.1f}M"
-        elif total_records >= 1000:
-            records_str = f"{total_records / 1000:.0f}K"
-        else:
-            records_str = str(total_records)
-
-        # Get client metrics from metadata
-        cpu_str = f"{metadata_safe.get('cpu_percent', 0):.0f}%" if metadata_safe.get('cpu_percent') is not None else "—"
-        mem_str = f"{metadata_safe.get('memory_percent', 0):.0f}%" if metadata_safe.get('memory_percent') is not None else "—"
-        client_db_str = f"{metadata_safe.get('client_db_size_mb', 0):.1f} MB" if metadata_safe.get('client_db_size_mb') is not None else "—"
-        sensor_type_str = metadata_safe.get('sensor_type', 'Unknown')
-
-        # Format client record count
-        client_total_records = metadata_safe.get('client_total_records', 0)
-        if client_total_records is not None and client_total_records >= 1000000:
-            client_records_str = f"{client_total_records / 1000000:.1f}M"
-        elif client_total_records is not None and client_total_records >= 1000:
-            client_records_str = f"{client_total_records / 1000:.0f}K"
-        elif client_total_records is not None:
-            client_records_str = str(client_total_records)
-        else:
-            client_records_str = "—"
-
-        current_readings.text = f"""
-        <div style="background-color:#f0f0f0;padding:14px;border-radius:5px;margin-bottom:18px;box-shadow:0 2px 4px rgba(0,0,0,0.1);display:flex;flex-wrap:wrap;gap:2px;align-items:flex-start;max-width:1200px;">
-            <div style="flex:1 1 180px;min-width:180px;">
-                <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Status</h3>
-                <p style="font-size:16px;margin:0;">{status_icon} {sensor_name}</p>
-                <p style="font-size:12px;margin:4px 0 0;color:#555;">{status_label}</p>
-                <p style="font-size:12px;margin:4px 0 0;color:#555;">{sensor_type_str}</p>
-            </div>
-            <div style="flex:1 1 200px;min-width:200px;">
-                <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Last reading</h3>
-                <p style="font-size:16px;margin:0;">{curr_temp:.1f}°C · {curr_hum:.1f}%</p>
-                <p style="font-size:12px;margin:4px 0 0;color:#555;">{curr_time_str}</p>
-            </div>
-            <div style="flex:1 1 200px;min-width:200px;">
-                <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Client Info</h3>
-                <p style="font-size:16px;margin:0;font-family:monospace;">{device_ip}</p>
-                <p style="font-size:12px;margin:4px 0 0;color:#555;">CPU: {cpu_str} | Memory: {mem_str}</p>
-                <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {client_db_str} | Records: {client_records_str}</p>
-            </div>
-            <div style="flex:1 1 220px;min-width:220px;">
-                <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Server Info</h3>
-                <p style="font-size:16px;margin:0;">Uptime: {uptime_str}</p>
-                <p style="font-size:12px;margin:4px 0 0;color:#555;">Last Sync: {last_sync_str}</p>
-                <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {server_db_size:.1f} MB | Records: {records_str}</p>
-                {error_html}
-            </div>
-        </div>
-        """
     except Exception as e:
-        logger.error(f"Error updating data: {e}")
+        logger.error(f"Error updating view: {e}")
+
+
+def _update_status_display(sensor_name, prepared, latest_time_ms):
+    """Helper function to update the status display."""
+    import pandas as pd
+
+    curr_datetime = pd.Timestamp(latest_time_ms, unit='ms')
+    curr_time_str = curr_datetime.strftime('%Y-%m-%d %H:%M:%S')
+
+    # Make sure we're getting the last values
+    if len(prepared["temp_ma"]) > 0:
+        curr_temp = prepared["temp_ma"][-1]
+    else:
+        curr_temp = 0.0
+
+    if len(prepared["hum_ma"]) > 0:
+        curr_hum = prepared["hum_ma"][-1]
+    else:
+        curr_hum = 0.0
+
+    logger.debug(f"Latest reading: {curr_time_str}, {curr_temp:.1f}°C, {curr_hum:.1f}%")
+
+    # Get sensor metadata
+    metadata = aggregator.get_sensor_metadata(sensor_name)
+    status_icon, status_label = _resolve_status_display(metadata)
+    metadata_safe = metadata or {}
+    device_ip = metadata_safe.get("device_ip") or "unknown"
+    last_sync_str = _format_metadata_timestamp(metadata_safe.get("last_update"))
+    last_error = metadata_safe.get("last_error")
+    error_html = ""
+    if last_error:
+        error_html = f"<p style='font-size:12px;margin:6px 0 0;color:#c0392b;background-color:#fdecea;padding:4px 8px;border-radius:3px;'>Last error: {last_error}</p>"
+
+    # Get server uptime
+    uptime = aggregator.get_uptime()
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if days > 0:
+        uptime_str = f"{days}d {hours}h {minutes}m"
+    elif hours > 0:
+        uptime_str = f"{hours}h {minutes}m {seconds}s"
+    else:
+        uptime_str = f"{minutes}m {seconds}s"
+
+    # Get server metrics
+    server_metrics = aggregator.get_server_metrics()
+    server_db_size = server_metrics.get("database_size_mb", 0)
+    total_records = server_metrics.get("total_records", 0)
+
+    # Format records count
+    if total_records >= 1000000:
+        records_str = f"{total_records / 1000000:.1f}M"
+    elif total_records >= 1000:
+        records_str = f"{total_records / 1000:.0f}K"
+    else:
+        records_str = str(total_records)
+
+    # Get client metrics
+    cpu_str = f"{metadata_safe.get('cpu_percent', 0):.0f}%" if metadata_safe.get('cpu_percent') is not None else "—"
+    mem_str = f"{metadata_safe.get('memory_percent', 0):.0f}%" if metadata_safe.get('memory_percent') is not None else "—"
+    client_db_str = f"{metadata_safe.get('client_db_size_mb', 0):.1f} MB" if metadata_safe.get('client_db_size_mb') is not None else "—"
+    sensor_type_str = metadata_safe.get('sensor_type', 'Unknown')
+
+    # Format client record count
+    client_total_records = metadata_safe.get('client_total_records', 0)
+    if client_total_records is not None and client_total_records >= 1000000:
+        client_records_str = f"{client_total_records / 1000000:.1f}M"
+    elif client_total_records is not None and client_total_records >= 1000:
+        client_records_str = f"{client_total_records / 1000:.0f}K"
+    elif client_total_records is not None:
+        client_records_str = str(client_total_records)
+    else:
+        client_records_str = "—"
+
+    current_readings.text = f"""
+    <div style="background-color:#f0f0f0;padding:14px;border-radius:5px;margin-bottom:18px;box-shadow:0 2px 4px rgba(0,0,0,0.1);display:flex;flex-wrap:wrap;gap:2px;align-items:flex-start;max-width:1200px;">
+        <div style="flex:1 1 180px;min-width:180px;">
+            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Status</h3>
+            <p style="font-size:16px;margin:0;">{status_icon} {sensor_name}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">{status_label}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">{sensor_type_str}</p>
+        </div>
+        <div style="flex:1 1 200px;min-width:200px;">
+            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Last reading</h3>
+            <p style="font-size:16px;margin:0;">{curr_temp:.1f}°C · {curr_hum:.1f}%</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">{curr_time_str}</p>
+        </div>
+        <div style="flex:1 1 200px;min-width:200px;">
+            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Client Info</h3>
+            <p style="font-size:16px;margin:0;font-family:monospace;">{device_ip}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">CPU: {cpu_str} | Memory: {mem_str}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {client_db_str} | Records: {client_records_str}</p>
+        </div>
+        <div style="flex:1 1 220px;min-width:220px;">
+            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Server Info</h3>
+            <p style="font-size:16px;margin:0;">Uptime: {uptime_str}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">Last Sync: {last_sync_str}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {server_db_size:.1f} MB | Records: {records_str}</p>
+            {error_html}
+        </div>
+    </div>
+    """
+
+
+def update_data():
+    """
+    Periodic refresh - fetch new data and update view.
+    Called by bokeh periodic callback.
+    """
+    try:
+        sensor_name = current_sensor_state["name"]
+
+        # Fetch incremental data (only new records since last timestamp)
+        fetch_incremental_data(sensor_name)
+
+        # Update view with latest data
+        update_view()
+
+    except Exception as e:
+        logger.error(f"Error in periodic update: {e}")
 
 
 # Initial update

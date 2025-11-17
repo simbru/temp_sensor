@@ -23,6 +23,7 @@ class DataAggregator:
     def __init__(
         self,
         multi_sensor_client: MultiSensorClient,
+        sensor_configs: List[Dict] = None,
         db_path: str = "sensor_data.db",
         poll_interval: int = 30,
         min_gap_threshold: int = 60
@@ -32,20 +33,35 @@ class DataAggregator:
 
         Args:
             multi_sensor_client: Client for fetching data from sensors
+            sensor_configs: List of sensor configs with 'name' and 'poll_interval_s' (optional)
             db_path: Path to SQLite database file
-            poll_interval: Seconds between polling cycles
+            poll_interval: Default seconds between polling cycles (fallback)
             min_gap_threshold: Minimum seconds before marking sensor as offline (default 60)
         """
         self.client = multi_sensor_client
         self.db_path = Path(db_path)
-        self.poll_interval = poll_interval
+        self.poll_interval = poll_interval  # Keep for backward compatibility
         self._resync_batch_limit = 5000
         self._resync_timeout = max(15, poll_interval * 2)
         self._min_gap_threshold = min_gap_threshold
         self._start_of_time = "0001-01-01 00:00:00"
         self._stop_polling = threading.Event()
-        self._polling_thread = None
+        self._polling_threads = {}  # Map sensor_name -> thread
         self._start_time = datetime.now()  # Track when aggregator started
+
+        # Build sensor poll intervals map
+        self._sensor_poll_intervals = {}
+        if sensor_configs:
+            for config in sensor_configs:
+                sensor_name = config.get("name")
+                poll_interval_s = config.get("poll_interval_s", poll_interval)
+                self._sensor_poll_intervals[sensor_name] = poll_interval_s
+
+        # For any sensors not in config, use default poll_interval
+        for sensor_name in self.client.get_all_sensor_names():
+            if sensor_name not in self._sensor_poll_intervals:
+                self._sensor_poll_intervals[sensor_name] = poll_interval
+
         self._init_database()
 
     def _init_database(self):
@@ -397,9 +413,9 @@ class DataAggregator:
         temperatures = np.array([row[1] for row in rows], dtype=np.float32)
         humidities = np.array([row[2] for row in rows], dtype=np.float32)
 
-        # Convert ISO timestamps to numpy datetime64, then to milliseconds since epoch
-        times_dt64 = np.array(times_str, dtype=np.datetime64)
-        times_ms = times_dt64.astype('datetime64[ms]').astype(np.int64).astype(np.float64)
+        # Convert ISO timestamps to milliseconds using pandas (much faster than numpy)
+        import pandas as pd
+        times_ms = pd.to_datetime(times_str).values.astype('datetime64[ms]').astype(np.int64).astype(np.float64)
 
         return {
             "time": times_ms,
@@ -480,29 +496,79 @@ class DataAggregator:
         }
 
     def start_polling(self):
-        """Start background polling thread."""
-        if self._polling_thread and self._polling_thread.is_alive():
-            logger.warning("Polling thread already running")
+        """Start background polling threads (one per sensor)."""
+        if self._polling_threads:
+            logger.warning("Polling threads already running")
             return
 
         self._stop_polling.clear()
-        self._polling_thread = threading.Thread(target=self._polling_loop, daemon=True)
-        self._polling_thread.start()
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sensor_names = self.client.get_all_sensor_names()
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n{'='*60}")
         print(f"[{timestamp}] Data Aggregator Started")
-        print(f"Monitoring {len(sensor_names)} sensor(s): {', '.join(sensor_names)}")
-        print(f"Poll interval: {self.poll_interval} seconds")
+        print(f"Monitoring {len(sensor_names)} sensor(s):")
+
+        # Create one polling thread per sensor
+        for sensor_name in sensor_names:
+            poll_interval = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
+            print(f"  - {sensor_name}: polling every {poll_interval}s")
+
+            thread = threading.Thread(
+                target=self._poll_sensor_loop,
+                args=(sensor_name, poll_interval),
+                daemon=True,
+                name=f"Poll-{sensor_name}"
+            )
+            thread.start()
+            self._polling_threads[sensor_name] = thread
+
         print(f"{'='*60}\n")
-        logger.info("Started background polling")
+        logger.info(f"Started {len(self._polling_threads)} polling threads")
 
     def stop_polling(self):
-        """Stop background polling thread."""
+        """Stop all background polling threads."""
         self._stop_polling.set()
-        if self._polling_thread:
-            self._polling_thread.join(timeout=10)
-        logger.info("Stopped background polling")
+
+        # Wait for all sensor polling threads to finish
+        for sensor_name, thread in self._polling_threads.items():
+            if thread and thread.is_alive():
+                thread.join(timeout=10)
+                logger.info(f"Stopped polling thread for {sensor_name}")
+
+        self._polling_threads.clear()
+        logger.info("Stopped all background polling threads")
+
+    def _poll_sensor_loop(self, sensor_name: str, poll_interval: int):
+        """
+        Background polling loop for a single sensor.
+        Each sensor has its own thread with its own poll interval.
+
+        Args:
+            sensor_name: Name of sensor to poll
+            poll_interval: Seconds between polls for this sensor
+        """
+        logger.info(f"Started polling loop for {sensor_name} (interval: {poll_interval}s)")
+
+        while not self._stop_polling.is_set():
+            try:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                logger.debug(f"[{timestamp}] Polling {sensor_name}...")
+
+                # Poll this sensor
+                self.update_sensor_data(sensor_name)
+
+                logger.debug(f"[{timestamp}] Polling complete for {sensor_name}. Next poll in {poll_interval}s.")
+
+            except Exception as e:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"[{timestamp}] ERROR polling {sensor_name}: {e}")
+                logger.error(f"Error polling {sensor_name}: {e}")
+
+            # Wait for next poll cycle (or until stop signal)
+            self._stop_polling.wait(poll_interval)
+
+        logger.info(f"Stopped polling loop for {sensor_name}")
 
     def _polling_loop(self):
         """Background polling loop with parallel sensor updates."""

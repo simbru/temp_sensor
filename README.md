@@ -144,7 +144,7 @@ sudo systemctl status tempsensor.service
 Create a batch file `start_dashboard.bat`:
 ```batch
 cd C:\path\to\temp_sensor
-uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=<SERVER_IP>:80
+uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1 --session-token-expiration 360000000 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=<SERVER_IP>:80
 ```
 
 Use Task Scheduler to run at startup.
@@ -278,45 +278,115 @@ Lab_Bench = http://<PI_IP_2>:5000
 
 ## Development & Testing
 
-### Local Development (No Hardware Required)
+### Quick Test Environment (Recommended)
 
-You can develop and test the entire system on your local machine using simulated sensors:
+The easiest way to test the system with realistic data:
 
-**1. Start simulated sensors:**
+**PowerShell (Windows):**
+```powershell
+# Full test with 7 days of historical data
+.\dev\test.ps1
+
+# Quick test with 1 day (faster)
+.\dev\test.ps1 1
+
+# Keep existing server cache (faster restart)
+.\dev\test.ps1 -NoClean
+
+# Custom configuration
+.\dev\test.ps1 3 -NoClean -NoBrowser
+```
+
+**Bash (Linux/WSL/macOS):**
 ```bash
-# Starts 3 test sensors with simulated data on ports 5001-5003
+# Make executable (first time only)
+chmod +x dev/test.sh
+
+# Full test with 7 days of historical data
+./dev/test.sh
+
+# Quick test with 1 day
+./dev/test.sh --days 1
+
+# Keep existing server cache
+./dev/test.sh --no-clean
+
+# Custom configuration
+./dev/test.sh --days 3 --no-clean --no-browser
+```
+
+**What it does:**
+1. Cleans all test databases (client + server) for fresh state
+2. Generates historical data (configurable days at 2-second intervals)
+3. Starts 3 simulated sensor clients on ports 5001-5003
+4. Starts Bokeh dashboard server on port 5006
+5. Opens browser automatically to dashboard
+6. Shows backfill progress as server pulls all historical data
+
+**Result:** A data-heavy test environment with ~43,000 data points per day per sensor, perfect for validating dashboard features like gap detection, moving averages, and CSV export.
+
+---
+
+### Manual Testing (Advanced)
+
+For more control over the test environment:
+
+**1. Install dependencies:**
+```bash
+# Local development (no Pi hardware required)
+uv sync --group local-dev
+```
+
+**2. Start simulated sensors manually:**
+```bash
+# Starts 3 test sensors with simulated data
 uv run python dev/run_test_clients.py
+
+# With historical data generation
+uv run python dev/run_test_clients.py --historical-days 7
+
+# Force regeneration of historical data
+uv run python dev/run_test_clients.py --historical-days 3 --force-regenerate
 ```
 
 This creates:
 - 3 simulated DHT22 sensors with random temperature/humidity
 - API servers at `http://localhost:5001`, `5002`, `5003`
-- Local HDF5 files: `dev/templog_test1.h5`, `dev/templog_test2.h5`, `dev/templog_test3.h5`
+- SQLite databases: `dev/templog_test1.db`, `dev/templog_test2.db`, `dev/templog_test3.db`
 
-**2. Configure server to use test sensors:**
+**3. Configure server to use test sensors:**
 
-Edit `server/config_server.ini`:
+`server/config_server.ini` is already configured for test sensors:
 ```ini
 [SENSORS]
-Test_Sensor_1 = http://localhost:5001
-Test_Sensor_2 = http://localhost:5002
-Test_Sensor_3 = http://localhost:5003
+Test_Sensor_1 = http://localhost:5001, 2
+Test_Sensor_2 = http://localhost:5002, 2
+Test_Sensor_3 = http://localhost:5003, 2
 ```
 
-**3. Start dashboard:**
+**4. Start dashboard manually:**
 ```bash
+# In a separate terminal
 uv run bokeh serve server/bokeh_app.py --show
 # Opens at http://localhost:5006/bokeh_app
 ```
 
-**4. Test features:**
+**5. Test features:**
 - Switch between sensors in dropdown
-- Adjust time windows and moving averages
+- Adjust time windows (10min to 1 week or custom)
+- Adjust moving average window
 - Download CSV exports
-- Verify polling logs in server console
+- Observe backfill on first sync
+- Verify gap detection and visualization
 
-**Dev folder contents:**
-- `dev/run_test_clients.py` - Multi-client test harness
+---
+
+### Dev Folder Contents
+
+- `dev/test.ps1` - Quick test environment launcher (PowerShell)
+- `dev/test.sh` - Quick test environment launcher (Bash)
+- `dev/run_full_test_environment.py` - Complete test orchestration script
+- `dev/run_test_clients.py` - Multi-client test harness with historical data generation
 - `dev/config_test1.ini` - Test sensor 1 config (port 5001)
 - `dev/config_test2.ini` - Test sensor 2 config (port 5002)
 - `dev/config_test3.ini` - Test sensor 3 config (port 5003)

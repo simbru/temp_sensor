@@ -36,7 +36,7 @@ tempsens/                    # Main package directory (client-side)
 server/                      # Server-side components (central dashboard)
 ├── __init__.py
 ├── api_client.py           # HTTP client for fetching from Pi APIs
-├── data_aggregator.py      # Polls sensors and caches to SQLite
+├── data_aggregator.py      # Polls sensors at per-sensor intervals and caches to SQLite
 ├── bokeh_app.py            # Multi-sensor dashboard
 └── config_server.ini       # Server configuration (sensor list)
 
@@ -105,10 +105,10 @@ uv run python -m tempsens.sensor    # Run with real sensor
 - Handles connection failures gracefully
 
 **`server/data_aggregator.py`**: Data polling and caching
-- Polls configured sensors at regular intervals
+- Polls configured sensors at per-sensor configurable intervals
+- Each sensor has its own dedicated polling thread (e.g., 1s for perfusion, 15min for room temp)
 - Stores data in SQLite database (one table per sensor)
 - Tracks sensor metadata (status, last update, errors)
-- Background polling thread with configurable interval
 - **Timestamp conversion**: Converts ISO strings from Pi APIs to milliseconds since epoch for Bokeh
   - `get_sensor_data()` returns timestamps as `float` milliseconds, not ISO strings
   - This format is required by Bokeh for efficient datetime plotting
@@ -128,15 +128,16 @@ uv run python -m tempsens.sensor    # Run with real sensor
   - Large client outages (> 60s): Both raw and moving average lines show visual breaks
 
 **`server/config_server.ini`**: Server configuration
-- List of sensor names and API URLs (Headscale IPs)
-- Polling interval and dashboard settings
+- List of sensor names, API URLs (Headscale IPs), and per-sensor poll intervals
+- Global polling settings and dashboard configuration
+- Each sensor can have its own poll rate (e.g., 1s for fast-changing temps, 15min for stable room temps)
 
 ### Data Flow
 
 **Distributed Mode (Client + Server)**:
 1. **Pi Client**: `sensor.py` → `log_data()` → spike filtering → `write_data()` → local SQLite (WAL mode)
 2. **Pi Client**: `api_server.py` serves data via HTTP endpoints
-3. **Server**: `data_aggregator` polls Pi APIs every N seconds (with gap detection/resync)
+3. **Server**: `data_aggregator` polls each Pi API at its configured interval (with gap detection/resync)
 4. **Server**: Aggregator writes to SQLite database (WAL mode)
 5. **Server**: Dashboard reads from SQLite and updates Bokeh plots
 
@@ -160,11 +161,15 @@ uv run python -m tempsens.sensor    # Run with real sensor
 - Temperature/humidity window and range update settings
 
 **Server `config_server.ini`**:
-- `[SERVER]`: Poll interval, dashboard port, database path
-- `[SENSORS]`: Map of sensor names to API URLs
+- `[SERVER]`: Default poll interval, dashboard port, database path, min_gap_threshold
+- `[SENSORS]`: Map of sensor names to API URLs with optional per-sensor poll intervals
   ```ini
-  Room_397 = http://100.64.0.5:5000
-  Lab_Bench = http://100.64.0.6:5000
+  # Format: sensor_name = url, poll_interval_s
+  # Poll interval is optional - defaults to 30s if not specified
+  Perfusion_Sensor = http://100.64.0.5:5000, 1    # Poll every 1s for fast-changing temps
+  Room_397 = http://100.64.0.6:5000, 900          # Poll every 15min for slow room temps
+  Lab_Bench = http://100.64.0.7:5000, 60          # Poll every 1min for moderate monitoring
+  Incubator = http://100.64.0.8:5000              # No interval = defaults to 30s
   ```
 
 **Client `settings.ini`** (optional, git-ignored):
@@ -224,12 +229,19 @@ uv run bokeh serve --show tempsens/dashboard/bokeh_app.py
 Edit `server/config_server.ini`:
 ```ini
 [SERVER]
-poll_interval_s = 30
+poll_interval_s = 30        # Default poll interval (fallback)
+min_gap_threshold_s = 60    # Minimum gap before marking offline
 dashboard_port = 5006
+database_path = sensor_data.db
+dashboard_update_ms = 4000
 
 [SENSORS]
-Room_397 = http://100.64.0.5:5000
-Lab_Bench = http://100.64.0.6:5000
+# Format: sensor_name = url, poll_interval_s
+# Poll interval is optional - defaults to poll_interval_s from [SERVER] if not specified
+Perfusion_Sensor = http://100.64.0.5:5000, 1    # Fast polling: 1s
+Room_397 = http://100.64.0.6:5000, 900          # Slow polling: 15min
+Lab_Bench = http://100.64.0.7:5000, 60          # Moderate: 1min
+Incubator = http://100.64.0.8:5000              # Default: 30s
 ```
 
 **Run multi-sensor dashboard**:

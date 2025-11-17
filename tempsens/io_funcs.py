@@ -108,8 +108,13 @@ def print_to_console(timestamp, temperature, humidity):
     else:
         print(timestamp, "failed read")
 
-def init_database(filename=None):
-    """Initialize SQLite database with WAL mode for crash safety."""
+def init_database(filename=None, use_wal=None):
+    """Initialize SQLite database with WAL mode for crash safety.
+
+    Args:
+        filename: Path to database file (uses config default if None)
+        use_wal: Force WAL mode on/off. If None, auto-detect (disable on WSL /mnt/ paths)
+    """
     if filename is None:
         filename = CONFIG["DEFAULT"]["outputfile"]
 
@@ -118,11 +123,22 @@ def init_database(filename=None):
     if not db_path.exists():
         print(f"Database doesn't exist, creating it at {filename}")
 
+    # Auto-detect if we should use WAL mode
+    if use_wal is None:
+        # Disable WAL on WSL /mnt/ paths (Windows filesystem mount)
+        # WAL mode doesn't work reliably across filesystem boundaries
+        abs_path = pathlib.Path(filename).resolve()
+        use_wal = not str(abs_path).startswith('/mnt/')
+
     with sqlite3.connect(filename) as conn:
         cursor = conn.cursor()
 
-        # Enable WAL mode for crash safety and better concurrency
-        cursor.execute("PRAGMA journal_mode=WAL")
+        # Enable WAL mode for crash safety and better concurrency (or DELETE for WSL)
+        if use_wal:
+            cursor.execute("PRAGMA journal_mode=WAL")
+        else:
+            cursor.execute("PRAGMA journal_mode=DELETE")
+            print(f"✓ Initialized database (journal_mode=DELETE for WSL compatibility)")
 
         # SD card optimizations for Raspberry Pi
         cursor.execute("PRAGMA synchronous=NORMAL")   # Balance safety/speed (still crash-safe with WAL)
@@ -155,6 +171,10 @@ def write_data(timestamp, temperature, humidity, filename=None):
 
     with sqlite3.connect(filename) as conn:
         cursor = conn.cursor()
+        # Ensure journal mode matches initialization (critical for WSL)
+        abs_path = pathlib.Path(filename).resolve()
+        if str(abs_path).startswith('/mnt/'):
+            cursor.execute("PRAGMA journal_mode=DELETE")
         cursor.execute(
             "INSERT OR IGNORE INTO sensor_data (timestamp, temperature, humidity) VALUES (?, ?, ?)",
             (timestamp, temperature, humidity)

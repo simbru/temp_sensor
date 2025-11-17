@@ -14,8 +14,8 @@ classifiers = [
 ]
 dependencies = [
     # Minimal core dependencies shared by both client and server
-    "numpy>=1.26.4",
-    "pandas",
+    "numpy>=2.0.0",
+    "pandas>=2.0.0",
     "psutil",
 ]
 
@@ -31,6 +31,13 @@ server = [
     "requests>=2.31.0",
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
+]
+local-dev = [
+    # All dependencies for local development (excludes pi-hardware)
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "bokeh",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]
