@@ -146,8 +146,8 @@ def convert_text_to_integer(db_path: Path, dry_run: bool = False) -> bool:
                 print(f"    Integer:  {times_ms[0]}")
                 print(f"    Verified: {first_converted_back}")
 
-                # Store for migration
-                migration_data[table_name] = list(zip(times_ms, temperatures, humidities))
+                # Store for migration - convert numpy int64 to Python int to avoid SQLite BLOB storage
+                migration_data[table_name] = [(int(t), temp, hum) for t, temp, hum in zip(times_ms, temperatures, humidities)]
                 print(f"  ✓ Converted {len(times_ms):,} timestamps\n")
 
             except Exception as e:
