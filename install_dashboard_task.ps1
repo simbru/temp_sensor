@@ -42,17 +42,29 @@ catch {
     exit 1
 }
 
-# Detect server IP
-$ServerIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -notlike "169.254.*"} | Select-Object -First 1).IPAddress
+# Detect server IP (prefer non-WSL, non-169.254.x addresses)
+$ServerIP = (Get-NetIPAddress -AddressFamily IPv4 |
+    Where-Object {
+        $_.InterfaceAlias -notlike "*Loopback*" -and
+        $_.InterfaceAlias -notlike "*WSL*" -and
+        $_.IPAddress -notlike "169.254.*" -and
+        $_.IPAddress -notlike "172.*"
+    } | Select-Object -First 1).IPAddress
+
+if (-not $ServerIP) {
+    # Fallback to any non-loopback IP
+    $ServerIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike "*Loopback*"} | Select-Object -First 1).IPAddress
+}
 if (-not $ServerIP) {
     $ServerIP = "localhost"
 }
-Write-Host "Server IP: $ServerIP" -ForegroundColor Green
+Write-Host "Server IP: $ServerIP (for websocket origin)" -ForegroundColor Green
 
 # Create startup script
 $StartScript = @"
 Set-Location "$RepoPath"
 `$env:PYTHONUNBUFFERED = "1"
+`$env:PYTHONIOENCODING = "utf-8"
 & "$uvPath" run python -m bokeh serve server/bokeh_app.py ``
     --port $Port ``
     --address $Address ``
