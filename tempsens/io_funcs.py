@@ -104,12 +104,15 @@ def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar =
         raise RuntimeError("Simulated sensor read failure (checksum error)")
     return temp, hum
 
+def format_timestamp(timestamp_ms):
+    """Convert milliseconds timestamp to human-readable string."""
+    from datetime import datetime
+    dt = datetime.fromtimestamp(timestamp_ms / 1000.0)
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
 def print_to_console(timestamp, temperature, humidity):
     """Print reading to console with human-readable timestamp."""
-    from datetime import datetime
-    # Convert milliseconds to datetime
-    dt = datetime.fromtimestamp(timestamp / 1000.0)
-    timestamp_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+    timestamp_str = format_timestamp(timestamp)
 
     if temperature is not None and humidity is not None:
         print(f"[{timestamp_str}] {temperature:.1f}°C  {humidity:.1f}%")
@@ -213,9 +216,9 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
             retry_count += 1
             if retry_count == 1:
                 # Only print on first retry to reduce noise
-                print(f"[{timestamp}] Sensor read failed, retrying... (checksum/timeout error is normal)")
+                print(f"[{format_timestamp(timestamp)}] Sensor read failed, retrying... (checksum/timeout error is normal)")
             elif retry_count >= max_retries:
-                print(f"[{timestamp}] ERROR: Failed to read sensor after {max_retries} attempts")
+                print(f"[{format_timestamp(timestamp)}] ERROR: Failed to read sensor after {max_retries} attempts")
                 temperature, humidity = None, None
             time.sleep(0.1)  # Small delay between retries
             continue
@@ -239,7 +242,7 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
             humidity_delta = abs(humidity - last_valid_reading["humidity"])
 
             if temp_delta > max_temp_delta or humidity_delta > max_humidity_delta:
-                print(f"[{timestamp}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading")
+                print(f"[{format_timestamp(timestamp)}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading")
                 # Skip this reading entirely - don't write to database
                 temperature, humidity = None, None
 
