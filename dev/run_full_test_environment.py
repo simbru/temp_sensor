@@ -90,7 +90,17 @@ def generate_historical_data(days: int):
     ]
 
     for config_file, instance_name in instances:
-        gen_data(config_file, instance_name, days=days)
+        try:
+            gen_data(config_file, instance_name, days=days)
+        except Exception as e:
+            print(f"\n[{instance_name}] ERROR during historical data generation:")
+            print(f"  Exception type: {type(e).__name__}")
+            print(f"  Exception message: {str(e)}")
+            import traceback
+            print("\nFull traceback:")
+            traceback.print_exc()
+            print()
+            raise  # Re-raise to stop execution
         print()
 
 

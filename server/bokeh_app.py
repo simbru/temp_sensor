@@ -208,7 +208,7 @@ def _compute_window_bounds(center: float, width: float, *, minimum: float | None
 
 
 # Initialize data
-def prepare_source_data(raw_data, window_size, max_points=None, connect_points=False):
+def prepare_source_data(raw_data, window_size, max_points=None, connect_points=False, log_interval_s=None):
     """
     Return CDS-compatible dict with moving-average columns added.
 
@@ -216,7 +216,9 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
         raw_data: Raw sensor data dict
         window_size: Moving average window size
         max_points: Not used (reserved for future LTTB implementation)
-        connect_points: If True, skip gap insertion (always connect data points)
+        connect_points: If True, only show breaks for large gaps (3+ missed readings)
+                       If False, show breaks for all gaps (1.5+ missed readings)
+        log_interval_s: Sensor's log interval in seconds (for smart gap detection)
     """
     if not raw_data or len(raw_data.get("time", [])) == 0:
         return {"time": [], "temperature": [], "humidity": [], "temp_ma": [], "hum_ma": []}
@@ -233,10 +235,20 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
     # Smart windowing now limits data at fetch time instead
     # Future: Could implement LTTB algorithm here for "All data" view
 
-    # Insert NaN markers at time gaps for visualization (unless connect_points is enabled)
-    # This shows gaps in plots without storing NaN in SQLite database
-    if not connect_points:
-        time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums)
+    # Always insert NaN markers for large gaps (sensor offline), but threshold depends on connect_points
+    # - connect_points=True: Only show breaks for 3+ missed readings (large outages)
+    # - connect_points=False: Show breaks for 1.5+ missed readings (more sensitive)
+    if log_interval_s is not None and log_interval_s > 0:
+        # Smart thresholding based on sensor's actual log interval
+        if connect_points:
+            gap_threshold = log_interval_s * 3.0  # 3x log interval = 3 missed readings
+        else:
+            gap_threshold = log_interval_s * 1.5  # 1.5x log interval = 1-2 missed readings
+    else:
+        # Fallback for unknown log interval
+        gap_threshold = 180 if connect_points else 60
+
+    time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=gap_threshold)
 
     window = max(int(window_size), 1)
     # Use min_periods=1 so moving average smoothly interpolates across small gaps
@@ -352,7 +364,10 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
 
 # Fetch initial data for first sensor
 initial_data_raw = aggregator.get_sensor_data(current_sensor_state["name"], limit=1000)
-initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW, max_plot_points, connect_points=False)
+initial_metadata = aggregator.get_sensor_metadata(current_sensor_state["name"])
+initial_log_interval = (initial_metadata or {}).get('log_interval_s')
+initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW, max_plot_points,
+                                   connect_points=True, log_interval_s=initial_log_interval)
 source = ColumnDataSource(data=initial_data)
 
 initial_temp_ma = float(initial_data["temp_ma"][-1]) if len(initial_data["temp_ma"]) else None
@@ -696,7 +711,7 @@ ma_spinner = Spinner(title="Average samples", low=1, high=9999, step=1,
 show_raw_toggle = Toggle(label="Raw data: ON", button_type="success", active=True, width=140)
 
 # Connect points toggle (for sparse data)
-connect_points_toggle = Toggle(label="Connect points: OFF", button_type="default", active=False, width=140)
+connect_points_toggle = Toggle(label="Connect points: ON", button_type="success", active=True, width=140)
 
 # Auto-scroll toggle
 auto_scroll_toggle = Toggle(label="Auto-scroll: ON", button_type="success", active=True, width=140)
@@ -1110,11 +1125,16 @@ def fetch_initial_data(sensor_name):
         record_count = len(new_data.get('time', []))
         logger.info(f"Fetched {record_count:,} records ({fetch_type})")
 
+        # Fetch metadata to get log_interval for smart gap detection
+        metadata = aggregator.get_sensor_metadata(sensor_name)
+        log_interval_s = (metadata or {}).get('log_interval_s')
+
         # Update cache
         data_cache["sensor_name"] = sensor_name
         data_cache["raw_data"] = new_data
         data_cache["last_timestamp"] = new_data["time"][-1] if len(new_data["time"]) > 0 else None
         data_cache["last_fetch_time"] = time.time() * 1000
+        data_cache["log_interval_s"] = log_interval_s  # Store for gap detection
 
         return new_data
     except Exception as e:
@@ -1236,7 +1256,10 @@ def update_view():
         else:
             # Recompute and cache
             logger.debug(f"Recomputing prepared data (MA window: {window}, max points: {max_plot_points})")
-            prepared = prepare_source_data(raw_data, window, max_plot_points, connect_points=connect_points_toggle.active)
+            log_interval_s = data_cache.get("log_interval_s")  # Get from cache for smart gap detection
+            prepared = prepare_source_data(raw_data, window, max_plot_points,
+                                          connect_points=connect_points_toggle.active,
+                                          log_interval_s=log_interval_s)
             data_cache["prepared_data"] = prepared
             data_cache["prep_ma_window"] = window
             data_cache["prep_max_points"] = max_plot_points
