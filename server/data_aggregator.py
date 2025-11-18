@@ -527,6 +527,30 @@ class DataAggregator:
             "uptime": self.get_uptime()
         }
 
+    def _initial_connectivity_check(self, sensor_names):
+        """Check connectivity and fetch initial data from all sensors on startup."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Checking connectivity to all sensors...")
+
+        for sensor_name in sensor_names:
+            try:
+                # Quick connectivity check via status endpoint
+                status = self.client.sensors[sensor_name].get_status()
+                if status:
+                    print(f"  ✓ {sensor_name}: Connected")
+                    # Do an immediate data fetch to populate dashboard
+                    poll_interval = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
+                    limit = max(10, int(poll_interval * 3))
+                    self.update_sensor_data(sensor_name, limit=limit)
+                else:
+                    print(f"  ✗ {sensor_name}: Unreachable")
+                    self._update_metadata(sensor_name, status="error", error="Unreachable on startup")
+            except Exception as e:
+                print(f"  ✗ {sensor_name}: Error - {e}")
+                self._update_metadata(sensor_name, status="error", error=str(e))
+
+        print(f"[{timestamp}] Connectivity check complete\n")
+
     def start_polling(self):
         """Start background polling threads (one per sensor)."""
         if self._polling_threads:
@@ -541,10 +565,18 @@ class DataAggregator:
         print(f"[{timestamp}] Data Aggregator Started")
         print(f"Monitoring {len(sensor_names)} sensor(s):")
 
-        # Create one polling thread per sensor
         for sensor_name in sensor_names:
             poll_interval = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
             print(f"  - {sensor_name}: polling every {poll_interval}s")
+
+        print(f"{'='*60}\n")
+
+        # Do immediate connectivity check and initial data fetch
+        self._initial_connectivity_check(sensor_names)
+
+        # Create one polling thread per sensor
+        for sensor_name in sensor_names:
+            poll_interval = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
 
             thread = threading.Thread(
                 target=self._poll_sensor_loop,
@@ -555,7 +587,6 @@ class DataAggregator:
             thread.start()
             self._polling_threads[sensor_name] = thread
 
-        print(f"{'='*60}\n")
         logger.info(f"Started {len(self._polling_threads)} polling threads")
 
     def stop_polling(self):
