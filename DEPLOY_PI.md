@@ -95,9 +95,12 @@ Expected output: Should show your Headscale IP (e.g., 100.64.0.5) and "online" s
 # Copy service file to systemd directory
 sudo cp ~/temp_sensor/tempsens.service /etc/systemd/system/
 
-# Adjust paths if you cloned to a different location
-# Edit the service file if needed:
-# sudo nano /etc/systemd/system/tempsens.service
+# IMPORTANT: Check username matches your system
+# The service file uses "weatherstation" as the user
+# If your username is different (e.g., "pi"), edit the service file:
+sudo nano /etc/systemd/system/tempsens.service
+# Change "User=weatherstation" to match your username
+# Change all "/home/weatherstation/" paths to match your home directory
 
 # Reload systemd to recognize new service
 sudo systemctl daemon-reload
