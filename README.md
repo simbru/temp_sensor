@@ -488,60 +488,125 @@ uv run bokeh serve server/bokeh_app.py --show
 
 ---
 
-## Tailscale/Headscale VPN Setup
+## Headscale VPN Setup (Recommended for Campus Deployment)
 
-The system supports two networking modes:
+### Why Use Headscale?
 
-### Option 1: Direct Campus Network (Simpler)
-If your Raspberry Pis and server are on the same campus network with cross-subnet routing enabled, you can use campus IPs directly in `server/config_server.ini`. No VPN needed.
+**The Problem:** Campus network assigns dynamic IPs to devices via DHCP. When a Raspberry Pi reboots, it may receive a different IP address, causing sensor outages until `server/config_server.ini` is manually updated.
 
-### Option 2: Tailscale VPN (More Flexible)
-For deployments where Pis are on different networks (home, lab, office) or you want secure isolated communication, use Tailscale.
+**The Solution:** The lab runs a self-hosted Headscale instance that provides stable private IPs (100.x.x.x range) to all sensors and the server. Devices connect to the Headscale "tailnet" using the Tailscale client app.
 
 **Benefits:**
-- Pis accessible from anywhere (home, campus, off-site)
-- Encrypted peer-to-peer connections
-- Stable private IPs (100.x.x.x range)
-- Works across firewalls and NAT
+- **Stable IPs:** Sensors keep the same private IP even after reboots
+- **Fast deployment:** Add new sensors without waiting for IT to assign static campus IPs
+- **Reduced bureaucracy:** No IT approval needed for each new sensor
+- **Automatic reconnection:** Sensors auto-connect to Headscale on startup
 
-**Setup Steps:**
+**User Access:** Dashboard users still access via the server's static public IP (configured by IT) - **no VPN needed for viewing the dashboard**.
 
-1. **Install Tailscale on each device:**
-   - **Raspberry Pi:** `curl -fsSL https://tailscale.com/install.sh | sh`
-   - **Windows Server:** Download installer from [tailscale.com](https://tailscale.com/download)
+---
 
-2. **Authenticate devices:**
-   - Run `sudo tailscale up` on each Pi
-   - Run Tailscale on Windows and sign in
-   - **Authentication token:** For unattended setup, use an auth key (available on the lab's internal wiki)
-   - Example: `sudo tailscale up --authkey tskey-auth-xxxxx`
+### Setup Steps
 
-3. **Verify connectivity:**
-   ```bash
-   # Check Tailscale status
-   tailscale status
+**1. Install Tailscale client on each device:**
 
-   # Note each device's Tailscale IP (100.x.x.x)
-   tailscale ip -4
+**Raspberry Pi:**
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+```
 
-   # Test connectivity between devices
-   ping <tailscale-ip>
-   ```
+**Windows Server:**
+- Download installer from [tailscale.com](https://tailscale.com/download)
+- Install and run
 
-4. **Update configs to use Tailscale IPs:**
-   - Edit `server/config_server.ini` and replace campus IPs with Tailscale IPs
-   - Example: `Room_307 = http://100.64.0.5:5000`
-   - Restart server dashboard
+**2. Connect to the lab's Headscale tailnet:**
 
-**Security Notes:**
-- Keep auth keys private (do not commit to git)
-- Use ephemeral keys for testing, reusable keys for production
-- Disable key expiration for always-on devices
-- Check the lab wiki for current authentication credentials
+Each device needs to authenticate with the lab's Headscale server (not Tailscale's public servers).
 
-**Reference:**
-- Tailscale docs: https://tailscale.com/kb/
-- Headscale (self-hosted alternative): https://headscale.net/
+**Authentication key:** Available on the lab's internal wiki.
+
+**On Raspberry Pi:**
+```bash
+# Replace with actual auth key from wiki
+sudo tailscale up --login-server=https://<HEADSCALE_SERVER_URL> --authkey=<AUTH_KEY_FROM_WIKI>
+```
+
+**On Windows Server:**
+- Open Tailscale app settings
+- Configure custom login server: `https://<HEADSCALE_SERVER_URL>`
+- Authenticate with auth key from wiki
+
+**3. Verify connectivity:**
+
+```bash
+# Check Tailscale status
+tailscale status
+
+# Note the assigned private IP (100.x.x.x)
+tailscale ip -4
+
+# Test connectivity between server and Pi
+ping <headscale-private-ip>
+```
+
+**4. Update server config to use Headscale IPs:**
+
+Edit `server/config_server.ini`:
+```ini
+[SENSORS]
+Room_307 = http://100.64.0.5:5000
+Lab_Bench = http://100.64.0.6:5000
+Incubator = http://100.64.0.7:5000
+```
+
+**5. Configure auto-start:**
+
+Tailscale automatically starts on boot (systemd on Pi, Windows service on server). Sensors will reconnect to Headscale after reboots without manual intervention.
+
+---
+
+### Security Notes
+
+- **Keep auth keys private** - do not commit to git
+- Auth keys are found on the lab's internal wiki (access restricted)
+- Headscale server is managed by the lab (not public Tailscale servers)
+- Only devices with valid auth keys can join the tailnet
+
+---
+
+### Troubleshooting
+
+**Pi can't connect to Headscale:**
+```bash
+# Check Tailscale status
+sudo tailscale status
+
+# Restart Tailscale
+sudo systemctl restart tailscaled
+
+# Re-authenticate if needed
+sudo tailscale up --login-server=https://<HEADSCALE_SERVER_URL> --authkey=<AUTH_KEY>
+```
+
+**Server can't reach Pi:**
+```bash
+# Verify Pi is online in tailnet
+tailscale status
+
+# Test API directly via Headscale IP
+curl http://100.64.0.5:5000/status
+```
+
+---
+
+### Alternative: Direct Campus Network (Not Recommended)
+
+If you choose to use campus IPs directly without Headscale, be aware:
+- **Sensor IPs may change on reboot** → outages until config updated
+- **IT approval required** for static IP assignment (bureaucratic delay)
+- Only viable if cross-subnet routing is enabled and IPs are made static by IT
+
+For production deployment on campus, **Headscale is strongly recommended**.
 
 ---
 
