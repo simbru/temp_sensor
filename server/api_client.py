@@ -278,3 +278,20 @@ class MultiSensorClient:
 
         client = self.sensors[sensor_name]
         return client.get_config()
+
+    def get_sensor_url(self, sensor_name: str) -> Optional[str]:
+        """
+        Get the configured URL for a specific sensor.
+
+        Args:
+            sensor_name: Name of sensor to query
+
+        Returns:
+            Base URL string or None if sensor not found
+        """
+        if sensor_name not in self.sensors:
+            logger.error(f"Sensor '{sensor_name}' not found")
+            return None
+
+        client = self.sensors[sensor_name]
+        return client.base_url

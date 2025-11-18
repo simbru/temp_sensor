@@ -242,7 +242,15 @@ class DataAggregator:
                 return
 
             sensor_data = data.get("data", {})
-            device_ip = data.get("device_ip", "unknown")
+
+            # Use the IP from our config (Headscale/actual connection IP) instead of client's self-reported IP
+            from urllib.parse import urlparse
+            sensor_url = self.client.get_sensor_url(sensor_name)
+            if sensor_url:
+                parsed = urlparse(sensor_url)
+                device_ip = parsed.hostname or "unknown"
+            else:
+                device_ip = "unknown"
 
             # Fetch system metrics from client
             metrics = self.client.get_sensor_metrics(sensor_name)
