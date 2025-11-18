@@ -8,6 +8,7 @@ sensor_data.db
 *.db
 *.db-shm
 *.db-wal
+*.meta.json
 
 # Process ID files
 tempsens_running.pid
