@@ -712,7 +712,14 @@ window_seconds = Spinner(title="Seconds", low=0, step=1, value=0, width=90)
 
 ma_spinner = Spinner(title="Average samples", low=1, high=9999, step=1,
                      value=DEFAULT_MA_WINDOW, width=90)
-show_raw_toggle = Toggle(label="Raw data: ON", button_type="success", active=True, width=140)
+
+# Data display selector (raw, average, or both)
+data_display_select = Select(
+    title="Data display:",
+    value="Both",
+    options=["Both", "Average only", "Raw only"],
+    width=140
+)
 
 # Auto-scroll toggle
 auto_scroll_toggle = Toggle(label="Auto-scroll: ON", button_type="success", active=True, width=140)
@@ -1019,16 +1026,26 @@ def on_ma_change(attr, old, new):
 ma_spinner.on_change("value", on_ma_change)
 
 
-def on_raw_toggle_change(attr, old, new):
-    visible = bool(new)
-    temp_raw_renderer.visible = visible
-    hum_raw_renderer.visible = visible
-    show_raw_toggle.button_type = "success" if visible else "default"
-    show_raw_toggle.label = f"Raw data: {'ON' if visible else 'OFF'}"
+def on_data_display_change(attr, old, new):
+    """Handle data display mode changes (Both/Average only/Raw only)."""
+    if new == "Both":
+        temp_raw_renderer.visible = True
+        hum_raw_renderer.visible = True
+        temp_ma_renderer.visible = True
+        hum_ma_renderer.visible = True
+    elif new == "Average only":
+        temp_raw_renderer.visible = False
+        hum_raw_renderer.visible = False
+        temp_ma_renderer.visible = True
+        hum_ma_renderer.visible = True
+    elif new == "Raw only":
+        temp_raw_renderer.visible = True
+        hum_raw_renderer.visible = True
+        temp_ma_renderer.visible = False
+        hum_ma_renderer.visible = False
 
 
-show_raw_toggle.on_change("active", on_raw_toggle_change)
-on_raw_toggle_change("active", True, show_raw_toggle.active)
+data_display_select.on_change("value", on_data_display_change)
 
 
 def on_auto_scroll_toggle(attr, old, new):
@@ -1502,7 +1519,7 @@ display_range_row = row(
     #temp_window_range_display,
     hum_window_spinner,
     #hum_window_range_display,
-    column(Div(text="&nbsp;", height=10), show_raw_toggle),  # Empty title space for alignment
+    data_display_select,  # Dropdown to select data display mode
     sizing_mode="scale_width"
 )
 
