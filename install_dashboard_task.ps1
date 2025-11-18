@@ -62,7 +62,26 @@ if (-not $ServerIP) {
 Write-Host "Server IP: $ServerIP (for websocket origin)" -ForegroundColor Green
 
 # Create startup script
-$StartScript = @"
+if ($showWindow) {
+    # Visible mode: show output in console, don't redirect to file
+    $StartScript = @"
+Set-Location "$RepoPath"
+`$env:PYTHONUNBUFFERED = "1"
+`$env:PYTHONIOENCODING = "utf-8"
+Write-Host "Starting Temperature Dashboard..." -ForegroundColor Cyan
+Write-Host "Press Ctrl+C to stop" -ForegroundColor Yellow
+Write-Host ""
+& "$uvPath" run python -m bokeh serve server/bokeh_app.py ``
+    --port $Port ``
+    --address $Address ``
+    --session-token-expiration 360000000 ``
+    --allow-websocket-origin=localhost:$Port ``
+    --allow-websocket-origin=${ServerIP}:80
+"@
+}
+else {
+    # Hidden mode: redirect output to log file
+    $StartScript = @"
 Set-Location "$RepoPath"
 `$env:PYTHONUNBUFFERED = "1"
 `$env:PYTHONIOENCODING = "utf-8"
@@ -74,6 +93,7 @@ Set-Location "$RepoPath"
     --allow-websocket-origin=${ServerIP}:80 ``
     *>> "$LogPath\dashboard.log"
 "@
+}
 
 $StartScriptPath = "$RepoPath\start_dashboard.ps1"
 $StartScript | Out-File -FilePath $StartScriptPath -Encoding UTF8
