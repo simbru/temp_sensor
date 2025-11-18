@@ -1,0 +1,25 @@
+[Unit]
+Description=Temperature Sensor Client (DHT22)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/temp_sensor
+Environment="PATH=/home/pi/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Use uv to run the client with proper virtual environment
+ExecStart=/home/pi/.local/bin/uv run python run_client.py
+
+# Restart on failure (sensor read errors, network issues, etc.)
+Restart=on-failure
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tempsens
+
+[Install]
+WantedBy=multi-user.target
