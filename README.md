@@ -151,6 +151,81 @@ Use Task Scheduler to run at startup.
 
 ---
 
+## Updating Code (Git Pull)
+
+### On Raspberry Pi
+
+```bash
+cd ~/temp_sensor
+git pull
+uv sync --extra pi  # Only if dependencies changed
+sudo systemctl restart tempsens.service
+```
+
+**Check it worked:**
+```bash
+sudo systemctl status tempsens.service
+sudo journalctl -u tempsens.service -f  # View live logs
+```
+
+### On Windows Server
+
+```powershell
+cd C:\users\main\temp_sensor
+Stop-ScheduledTask -TaskName TempDashboard
+git pull
+uv sync  # Only if dependencies changed
+Start-ScheduledTask -TaskName TempDashboard
+```
+
+**Check it worked:**
+```powershell
+Get-ScheduledTask -TaskName TempDashboard
+Get-Content logs\dashboard.log -Tail 50 -Wait
+```
+
+**Alternative (if running manually with visible console):**
+```powershell
+# Press Ctrl+C in the dashboard console window to stop
+git pull
+uv sync  # Only if dependencies changed
+.\start_dashboard_visible.ps1
+```
+
+### Common Issues After Update
+
+**"Module not found" error:**
+```bash
+# Pi: Reinstall dependencies
+cd ~/temp_sensor
+uv sync --extra pi --reinstall
+sudo systemctl restart tempsens.service
+
+# Windows: Reinstall dependencies
+cd C:\users\main\temp_sensor
+uv sync --reinstall
+Start-ScheduledTask -TaskName TempDashboard
+```
+
+**"Port already in use" (Windows):**
+```powershell
+# Kill any lingering Python processes
+Get-Process | Where-Object {$_.Name -like "*python*"} | Stop-Process -Force
+Start-ScheduledTask -TaskName TempDashboard
+```
+
+**Service won't start (Pi):**
+```bash
+# Check for errors
+sudo journalctl -u tempsens.service -n 50
+
+# Reload and restart
+sudo systemctl daemon-reload
+sudo systemctl restart tempsens.service
+```
+
+---
+
 ## Dashboard Features
 
 - **Sensor dropdown:** Switch between sensors
