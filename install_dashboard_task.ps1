@@ -32,6 +32,7 @@ Set-Location "$RepoPath"
 & "$uvPath" run python -m bokeh serve server/bokeh_app.py ``
     --port 5006 ``
     --address 0.0.0.0 ``
+    --prefix / ``
     --allow-websocket-origin=localhost:5006 ``
     --session-token-expiration 360000000 ``
     *>> "$LogPath\dashboard.log"
