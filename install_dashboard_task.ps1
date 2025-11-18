@@ -6,9 +6,12 @@
 $TaskName = "TempDashboard"
 $RepoPath = $PSScriptRoot
 $LogPath = "$RepoPath\logs"
+$Port = 8000
+$Address = "127.0.0.1"
 
 Write-Host "Installing Temperature Dashboard as Scheduled Task..." -ForegroundColor Cyan
 Write-Host "Repository: $RepoPath" -ForegroundColor Yellow
+Write-Host "Port: $Port" -ForegroundColor Yellow
 Write-Host ""
 
 # Create logs directory
@@ -25,16 +28,23 @@ catch {
     exit 1
 }
 
+# Detect server IP
+$ServerIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -notlike "169.254.*"} | Select-Object -First 1).IPAddress
+if (-not $ServerIP) {
+    $ServerIP = "localhost"
+}
+Write-Host "Server IP: $ServerIP" -ForegroundColor Green
+
 # Create startup script
 $StartScript = @"
 Set-Location "$RepoPath"
 `$env:PYTHONUNBUFFERED = "1"
 & "$uvPath" run python -m bokeh serve server/bokeh_app.py ``
-    --port 5006 ``
-    --address 0.0.0.0 ``
-    --prefix / ``
-    --allow-websocket-origin=localhost:5006 ``
+    --port $Port ``
+    --address $Address ``
     --session-token-expiration 360000000 ``
+    --allow-websocket-origin=localhost:$Port ``
+    --allow-websocket-origin=${ServerIP}:80 ``
     *>> "$LogPath\dashboard.log"
 "@
 
@@ -67,7 +77,8 @@ if ($response -eq 'y' -or $response -eq 'Y') {
     Write-Host "Starting dashboard..." -ForegroundColor Cyan
     Start-ScheduledTask -TaskName $TaskName
     Start-Sleep -Seconds 2
-    Write-Host "Dashboard started! Open: http://localhost:5006" -ForegroundColor Green
+    Write-Host "Dashboard started! Open: http://localhost:$Port" -ForegroundColor Green
+    Write-Host "With port forwarding: http://${ServerIP}" -ForegroundColor Green
 }
 
 Write-Host ""
