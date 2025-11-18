@@ -22,6 +22,9 @@ settings.ini
 config.ini
 server/config_server.ini
 
+# Internal documentation (security-sensitive)
+HEADSCALE.md
+
 # UV lock file (platform-specific, regenerate locally)
 uv.lock
 
