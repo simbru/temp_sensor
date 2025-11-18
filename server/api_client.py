@@ -86,8 +86,8 @@ class SensorAPIClient:
 
     def get_data_range(
         self,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
         limit: Optional[int] = None,
         timeout: Optional[int] = None
     ) -> Optional[Dict]:
@@ -95,17 +95,18 @@ class SensorAPIClient:
         Get readings within a time range.
 
         Args:
-            start: Start timestamp (ISO format: 'YYYY-MM-DD HH:MM:SS')
-            end: End timestamp (ISO format: 'YYYY-MM-DD HH:MM:SS')
+            start: Start timestamp (INTEGER milliseconds since epoch)
+            end: End timestamp (INTEGER milliseconds since epoch)
+            limit: Optional maximum number of records to return
             timeout: Optional custom timeout in seconds
 
         Returns:
             Data dictionary with 'device_name', 'device_ip', 'data', 'metadata' or None
         """
         params = {}
-        if start:
+        if start is not None:
             params["start"] = start
-        if end:
+        if end is not None:
             params["end"] = end
         if limit is not None:
             params["limit"] = limit
@@ -198,8 +199,8 @@ class MultiSensorClient:
         self,
         sensor_name: str,
         limit: Optional[int] = None,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
         range_limit: Optional[int] = None,
         timeout: Optional[int] = None
     ) -> Optional[Dict]:
@@ -209,8 +210,9 @@ class MultiSensorClient:
         Args:
             sensor_name: Name of sensor to query
             limit: If specified, get last N readings (ignores time range)
-            start: Start timestamp for range query
-            end: End timestamp for range query
+            start: Start timestamp (INTEGER milliseconds since epoch)
+            end: End timestamp (INTEGER milliseconds since epoch)
+            range_limit: Optional limit on number of records in range query
             timeout: Optional custom timeout in seconds
 
         Returns:
@@ -259,3 +261,20 @@ class MultiSensorClient:
 
         client = self.sensors[sensor_name]
         return client.get_metrics()
+
+    def get_sensor_config(self, sensor_name: str) -> Optional[Dict]:
+        """
+        Get configuration from a specific sensor.
+
+        Args:
+            sensor_name: Name of sensor to query
+
+        Returns:
+            Configuration dictionary or None if sensor not found or request fails
+        """
+        if sensor_name not in self.sensors:
+            logger.error(f"Sensor '{sensor_name}' not found")
+            return None
+
+        client = self.sensors[sensor_name]
+        return client.get_config()

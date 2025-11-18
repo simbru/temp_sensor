@@ -169,7 +169,7 @@ async def get_latest_data(
         limit: Number of readings to return (1-50000, default 100)
 
     Returns:
-        JSON with arrays of time (ISO format), temperature (°C), and humidity (%)
+        JSON with arrays of time (INTEGER milliseconds since epoch), temperature (°C), and humidity (%)
     """
     try:
         data = io_funcs.fetch_log_data_range(limit=limit)
@@ -197,19 +197,20 @@ async def get_latest_data(
 
 @app.get("/data/range")
 async def get_data_range(
-    start: Optional[str] = Query(default=None, description="Start timestamp (ISO format: YYYY-MM-DD HH:MM:SS)"),
-    end: Optional[str] = Query(default=None, description="End timestamp (ISO format: YYYY-MM-DD HH:MM:SS)"),
+    start: Optional[int] = Query(default=None, description="Start timestamp (milliseconds since epoch)"),
+    end: Optional[int] = Query(default=None, description="End timestamp (milliseconds since epoch)"),
     limit: Optional[int] = Query(default=None, ge=1, le=50000, description="Optional cap on returned rows")
 ):
     """
     Get readings within a specific time range.
 
     Args:
-        start: Start timestamp in ISO format (optional)
-        end: End timestamp in ISO format (optional)
+        start: Start timestamp as INTEGER milliseconds since epoch (optional)
+        end: End timestamp as INTEGER milliseconds since epoch (optional)
+        limit: Maximum number of readings to return (optional)
 
     Returns:
-        JSON with arrays of time (ISO format), temperature (°C), and humidity (%)
+        JSON with arrays of time (INTEGER milliseconds since epoch), temperature (°C), and humidity (%)
     """
     try:
         data = io_funcs.fetch_log_data_range(start_time=start, end_time=end, limit=limit)

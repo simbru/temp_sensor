@@ -44,7 +44,7 @@ class DataAggregator:
         self._resync_batch_limit = 5000
         self._resync_timeout = max(15, poll_interval * 2)
         self._min_gap_threshold = min_gap_threshold
-        self._start_of_time = "0001-01-01 00:00:00"
+        self._start_of_time = 0  # INTEGER timestamp: Unix epoch (Jan 1, 1970)
         self._stop_polling = threading.Event()
         self._polling_threads = {}  # Map sensor_name -> thread
         self._start_time = datetime.now()  # Track when aggregator started
@@ -104,7 +104,8 @@ class DataAggregator:
                 "client_db_size_mb": "REAL",
                 "sensor_type": "TEXT",
                 "total_records": "INTEGER",
-                "client_total_records": "INTEGER"
+                "client_total_records": "INTEGER",
+                "log_interval_s": "REAL"
             }
             for col_name, col_type in new_columns.items():
                 if col_name not in existing_columns:
@@ -117,7 +118,7 @@ class DataAggregator:
                 cursor.execute(f"""
                     CREATE TABLE IF NOT EXISTS {table_name} (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL,
                         temperature REAL,
                         humidity REAL,
                         UNIQUE(timestamp)
@@ -198,7 +199,7 @@ class DataAggregator:
             logger.error(f"Error during historical backfill for {sensor_name}: {e}")
             return False
 
-    def update_sensor_data(self, sensor_name: str, limit: int = 1000):
+    def update_sensor_data(self, sensor_name: str, limit: int = 10):
         """
         Fetch latest data from a sensor and update local database.
 
@@ -231,7 +232,7 @@ class DataAggregator:
 
             device_ip = "unknown"
             status_value = "idle"
-            new_records: List[Tuple[str, float, float]] = []
+            new_records: List[Tuple[int, float, float]] = []
 
             # Fetch data first (single request instead of peek + fetch)
             data = self.client.get_sensor_data(sensor_name, limit=limit)
@@ -251,6 +252,10 @@ class DataAggregator:
             sensor_type = metrics.get("sensor_type") if metrics else None
             client_total_records = metrics.get("total_records") if metrics else None
 
+            # Fetch log interval from client configuration
+            config = self.client.get_sensor_config(sensor_name)
+            log_interval_s = config.get("log_interval_s") if config else None
+
             # Check if resync needed based on fetched data
             needs_resync = self._check_gap_in_data(sensor_data, last_timestamp)
 
@@ -261,7 +266,27 @@ class DataAggregator:
                 status_value = "syncing" if new_records else "idle"
             else:
                 new_records = self._extract_new_records(sensor_data, last_timestamp)
-                status_value = "active" if new_records else "idle"
+
+                # Determine status based on data recency, not just new records
+                # This prevents flickering when polling faster than logging
+                if new_records:
+                    status_value = "active"
+                elif last_timestamp is not None:
+                    # Check if last data is still fresh
+                    now_ms = int(datetime.now().timestamp() * 1000)
+                    time_since_last_ms = now_ms - last_timestamp
+
+                    # Use min_gap_threshold (default 60s) as the freshness window
+                    # This accounts for sensors that log slower than we poll
+                    poll_interval_s = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
+                    fresh_threshold_ms = max(poll_interval_s * 2, self._min_gap_threshold) * 1000
+
+                    if time_since_last_ms <= fresh_threshold_ms:
+                        status_value = "active"  # Recent data, sensor is healthy
+                    else:
+                        status_value = "idle"  # Data is getting stale
+                else:
+                    status_value = "idle"  # No data at all
 
             if new_records:
                 with sqlite3.connect(self.db_path) as conn:
@@ -283,7 +308,8 @@ class DataAggregator:
                 memory_percent=memory_percent,
                 client_db_size_mb=client_db_size_mb,
                 sensor_type=sensor_type,
-                client_total_records=client_total_records
+                client_total_records=client_total_records,
+                log_interval_s=log_interval_s
             )
 
         except Exception as e:
@@ -293,7 +319,7 @@ class DataAggregator:
     def _handle_fetch_failure(
         self,
         sensor_name: str,
-        last_timestamp: Optional[str],
+        last_timestamp: Optional[int],
         error_message: str
     ) -> None:
         """Mark short-lived fetch failures as idle, otherwise flag error."""
@@ -330,7 +356,8 @@ class DataAggregator:
         memory_percent: Optional[float] = None,
         client_db_size_mb: Optional[float] = None,
         sensor_type: Optional[str] = None,
-        client_total_records: Optional[int] = None
+        client_total_records: Optional[int] = None,
+        log_interval_s: Optional[float] = None
     ):
         """Update sensor metadata in database."""
         # Get total records count (server-side)
@@ -341,18 +368,18 @@ class DataAggregator:
             cursor.execute("""
                 INSERT OR REPLACE INTO sensor_metadata
                 (sensor_name, device_ip, last_update, last_error, status,
-                 cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records, client_total_records)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records, client_total_records, log_interval_s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (sensor_name, device_ip, datetime.now().isoformat(), error, status,
-                  cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records, client_total_records))
+                  cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records, client_total_records, log_interval_s))
             conn.commit()
 
     def get_sensor_data(
         self,
         sensor_name: str,
         limit: Optional[int] = None,
-        start_time: Optional[str] = None,
-        end_time: Optional[str] = None
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None
     ) -> Dict:
         """
         Get sensor data from local database.
@@ -360,8 +387,8 @@ class DataAggregator:
         Args:
             sensor_name: Name of sensor
             limit: If specified, return last N readings
-            start_time: Start timestamp (ISO format)
-            end_time: End timestamp (ISO format)
+            start_time: Start timestamp (INTEGER milliseconds since epoch)
+            end_time: End timestamp (INTEGER milliseconds since epoch)
 
         Returns:
             Dictionary with 'time', 'temperature', 'humidity' arrays (as milliseconds for Bokeh)
@@ -408,14 +435,10 @@ class DataAggregator:
         if not rows:
             return {"time": np.array([]), "temperature": np.array([]), "humidity": np.array([])}
 
-        # Convert to arrays and format time as milliseconds since epoch (for Bokeh)
-        times_str = [row[0] for row in rows]
+        # Convert to arrays (timestamps are already INTEGER milliseconds from database)
+        times_ms = np.array([row[0] for row in rows], dtype=np.float64)
         temperatures = np.array([row[1] for row in rows], dtype=np.float32)
         humidities = np.array([row[2] for row in rows], dtype=np.float32)
-
-        # Convert ISO timestamps to milliseconds using pandas (much faster than numpy)
-        import pandas as pd
-        times_ms = pd.to_datetime(times_str).values.astype('datetime64[ms]').astype(np.int64).astype(np.float64)
 
         return {
             "time": times_ms,
@@ -430,7 +453,7 @@ class DataAggregator:
             cursor.execute(
                 """SELECT device_ip, last_update, last_error, status,
                           cpu_percent, memory_percent, client_db_size_mb,
-                          sensor_type, total_records, client_total_records
+                          sensor_type, total_records, client_total_records, log_interval_s
                    FROM sensor_metadata WHERE sensor_name = ?""",
                 (sensor_name,)
             )
@@ -449,7 +472,8 @@ class DataAggregator:
             "client_db_size_mb": row[6],
             "sensor_type": row[7],
             "total_records": row[8],
-            "client_total_records": row[9]
+            "client_total_records": row[9],
+            "log_interval_s": row[10]
         }
 
     def get_uptime(self) -> timedelta:
@@ -555,8 +579,10 @@ class DataAggregator:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 logger.debug(f"[{timestamp}] Polling {sensor_name}...")
 
-                # Poll this sensor
-                self.update_sensor_data(sensor_name)
+                # Poll this sensor with dynamic limit based on poll interval
+                # Fetch enough records to cover several polling cycles
+                dynamic_limit = max(10, int(poll_interval * 3))
+                self.update_sensor_data(sensor_name, limit=dynamic_limit)
 
                 logger.debug(f"[{timestamp}] Polling complete for {sensor_name}. Next poll in {poll_interval}s.")
 
@@ -629,21 +655,22 @@ class DataAggregator:
                 except Exception as e:
                     logger.error(f"Error in poll_once for {sensor_name}: {e}")
 
-    def _fetch_last_timestamp(self, table_name: str) -> Optional[str]:
+    def _fetch_last_timestamp(self, table_name: str) -> Optional[int]:
+        """Fetch the most recent timestamp (INTEGER milliseconds) from table."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(f"SELECT MAX(timestamp) FROM {table_name}")
             return cursor.fetchone()[0]
 
-    def _check_gap_in_data(self, sensor_data: Dict, last_timestamp: Optional[str]) -> bool:
+    def _check_gap_in_data(self, sensor_data: Dict, last_timestamp: Optional[int]) -> bool:
         """
         Check if there's a significant gap between last DB timestamp and fetched data.
         This method uses already-fetched data to avoid an extra HTTP request.
-        
+
         Args:
             sensor_data: Data dict with 'time', 'temperature', 'humidity' arrays
-            last_timestamp: Last timestamp in database
-            
+            last_timestamp: Last timestamp in database (INTEGER milliseconds)
+
         Returns:
             True if a resync is needed, False otherwise
         """
@@ -670,7 +697,7 @@ class DataAggregator:
         gap_threshold = max(self.poll_interval * 6, self._min_gap_threshold)
         return (oldest_dt - last_dt) > timedelta(seconds=gap_threshold)
 
-    def _should_resync(self, sensor_name: str, last_timestamp: Optional[str]) -> bool:
+    def _should_resync(self, sensor_name: str, last_timestamp: Optional[int]) -> bool:
         """
         DEPRECATED: This method is kept for backward compatibility but is no longer used.
         Use _check_gap_in_data instead to avoid extra HTTP requests.
@@ -694,8 +721,9 @@ class DataAggregator:
         gap_threshold = max(self.poll_interval * 6, self._min_gap_threshold)
         return (newest_dt - last_dt) > timedelta(seconds=gap_threshold)
 
-    def _resync_sensor(self, sensor_name: str, start_timestamp: Optional[str]) -> Tuple[List[Tuple[str, float, float]], Optional[str]]:
-        records: List[Tuple[str, float, float]] = []
+    def _resync_sensor(self, sensor_name: str, start_timestamp: Optional[int]) -> Tuple[List[Tuple[int, float, float]], Optional[str]]:
+        """Resync sensor data from start_timestamp (INTEGER milliseconds) to present."""
+        records: List[Tuple[int, float, float]] = []
         current_last = start_timestamp
         device_ip: Optional[str] = None
 
@@ -727,12 +755,12 @@ class DataAggregator:
         return records, device_ip
 
     @staticmethod
-    def _extract_new_records(sensor_data: Dict, last_timestamp: Optional[str]) -> List[Tuple[str, float, float]]:
+    def _extract_new_records(sensor_data: Dict, last_timestamp: Optional[int]) -> List[Tuple[int, float, float]]:
         times = sensor_data.get("time", [])
         temps = sensor_data.get("temperature", [])
         hums = sensor_data.get("humidity", [])
 
-        new_records: List[Tuple[str, float, float]] = []
+        new_records: List[Tuple[int, float, float]] = []
         for i in range(len(times)):
             timestamp = times[i]
             if last_timestamp is None or timestamp > last_timestamp:
@@ -741,10 +769,11 @@ class DataAggregator:
         return new_records
 
     @staticmethod
-    def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
+    def _parse_ts(ts: Optional[int]) -> Optional[datetime]:
+        """Convert INTEGER timestamp (milliseconds) to datetime object."""
         if not ts:
             return None
         try:
-            return datetime.fromisoformat(ts)
-        except ValueError:
+            return datetime.fromtimestamp(ts / 1000.0)
+        except (ValueError, OSError):
             return None

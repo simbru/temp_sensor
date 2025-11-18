@@ -1074,11 +1074,11 @@ def fetch_initial_data(sensor_name):
             end_time = datetime.now()
             start_time = end_time - timedelta(minutes=fetch_window_minutes)
 
-            # Convert to ISO strings for database query
-            start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-            end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+            # Convert to INTEGER milliseconds for database query
+            start_ms = int(start_time.timestamp() * 1000)
+            end_ms = int(end_time.timestamp() * 1000)
 
-            new_data = aggregator.get_sensor_data(sensor_name, start_time=start_str, end_time=end_str)
+            new_data = aggregator.get_sensor_data(sensor_name, start_time=start_ms, end_time=end_ms)
             fetch_type = "windowed"
         except Exception as e:
             logger.error(f"Error fetching windowed data: {e}")
@@ -1117,16 +1117,15 @@ def fetch_incremental_data(sensor_name):
         from datetime import datetime
         import pandas as pd
 
-        # Convert last timestamp (ms) to datetime string
-        last_dt = pd.Timestamp(data_cache["last_timestamp"], unit='ms')
-        last_timestamp_str = last_dt.strftime('%Y-%m-%d %H:%M:%S')
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Use INTEGER milliseconds directly for query (no conversion needed!)
+        last_timestamp_ms = data_cache["last_timestamp"]
+        now_ms = int(datetime.now().timestamp() * 1000)
 
         # Fetch only new records
         new_records = aggregator.get_sensor_data(
             sensor_name,
-            start_time=last_timestamp_str,
-            end_time=now_str
+            start_time=last_timestamp_ms,
+            end_time=now_ms
         )
 
         if not new_records or len(new_records.get("time", [])) == 0:
@@ -1345,6 +1344,32 @@ def _update_status_display(sensor_name, prepared, latest_time_ms):
     client_db_str = f"{metadata_safe.get('client_db_size_mb', 0):.1f} MB" if metadata_safe.get('client_db_size_mb') is not None else "—"
     sensor_type_str = metadata_safe.get('sensor_type', 'Unknown')
 
+    # Calculate time since last reading
+    now_ms = int(pd.Timestamp.now().timestamp() * 1000)
+    time_ago_ms = now_ms - latest_time_ms
+    time_ago_s = time_ago_ms / 1000
+
+    # Format time ago
+    if time_ago_s < 60:
+        time_ago_part = f"{int(time_ago_s)}s"
+    elif time_ago_s < 3600:
+        time_ago_part = f"{int(time_ago_s / 60)}m"
+    else:
+        time_ago_part = f"{int(time_ago_s / 3600)}h"
+
+    # Format with log interval if available: "60s | 7s ago"
+    log_interval_s = metadata_safe.get('log_interval_s')
+    if log_interval_s is not None:
+        if log_interval_s < 60:
+            log_interval_part = f"{int(log_interval_s)}s"
+        elif log_interval_s < 3600:
+            log_interval_part = f"{int(log_interval_s / 60)}m"
+        else:
+            log_interval_part = f"{int(log_interval_s / 3600)}h"
+        time_ago_str = f"{log_interval_part} | {time_ago_part} ago"
+    else:
+        time_ago_str = f"{time_ago_part} ago"
+
     # Format client record count
     client_total_records = metadata_safe.get('client_total_records', 0)
     if client_total_records is not None and client_total_records >= 1000000:
@@ -1367,7 +1392,8 @@ def _update_status_display(sensor_name, prepared, latest_time_ms):
         <div style="flex:1 1 200px;min-width:200px;">
             <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Last reading</h3>
             <p style="font-size:16px;margin:0;">{curr_temp:.1f}°C · {curr_hum:.1f}%</p>
-            <p style="font-size:12px;margin:4px 0 0;color:#555;">{curr_time_str}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">{time_ago_str}</p>
+            <p style="font-size:11px;margin:2px 0 0;color:#777;">{curr_time_str}</p>
         </div>
         <div style="flex:1 1 200px;min-width:200px;">
             <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Client Info</h3>

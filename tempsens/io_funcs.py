@@ -150,7 +150,7 @@ def init_database(filename=None, use_wal=None):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sensor_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL UNIQUE,
+                timestamp INTEGER NOT NULL UNIQUE,
                 temperature REAL,
                 humidity REAL
             )
@@ -183,7 +183,8 @@ def write_data(timestamp, temperature, humidity, filename=None):
 
 def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
     global sensor_found, last_valid_reading
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+    # Generate INTEGER timestamp (milliseconds since epoch)
+    timestamp = int(datetime.datetime.now().timestamp() * 1000)
 
     # Common retry logic for both real and simulated sensors
     good_read = False
@@ -243,16 +244,16 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
 def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limit=None):
     """
     Fetches data from SQLite database with optional time range filtering or limit.
-    Returns data as a dictionary with ISO-formatted time strings (for API compatibility).
+    Returns data as a dictionary with INTEGER timestamps (milliseconds since epoch).
 
     Args:
         filename: Path to SQLite database file
-        start_time: Start timestamp as string (ISO format: 'YYYY-MM-DD HH:MM:SS')
-        end_time: End timestamp as string (ISO format: 'YYYY-MM-DD HH:MM:SS')
+        start_time: Start timestamp as INTEGER (milliseconds since epoch) or None
+        end_time: End timestamp as INTEGER (milliseconds since epoch) or None
         limit: If specified, return only the last N readings (ignores time filters)
 
     Returns:
-        Dictionary with keys 'time' (ISO strings), 'temperature', 'humidity'
+        Dictionary with keys 'time' (INTEGER milliseconds), 'temperature', 'humidity'
     """
     with sqlite3.connect(filename) as conn:
         cursor = conn.cursor()
@@ -296,13 +297,13 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
     if not rows:
         return {"time": [], "temperature": [], "humidity": []}
 
-    # Convert to lists
-    times_str = [row[0] for row in rows]
+    # Convert to lists (timestamps are already INTEGER milliseconds from database)
+    times_ms = [row[0] for row in rows]
     temps = [row[1] for row in rows]
     hums = [row[2] for row in rows]
 
     return {
-        "time": times_str,
+        "time": times_ms,
         "temperature": temps,
         "humidity": hums
     }

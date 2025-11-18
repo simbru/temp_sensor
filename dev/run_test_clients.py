@@ -191,11 +191,11 @@ def generate_historical_data(config_file: str, instance_name: str, days: int = 1
                           profile["hum_base"] - profile["hum_var"] * 2,
                           profile["hum_base"] + profile["hum_var"] * 2)
 
-        # Format timestamp
-        timestamp_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+        # Generate INTEGER timestamp (milliseconds since epoch)
+        timestamp_ms = int(current_time.timestamp() * 1000)
 
         # Add to batch
-        data_batch.append((timestamp_str, temperature_with_daily, humidity))
+        data_batch.append((timestamp_ms, temperature_with_daily, humidity))
 
         data_points += 1
         current_time += timedelta(seconds=interval_seconds)

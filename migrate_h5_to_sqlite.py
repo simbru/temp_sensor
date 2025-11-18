@@ -34,17 +34,24 @@ def migrate_h5_to_sqlite(h5_file="templog.h5", db_file="templog.db"):
     print("Reading HDF5 file...")
     try:
         with h5py.File(h5_file, "r", locking=False) as f:
-            times = np.array(f["time"], dtype=str)
+            times_str = np.array(f["time"], dtype=str)
             temps = np.array(f["temperature"], dtype=float)
             hums = np.array(f["humidity"], dtype=float)
     except Exception as e:
         print(f"ERROR reading HDF5: {e}")
         return False
 
-    total_records = len(times)
+    total_records = len(times_str)
     print(f"Found {total_records} records")
-    print(f"  Oldest: {times[0]}")
-    print(f"  Newest: {times[-1]}")
+    print(f"  Oldest: {times_str[0]}")
+    print(f"  Newest: {times_str[-1]}")
+
+    # Convert TEXT timestamps to INTEGER milliseconds
+    print("Converting timestamps to INTEGER milliseconds...")
+    import pandas as pd
+    times_dt = pd.to_datetime(times_str)
+    times_ms = times_dt.values.astype('datetime64[ms]').astype(np.int64)
+    print(f"  Example conversion: {times_str[0]} -> {times_ms[0]} ms")
 
     # Create SQLite database
     print("\nCreating SQLite database...")
@@ -55,11 +62,11 @@ def migrate_h5_to_sqlite(h5_file="templog.h5", db_file="templog.db"):
             # Enable WAL mode for crash safety
             cursor.execute("PRAGMA journal_mode=WAL")
 
-            # Create table
+            # Create table with INTEGER timestamps
             cursor.execute("""
                 CREATE TABLE sensor_data (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL UNIQUE,
+                    timestamp INTEGER NOT NULL UNIQUE,
                     temperature REAL,
                     humidity REAL
                 )
@@ -73,7 +80,7 @@ def migrate_h5_to_sqlite(h5_file="templog.h5", db_file="templog.db"):
             # Insert data in batches
             print("Inserting records...")
             batch_size = 1000
-            records = list(zip(times, temps, hums))
+            records = list(zip(times_ms, temps, hums))
 
             for i in range(0, total_records, batch_size):
                 batch = records[i:i+batch_size]
