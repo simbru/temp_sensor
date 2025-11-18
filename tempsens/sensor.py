@@ -8,8 +8,8 @@ def run_tempsensor_test():
     # Initialize SQLite database if it doesn't exist
     io_funcs.init_database()
     print("LOGGING INITIATED: tempsensor.py running.")
-    # Take an immediate reading on startup (no delay)
-    io_funcs.schedule.enter(0, 1, io_funcs.log_data)
+    # Take reading after 2s warmup (DHT22 needs ~2s to initialize)
+    io_funcs.schedule.enter(2, 1, io_funcs.log_data)
     while True:
         io_funcs.schedule.run()
 

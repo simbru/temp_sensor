@@ -105,10 +105,16 @@ def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar =
     return temp, hum
 
 def print_to_console(timestamp, temperature, humidity):
+    """Print reading to console with human-readable timestamp."""
+    from datetime import datetime
+    # Convert milliseconds to datetime
+    dt = datetime.fromtimestamp(timestamp / 1000.0)
+    timestamp_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+
     if temperature is not None and humidity is not None:
-        print(timestamp, temperature,"C ",humidity,"%")
+        print(f"[{timestamp_str}] {temperature:.1f}°C  {humidity:.1f}%")
     else:
-        print(timestamp, "failed read")
+        print(f"[{timestamp_str}] failed read")
 
 def init_database(filename=None, use_wal=None):
     """Initialize SQLite database with WAL mode for crash safety.
