@@ -91,16 +91,29 @@ Expected output: Should show your Headscale IP (e.g., 100.64.0.5) and "online" s
 
 ### 6. Install Sensor Service
 
+**Option A: Automatic install (recommended)**
+
 ```bash
+# Run the install script (auto-detects username and paths)
+cd ~/temp_sensor
+bash install_service.sh
+```
+
+The script will:
+- Auto-detect your username and home directory
+- Generate service file with correct paths
+- Install to systemd
+- Ask if you want to enable/start now
+
+**Option B: Manual install**
+
+```bash
+# Edit service file to match your username
+nano ~/temp_sensor/tempsens.service
+# Change "YOUR_USERNAME" to your actual username (e.g., weatherstation, pi, etc.)
+
 # Copy service file to systemd directory
 sudo cp ~/temp_sensor/tempsens.service /etc/systemd/system/
-
-# IMPORTANT: Check username matches your system
-# The service file uses "weatherstation" as the user
-# If your username is different (e.g., "pi"), edit the service file:
-sudo nano /etc/systemd/system/tempsens.service
-# Change "User=weatherstation" to match your username
-# Change all "/home/weatherstation/" paths to match your home directory
 
 # Reload systemd to recognize new service
 sudo systemctl daemon-reload

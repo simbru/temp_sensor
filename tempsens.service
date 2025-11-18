@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=weatherstation
-WorkingDirectory=/home/weatherstation/temp_sensor
-Environment="PATH=/home/weatherstation/.local/bin:/usr/local/bin:/usr/bin:/bin"
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/temp_sensor
+Environment="PATH=/home/YOUR_USERNAME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 # Use uv to run the client with proper virtual environment
-ExecStart=/home/weatherstation/.local/bin/uv run python run_client.py
+ExecStart=/home/YOUR_USERNAME/.local/bin/uv run python run_client.py
 
 # Restart on failure (sensor read errors, network issues, etc.)
 Restart=on-failure
