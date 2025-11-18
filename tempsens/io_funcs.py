@@ -29,6 +29,8 @@ DEFAULT_CONFIG_VALUES = {
     "api_port": "5000",
     "max_temp_delta_c": "3.0",
     "max_humidity_delta_pct": "10.0",
+    "temp_offset_c": "0.0",
+    "humidity_offset_pct": "0.0",
 }
 
 def gen_default_config(config_loc=CONFIGPATH, force=False):
@@ -211,6 +213,13 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
                 temperature, humidity = None, None
             time.sleep(0.1)  # Small delay between retries
             continue
+
+    # Apply calibration offsets to raw readings
+    if temperature is not None and humidity is not None:
+        temp_offset = float(CONFIG["DEFAULT"]["temp_offset_c"])
+        humidity_offset = float(CONFIG["DEFAULT"]["humidity_offset_pct"])
+        temperature += temp_offset
+        humidity += humidity_offset
 
     # Spike filtering: reject readings with unrealistic deltas from previous reading
     # (DHT22 sensors sometimes produce spurious readings that pass checksum but are physically impossible)
