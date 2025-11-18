@@ -21,10 +21,11 @@ $showWindow = $visibleResponse -eq 'y' -or $visibleResponse -eq 'Y'
 if ($showWindow) {
     $windowStyle = "Normal"
     Write-Host "Will run with visible console window" -ForegroundColor Green
+    Write-Host "  Note: Requires you to be logged in to see the window" -ForegroundColor Gray
 }
 else {
     $windowStyle = "Hidden"
-    Write-Host "Will run hidden in background" -ForegroundColor Green
+    Write-Host "Will run hidden in background (even when not logged in)" -ForegroundColor Green
 }
 Write-Host ""
 
@@ -90,7 +91,16 @@ if ($existingTask) {
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle $windowStyle -ExecutionPolicy Bypass -File `"$StartScriptPath`""
 $Trigger = New-ScheduledTaskTrigger -AtStartup
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-$Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest
+
+# For visible console: use Interactive logon, otherwise use S4U (background)
+if ($showWindow) {
+    # Interactive: runs only when user is logged on, can show windows
+    $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+}
+else {
+    # S4U: runs even when not logged on, but can't show windows
+    $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest
+}
 
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal -Description "Temperature Sensor Dashboard - Multi-sensor monitoring" | Out-Null
 
