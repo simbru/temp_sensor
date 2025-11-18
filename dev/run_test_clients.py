@@ -286,9 +286,9 @@ def run_sensor_logging(config_file: str):
         # Database doesn't exist - initialize it (should not happen with --no-historical flag)
         print(f"LOGGING INITIATED: creating new database {db_path}")
         io_funcs.init_database()
-    
-    # Schedule the initial run
-    io_funcs.schedule.enter(io_funcs.LOGINTERVAL, 1, io_funcs.log_data)
+
+    # Take an immediate reading on startup (no delay)
+    io_funcs.schedule.enter(0, 1, io_funcs.log_data)
     while True:
         io_funcs.schedule.run()
 
