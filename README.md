@@ -111,43 +111,35 @@ git pull  # Your configs won't be touched!
 
 ### Raspberry Pi (systemd)
 
+Use the automated installer:
 ```bash
-sudo nano /etc/systemd/system/tempsensor.service
+cd ~/temp_sensor
+bash install_service.sh
 ```
 
-```ini
-[Unit]
-Description=Temperature Sensor Client
-After=network.target
+The script auto-detects your username and paths, creates `tempsens.service`, and enables auto-start.
 
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/temp_sensor
-ExecStart=/home/pi/.cargo/bin/uv run python run_client.py
-Restart=always
-RestartSec=10
+**Manual setup:** See [DEPLOY_PI.md](DEPLOY_PI.md) for detailed instructions.
 
-[Install]
-WantedBy=multi-user.target
-```
-
+**Service management:**
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable tempsensor.service
-sudo systemctl start tempsensor.service
-sudo systemctl status tempsensor.service
+sudo systemctl start tempsens.service    # Start
+sudo systemctl stop tempsens.service     # Stop
+sudo systemctl restart tempsens.service  # Restart
+sudo systemctl status tempsens.service   # Status
 ```
 
 ### Windows Server (Task Scheduler)
 
-Create a batch file `start_dashboard.bat`:
-```batch
+Use the automated installer (PowerShell as Administrator):
+```powershell
 cd C:\path\to\temp_sensor
-uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1 --session-token-expiration 360000000 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=<SERVER_IP>:80
+.\install_dashboard_task.ps1
 ```
 
-Use Task Scheduler to run at startup.
+The script creates a Scheduled Task that auto-starts on boot with optional visible console window.
+
+**Manual setup:** See [DEPLOY_SERVER.md](DEPLOY_SERVER.md) for detailed instructions.
 
 ---
 
@@ -251,7 +243,7 @@ The dashboard accurately represents missing data to ensure scientific accuracy:
 2. **Client outages** (> 60s): Network issues or Pi offline. Dashboard inserts proportional NaN markers to create visual breaks in both raw and averaged plots.
 
 **Storage efficiency:**
-- Failed sensor reads are skipped (not written to HDF5) to reduce lock contention
+- Failed sensor reads are skipped (not written to SQLite) to reduce database writes
 - Gap detection runs server-side during plot rendering, not on raw data
 - This enables fast polling (2s sensor interval, 5s server polling) without performance degradation
 
@@ -325,7 +317,7 @@ Get-NetFirewallRule -DisplayName "Temperature Dashboard HTTP"
 loginterval_s = 10                    # Seconds between sensor reads
 device_name = Room 307                # Display name
 api_port = 5000                       # API server port
-outputfile = templog.h5               # Local HDF5 backup
+outputfile = templog.db               # Local SQLite database
 ```
 
 ### Server (`server/config_server.ini`)
@@ -472,7 +464,7 @@ uv run bokeh serve server/bokeh_app.py --show
 
 ```
 ┌─────────────────┐
-│  Raspberry Pi   │  DHT22 → sensor.py → templog.h5
+│  Raspberry Pi   │  DHT22 → sensor.py → templog.db
 │                 │                   ↓
 │  FastAPI :5000  │  ←──── Serves data via REST API
 └────────┬────────┘
@@ -496,11 +488,60 @@ uv run bokeh serve server/bokeh_app.py --show
 
 ---
 
-## Optional: VPN Setup (Headscale)
+## Tailscale/Headscale VPN Setup
 
-**Note:** Campus network direct connection worked fine for our deployment. VPN is optional if cross-subnet routing is available.
+The system supports two networking modes:
 
-If you need isolated Pi ↔ Server communication, see [Headscale documentation](https://headscale.net/) for VPN setup. Replace campus IPs with Headscale IPs (e.g., `100.64.0.x`) in configs.
+### Option 1: Direct Campus Network (Simpler)
+If your Raspberry Pis and server are on the same campus network with cross-subnet routing enabled, you can use campus IPs directly in `server/config_server.ini`. No VPN needed.
+
+### Option 2: Tailscale VPN (More Flexible)
+For deployments where Pis are on different networks (home, lab, office) or you want secure isolated communication, use Tailscale.
+
+**Benefits:**
+- Pis accessible from anywhere (home, campus, off-site)
+- Encrypted peer-to-peer connections
+- Stable private IPs (100.x.x.x range)
+- Works across firewalls and NAT
+
+**Setup Steps:**
+
+1. **Install Tailscale on each device:**
+   - **Raspberry Pi:** `curl -fsSL https://tailscale.com/install.sh | sh`
+   - **Windows Server:** Download installer from [tailscale.com](https://tailscale.com/download)
+
+2. **Authenticate devices:**
+   - Run `sudo tailscale up` on each Pi
+   - Run Tailscale on Windows and sign in
+   - **Authentication token:** For unattended setup, use an auth key (available on the lab's internal wiki)
+   - Example: `sudo tailscale up --authkey tskey-auth-xxxxx`
+
+3. **Verify connectivity:**
+   ```bash
+   # Check Tailscale status
+   tailscale status
+
+   # Note each device's Tailscale IP (100.x.x.x)
+   tailscale ip -4
+
+   # Test connectivity between devices
+   ping <tailscale-ip>
+   ```
+
+4. **Update configs to use Tailscale IPs:**
+   - Edit `server/config_server.ini` and replace campus IPs with Tailscale IPs
+   - Example: `Room_307 = http://100.64.0.5:5000`
+   - Restart server dashboard
+
+**Security Notes:**
+- Keep auth keys private (do not commit to git)
+- Use ephemeral keys for testing, reusable keys for production
+- Disable key expiration for always-on devices
+- Check the lab wiki for current authentication credentials
+
+**Reference:**
+- Tailscale docs: https://tailscale.com/kb/
+- Headscale (self-hosted alternative): https://headscale.net/
 
 ---
 

@@ -8,7 +8,7 @@
 poll_interval_s = 2
 
 # Port for Bokeh dashboard
-dashboard_port = 5006
+dashboard_port = 8000
 
 # SQLite database path for cached sensor data
 database_path = sensor_data.db

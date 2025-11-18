@@ -194,8 +194,8 @@ uv run python run_client.py
 
 **Test server dashboard (requires configured sensors in config_server.ini)**:
 ```bash
-uv run bokeh serve --show server/bokeh_app.py
-# Dashboard at http://localhost:5006
+uv run bokeh serve --show server/bokeh_app.py --port 8000
+# Dashboard at http://localhost:8000
 ```
 
 ### Raspberry Pi Deployment
@@ -231,7 +231,7 @@ Edit `server/config_server.ini`:
 [SERVER]
 poll_interval_s = 30        # Default poll interval (fallback)
 min_gap_threshold_s = 60    # Minimum gap before marking offline
-dashboard_port = 5006
+dashboard_port = 8000
 database_path = sensor_data.db
 dashboard_update_ms = 4000
 
@@ -246,8 +246,8 @@ Incubator = http://100.64.0.8:5000              # Default: 30s
 
 **Run multi-sensor dashboard**:
 ```bash
-uv run bokeh serve --show server/bokeh_app.py --port 5006
-# Access from campus network at http://139.184.163.16:5006
+uv run bokeh serve --show server/bokeh_app.py --port 8000
+# Access from campus network at http://139.184.163.16:8000
 ```
 
 ### API Testing
@@ -297,7 +297,7 @@ Raspberry Pi (100.64.0.5:5000)
     ↓ [Headscale VPN]
 Lab Server (100.64.0.4)
     ↓ [Campus Network]
-User Browser (139.184.163.16:5006)
+User Browser (139.184.163.16:8000)
 ```
 
 ### Advantages

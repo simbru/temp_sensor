@@ -46,7 +46,7 @@ Configure your sensors:
 [SERVER]
 poll_interval_s = 30              # Default poll interval
 min_gap_threshold_s = 60          # Sensor offline threshold
-dashboard_port = 5006
+dashboard_port = 8000
 database_path = sensor_data.db
 dashboard_update_ms = 4000
 
@@ -112,8 +112,8 @@ If you want external access on port 80 (standard HTTP):
 
 **In PowerShell as Administrator:**
 ```powershell
-# Forward port 80 to dashboard port 5006
-netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=5006 connectaddress=127.0.0.1
+# Forward port 80 to dashboard port 8000
+netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=8000 connectaddress=127.0.0.1
 
 # Add firewall rule
 New-NetFirewallRule -DisplayName "Temperature Dashboard HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Any
@@ -225,7 +225,7 @@ netsh interface portproxy show all
 Get-NetFirewallRule -DisplayName "Temperature Dashboard HTTP"
 
 # Test locally first
-curl http://localhost:5006
+curl http://localhost:8000
 
 # Then test forwarded port
 curl http://localhost:80
@@ -318,7 +318,7 @@ To change dashboard port, edit the install script before running:
 
 ```powershell
 notepad install_dashboard_service.ps1
-# Change: $Port = 5006
+# Change: $Port = 8000
 # To:     $Port = 8080
 ```
 
