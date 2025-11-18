@@ -371,7 +371,7 @@ initial_data_raw = aggregator.get_sensor_data(current_sensor_state["name"], limi
 initial_metadata = aggregator.get_sensor_metadata(current_sensor_state["name"])
 initial_log_interval = (initial_metadata or {}).get('log_interval_s')
 initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW, max_plot_points,
-                                   connect_points=True, log_interval_s=initial_log_interval)
+                                   connect_points=False, log_interval_s=initial_log_interval)
 source = ColumnDataSource(data=initial_data)
 
 initial_temp_ma = float(initial_data["temp_ma"][-1]) if len(initial_data["temp_ma"]) else None
@@ -714,9 +714,6 @@ ma_spinner = Spinner(title="Average samples", low=1, high=9999, step=1,
                      value=DEFAULT_MA_WINDOW, width=90)
 show_raw_toggle = Toggle(label="Raw data: ON", button_type="success", active=True, width=140)
 
-# Connect points toggle (for sparse data)
-connect_points_toggle = Toggle(label="Connect points: ON", button_type="success", active=True, width=140)
-
 # Auto-scroll toggle
 auto_scroll_toggle = Toggle(label="Auto-scroll: ON", button_type="success", active=True, width=140)
 
@@ -1034,19 +1031,6 @@ show_raw_toggle.on_change("active", on_raw_toggle_change)
 on_raw_toggle_change("active", True, show_raw_toggle.active)
 
 
-def on_connect_points_toggle(attr, old, new):
-    """Handle connect points toggle changes."""
-    connected = bool(new)
-    connect_points_toggle.button_type = "success" if connected else "default"
-    connect_points_toggle.label = f"Connect points: {'ON' if connected else 'OFF'}"
-    # Invalidate cache to force recomputation with new gap behavior
-    data_cache["prep_raw_hash"] = None
-    update_view()  # Refresh display
-
-
-connect_points_toggle.on_change("active", on_connect_points_toggle)
-
-
 def on_auto_scroll_toggle(attr, old, new):
     """Handle auto-scroll toggle changes."""
     current_window["auto_range"] = bool(new)
@@ -1262,7 +1246,7 @@ def update_view():
             logger.debug(f"Recomputing prepared data (MA window: {window}, max points: {max_plot_points})")
             log_interval_s = data_cache.get("log_interval_s")  # Get from cache for smart gap detection
             prepared = prepare_source_data(raw_data, window, max_plot_points,
-                                          connect_points=connect_points_toggle.active,
+                                          connect_points=False,  # Use sensitive gap detection (1.5x log interval)
                                           log_interval_s=log_interval_s)
             data_cache["prepared_data"] = prepared
             data_cache["prep_ma_window"] = window
@@ -1519,7 +1503,6 @@ display_range_row = row(
     hum_window_spinner,
     #hum_window_range_display,
     column(Div(text="&nbsp;", height=10), show_raw_toggle),  # Empty title space for alignment
-    column(Div(text="&nbsp;", height=10), connect_points_toggle),  # Empty title space for alignment
     sizing_mode="scale_width"
 )
 
