@@ -76,20 +76,20 @@ if (-not $nssmPath) {
     if ($response -eq 'y' -or $response -eq 'Y') {
         Write-Host "Downloading NSSM..." -ForegroundColor Cyan
 
-        try {
-            $nssmZip = "$env:TEMP\nssm.zip"
-            $nssmExtract = "$env:TEMP\nssm"
-            $nssmInstall = "$env:ProgramFiles\nssm"
+        $nssmZip = "$env:TEMP\nssm.zip"
+        $nssmExtract = "$env:TEMP\nssm"
+        $nssmInstall = "$env:ProgramFiles\nssm"
 
+        try {
             # Download NSSM
-            Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $nssmZip
+            Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $nssmZip -ErrorAction Stop
 
             # Extract
-            Expand-Archive -Path $nssmZip -DestinationPath $nssmExtract -Force
+            Expand-Archive -Path $nssmZip -DestinationPath $nssmExtract -Force -ErrorAction Stop
 
             # Install (copy to Program Files)
-            New-Item -ItemType Directory -Path $nssmInstall -Force | Out-Null
-            Copy-Item "$nssmExtract\nssm-2.24\win64\nssm.exe" -Destination "$nssmInstall\nssm.exe" -Force
+            New-Item -ItemType Directory -Path $nssmInstall -Force -ErrorAction Stop | Out-Null
+            Copy-Item "$nssmExtract\nssm-2.24\win64\nssm.exe" -Destination "$nssmInstall\nssm.exe" -Force -ErrorAction Stop
 
             $nssmPath = "$nssmInstall\nssm.exe"
 
@@ -98,12 +98,14 @@ if (-not $nssmPath) {
             # Cleanup
             Remove-Item $nssmZip -Force -ErrorAction SilentlyContinue
             Remove-Item $nssmExtract -Recurse -Force -ErrorAction SilentlyContinue
-        } catch {
+        }
+        catch {
             Write-Host "ERROR: Failed to download/install NSSM: $_" -ForegroundColor Red
             Write-Host "Please download manually from: https://nssm.cc/download" -ForegroundColor Yellow
             exit 1
         }
-    } else {
+    }
+    else {
         Write-Host "ERROR: NSSM is required to install the service" -ForegroundColor Red
         Write-Host "Download from: https://nssm.cc/download" -ForegroundColor Yellow
         exit 1
@@ -127,7 +129,8 @@ if ($existingService) {
         Write-Host "Removing service..." -ForegroundColor Cyan
         & $nssmPath remove $ServiceName confirm
         Start-Sleep -Seconds 2
-    } else {
+    }
+    else {
         Write-Host "Installation cancelled." -ForegroundColor Yellow
         exit 0
     }
@@ -189,7 +192,8 @@ if ($response -eq 'y' -or $response -eq 'Y') {
         Write-Host "Dashboard available at:" -ForegroundColor Cyan
         Write-Host "  http://localhost:${Port}" -ForegroundColor Yellow
         Write-Host "  http://${serverIp}:${Port}" -ForegroundColor Yellow
-    } else {
+    }
+    else {
         Write-Host "✗ Service failed to start. Check logs at:" -ForegroundColor Red
         Write-Host "  $RepoPath\logs\dashboard-error.log" -ForegroundColor Yellow
     }
@@ -211,5 +215,5 @@ Write-Host "  Get-Content $RepoPath\logs\dashboard.log -Tail 50 -Wait" -Foregrou
 Write-Host ""
 Write-Host "Uninstall Service:" -ForegroundColor Yellow
 Write-Host "  Stop-Service -Name $ServiceName" -ForegroundColor Gray
-Write-Host "  `& '$nssmPath' remove $ServiceName confirm" -ForegroundColor Gray
+Write-Host "  & ""$nssmPath"" remove $ServiceName confirm" -ForegroundColor Gray
 Write-Host ""
