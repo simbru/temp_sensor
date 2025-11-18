@@ -14,6 +14,20 @@ Write-Host "Repository: $RepoPath" -ForegroundColor Yellow
 Write-Host "Port: $Port" -ForegroundColor Yellow
 Write-Host ""
 
+# Ask if user wants visible console window
+$visibleResponse = Read-Host "Show console window on startup? (y/n) [easier debugging, but window stays open]"
+$showWindow = $visibleResponse -eq 'y' -or $visibleResponse -eq 'Y'
+
+if ($showWindow) {
+    $windowStyle = "Normal"
+    Write-Host "Will run with visible console window" -ForegroundColor Green
+}
+else {
+    $windowStyle = "Hidden"
+    Write-Host "Will run hidden in background" -ForegroundColor Green
+}
+Write-Host ""
+
 # Create logs directory
 New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
 
@@ -61,7 +75,7 @@ if ($existingTask) {
 }
 
 # Create scheduled task
-$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScriptPath`""
+$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle $windowStyle -ExecutionPolicy Bypass -File `"$StartScriptPath`""
 $Trigger = New-ScheduledTaskTrigger -AtStartup
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest
