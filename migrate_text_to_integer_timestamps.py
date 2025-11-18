@@ -133,7 +133,8 @@ def convert_text_to_integer(db_path: Path, dry_run: bool = False) -> bool:
 
             # Use pandas for fast conversion
             try:
-                times_dt = pd.to_datetime(times_str)
+                # Use format='ISO8601' to handle different timestamp formats flexibly
+                times_dt = pd.to_datetime(times_str, format='ISO8601')
                 times_ms = times_dt.values.astype('datetime64[ms]').astype(np.int64)
 
                 # Validate conversion (check first and last timestamps)
