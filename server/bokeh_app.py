@@ -208,7 +208,7 @@ def _compute_window_bounds(center: float, width: float, *, minimum: float | None
 
 
 # Initialize data
-def prepare_source_data(raw_data, window_size, max_points=None):
+def prepare_source_data(raw_data, window_size, max_points=None, connect_points=False):
     """
     Return CDS-compatible dict with moving-average columns added.
 
@@ -216,6 +216,7 @@ def prepare_source_data(raw_data, window_size, max_points=None):
         raw_data: Raw sensor data dict
         window_size: Moving average window size
         max_points: Not used (reserved for future LTTB implementation)
+        connect_points: If True, skip gap insertion (always connect data points)
     """
     if not raw_data or len(raw_data.get("time", [])) == 0:
         return {"time": [], "temperature": [], "humidity": [], "temp_ma": [], "hum_ma": []}
@@ -232,9 +233,10 @@ def prepare_source_data(raw_data, window_size, max_points=None):
     # Smart windowing now limits data at fetch time instead
     # Future: Could implement LTTB algorithm here for "All data" view
 
-    # Insert NaN markers at time gaps for visualization
+    # Insert NaN markers at time gaps for visualization (unless connect_points is enabled)
     # This shows gaps in plots without storing NaN in SQLite database
-    time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums)
+    if not connect_points:
+        time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums)
 
     window = max(int(window_size), 1)
     # Use min_periods=1 so moving average smoothly interpolates across small gaps
@@ -350,7 +352,7 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
 
 # Fetch initial data for first sensor
 initial_data_raw = aggregator.get_sensor_data(current_sensor_state["name"], limit=1000)
-initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW, max_plot_points)
+initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW, max_plot_points, connect_points=False)
 source = ColumnDataSource(data=initial_data)
 
 initial_temp_ma = float(initial_data["temp_ma"][-1]) if len(initial_data["temp_ma"]) else None
@@ -693,6 +695,9 @@ ma_spinner = Spinner(title="Average samples", low=1, high=9999, step=1,
                      value=DEFAULT_MA_WINDOW, width=90)
 show_raw_toggle = Toggle(label="Raw data: ON", button_type="success", active=True, width=140)
 
+# Connect points toggle (for sparse data)
+connect_points_toggle = Toggle(label="Connect points: OFF", button_type="default", active=False, width=140)
+
 # Auto-scroll toggle
 auto_scroll_toggle = Toggle(label="Auto-scroll: ON", button_type="success", active=True, width=140)
 
@@ -1010,6 +1015,19 @@ show_raw_toggle.on_change("active", on_raw_toggle_change)
 on_raw_toggle_change("active", True, show_raw_toggle.active)
 
 
+def on_connect_points_toggle(attr, old, new):
+    """Handle connect points toggle changes."""
+    connected = bool(new)
+    connect_points_toggle.button_type = "success" if connected else "default"
+    connect_points_toggle.label = f"Connect points: {'ON' if connected else 'OFF'}"
+    # Invalidate cache to force recomputation with new gap behavior
+    data_cache["prep_raw_hash"] = None
+    update_view()  # Refresh display
+
+
+connect_points_toggle.on_change("active", on_connect_points_toggle)
+
+
 def on_auto_scroll_toggle(attr, old, new):
     """Handle auto-scroll toggle changes."""
     current_window["auto_range"] = bool(new)
@@ -1218,7 +1236,7 @@ def update_view():
         else:
             # Recompute and cache
             logger.debug(f"Recomputing prepared data (MA window: {window}, max points: {max_plot_points})")
-            prepared = prepare_source_data(raw_data, window, max_plot_points)
+            prepared = prepare_source_data(raw_data, window, max_plot_points, connect_points=connect_points_toggle.active)
             data_cache["prepared_data"] = prepared
             data_cache["prep_ma_window"] = window
             data_cache["prep_max_points"] = max_plot_points
@@ -1457,6 +1475,7 @@ display_range_row = row(
     hum_window_spinner,
     #hum_window_range_display,
     column(Div(text="&nbsp;", height=10), show_raw_toggle),  # Empty title space for alignment
+    column(Div(text="&nbsp;", height=10), connect_points_toggle),  # Empty title space for alignment
     sizing_mode="scale_width"
 )
 
