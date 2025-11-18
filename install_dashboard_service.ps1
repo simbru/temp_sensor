@@ -215,5 +215,5 @@ Write-Host "  Get-Content $RepoPath\logs\dashboard.log -Tail 50 -Wait" -Foregrou
 Write-Host ""
 Write-Host "Uninstall Service:" -ForegroundColor Yellow
 Write-Host "  Stop-Service -Name $ServiceName" -ForegroundColor Gray
-Write-Host "  & ""$nssmPath"" remove $ServiceName confirm" -ForegroundColor Gray
+Write-Host ('  & "' + $nssmPath + '" remove ' + $ServiceName + ' confirm') -ForegroundColor Gray
 Write-Host ""
