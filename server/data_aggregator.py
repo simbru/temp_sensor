@@ -534,8 +534,12 @@ class DataAggregator:
 
         for sensor_name in sensor_names:
             try:
-                # Quick connectivity check via status endpoint
-                status = self.client.sensors[sensor_name].get_status()
+                # Quick connectivity check with short timeout (3s instead of default 10s)
+                import requests
+                sensor_url = self.client.get_sensor_url(sensor_name)
+                response = requests.get(f"{sensor_url}/status", timeout=3)
+                status = response.json() if response.status_code == 200 else None
+
                 if status:
                     print(f"  ✓ {sensor_name}: Connected")
                     # Do an immediate data fetch to populate dashboard
