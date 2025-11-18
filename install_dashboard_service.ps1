@@ -76,27 +76,33 @@ if (-not $nssmPath) {
     if ($response -eq 'y' -or $response -eq 'Y') {
         Write-Host "Downloading NSSM..." -ForegroundColor Cyan
 
-        $nssmZip = "$env:TEMP\nssm.zip"
-        $nssmExtract = "$env:TEMP\nssm"
-        $nssmInstall = "$env:ProgramFiles\nssm"
+        try {
+            $nssmZip = "$env:TEMP\nssm.zip"
+            $nssmExtract = "$env:TEMP\nssm"
+            $nssmInstall = "$env:ProgramFiles\nssm"
 
-        # Download NSSM
-        Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $nssmZip
+            # Download NSSM
+            Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $nssmZip
 
-        # Extract
-        Expand-Archive -Path $nssmZip -DestinationPath $nssmExtract -Force
+            # Extract
+            Expand-Archive -Path $nssmZip -DestinationPath $nssmExtract -Force
 
-        # Install (copy to Program Files)
-        New-Item -ItemType Directory -Path $nssmInstall -Force | Out-Null
-        Copy-Item "$nssmExtract\nssm-2.24\win64\nssm.exe" -Destination "$nssmInstall\nssm.exe" -Force
+            # Install (copy to Program Files)
+            New-Item -ItemType Directory -Path $nssmInstall -Force | Out-Null
+            Copy-Item "$nssmExtract\nssm-2.24\win64\nssm.exe" -Destination "$nssmInstall\nssm.exe" -Force
 
-        $nssmPath = "$nssmInstall\nssm.exe"
+            $nssmPath = "$nssmInstall\nssm.exe"
 
-        Write-Host "✓ NSSM installed to $nssmPath" -ForegroundColor Green
+            Write-Host "✓ NSSM installed to $nssmPath" -ForegroundColor Green
 
-        # Cleanup
-        Remove-Item $nssmZip -Force -ErrorAction SilentlyContinue
-        Remove-Item $nssmExtract -Recurse -Force -ErrorAction SilentlyContinue
+            # Cleanup
+            Remove-Item $nssmZip -Force -ErrorAction SilentlyContinue
+            Remove-Item $nssmExtract -Recurse -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Host "ERROR: Failed to download/install NSSM: $_" -ForegroundColor Red
+            Write-Host "Please download manually from: https://nssm.cc/download" -ForegroundColor Yellow
+            exit 1
+        }
     } else {
         Write-Host "ERROR: NSSM is required to install the service" -ForegroundColor Red
         Write-Host "Download from: https://nssm.cc/download" -ForegroundColor Yellow
@@ -205,5 +211,5 @@ Write-Host "  Get-Content $RepoPath\logs\dashboard.log -Tail 50 -Wait" -Foregrou
 Write-Host ""
 Write-Host "Uninstall Service:" -ForegroundColor Yellow
 Write-Host "  Stop-Service -Name $ServiceName" -ForegroundColor Gray
-Write-Host "  & '$nssmPath' remove $ServiceName confirm" -ForegroundColor Gray
+Write-Host "  `& '$nssmPath' remove $ServiceName confirm" -ForegroundColor Gray
 Write-Host ""
