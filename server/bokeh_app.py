@@ -139,7 +139,7 @@ def _determine_fetch_limit() -> int | None:
 
 STATUS_DISPLAY = {
     "active": {"icon": "🟢", "label": "Receiving data"},
-    "idle": {"icon": "🟠", "label": "Connected · waiting"},
+    "idle": {"icon": "🔵", "label": "Connected · waiting"},
     "syncing": {"icon": "🟡", "label": "Syncing backlog"},
     "error": {"icon": "🔴", "label": "Offline or unreachable"},
     "unknown": {"icon": "🔴", "label": "Status unavailable"},
@@ -244,11 +244,15 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
             gap_threshold = log_interval_s * 3.0  # 3x log interval = 3 missed readings
         else:
             gap_threshold = log_interval_s * 1.5  # 1.5x log interval = 1-2 missed readings
+        expected_interval_s = log_interval_s  # Use actual sensor interval
     else:
         # Fallback for unknown log interval
         gap_threshold = 180 if connect_points else 60
+        expected_interval_s = 2  # Fallback typical interval
 
-    time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=gap_threshold)
+    time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums,
+                                                  gap_threshold_s=gap_threshold,
+                                                  expected_interval_s=expected_interval_s)
 
     window = max(int(window_size), 1)
     # Use min_periods=1 so moving average smoothly interpolates across small gaps
@@ -265,7 +269,7 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
     }
 
 
-def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
+def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_interval_s=2):
     """
     Insert NaN at time gaps to show missing data in plots.
 
@@ -282,6 +286,8 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
         hums: Humidity values
         gap_threshold_s: Time gap threshold in seconds (default 60s = 1 minute)
                         Gaps larger than this are considered client outages
+        expected_interval_s: Expected sensor log interval in seconds (default 2s)
+                           Used to calculate proportional NaN markers
 
     Returns:
         Tuple of (times, temps, hums) with NaN inserted at gaps
@@ -305,7 +311,6 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
     for gap_idx in gap_indices:
         gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
         gap_size_seconds = gap_size_ms / 1000.0
-        expected_interval_s = 2
         num_missing = int(gap_size_seconds / expected_interval_s)
         num_nan_markers = max(min(num_missing, 100), 5)
         total_nan_markers += num_nan_markers
@@ -330,9 +335,8 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60):
         # Calculate how many NaN markers to insert based on gap size
         gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
         gap_size_seconds = gap_size_ms / 1000.0
-        expected_interval_s = 2  # Typical sensor log interval
         num_missing = int(gap_size_seconds / expected_interval_s)
-        
+
         # Insert enough NaN markers to prevent moving average from bridging the gap
         # Minimum of 5 ensures even moderate MA windows show the break
         num_nan_markers = max(min(num_missing, 100), 5)  # Cap at 100 to avoid huge gaps
@@ -1326,19 +1330,36 @@ def _update_status_display(sensor_name, prepared, latest_time_ms):
     """Helper function to update the status display."""
     import pandas as pd
 
-    curr_datetime = pd.Timestamp(latest_time_ms, unit='ms')
-    curr_time_str = curr_datetime.strftime('%Y-%m-%d %H:%M:%S')
+    # Find last NON-NaN raw data point (not moving average)
+    # This ensures we show the actual last sensor reading, not an averaged value
+    temps = np.array(prepared["temperature"])
+    hums = np.array(prepared["humidity"])
+    times = np.array(prepared["time"])
 
-    # Make sure we're getting the last values
-    if len(prepared["temp_ma"]) > 0:
-        curr_temp = prepared["temp_ma"][-1]
+    # Find last non-NaN indices
+    valid_temp_indices = np.where(~np.isnan(temps))[0]
+    valid_hum_indices = np.where(~np.isnan(hums))[0]
+
+    if len(valid_temp_indices) > 0:
+        last_temp_idx = valid_temp_indices[-1]
+        curr_temp = temps[last_temp_idx]
+        curr_time_temp_ms = times[last_temp_idx]
     else:
         curr_temp = 0.0
+        curr_time_temp_ms = latest_time_ms
 
-    if len(prepared["hum_ma"]) > 0:
-        curr_hum = prepared["hum_ma"][-1]
+    if len(valid_hum_indices) > 0:
+        last_hum_idx = valid_hum_indices[-1]
+        curr_hum = hums[last_hum_idx]
+        curr_time_hum_ms = times[last_hum_idx]
     else:
         curr_hum = 0.0
+        curr_time_hum_ms = latest_time_ms
+
+    # Use the most recent timestamp for display (usually same for both)
+    latest_reading_ms = max(curr_time_temp_ms, curr_time_hum_ms)
+    curr_datetime = pd.Timestamp(latest_reading_ms, unit='ms')
+    curr_time_str = curr_datetime.strftime('%Y-%m-%d %H:%M:%S')
 
     logger.debug(f"Latest reading: {curr_time_str}, {curr_temp:.1f}°C, {curr_hum:.1f}%")
 
@@ -1385,9 +1406,9 @@ def _update_status_display(sensor_name, prepared, latest_time_ms):
     client_db_str = f"{metadata_safe.get('client_db_size_mb', 0):.1f} MB" if metadata_safe.get('client_db_size_mb') is not None else "—"
     sensor_type_str = metadata_safe.get('sensor_type', 'Unknown')
 
-    # Calculate time since last reading
+    # Calculate time since last reading (use actual last reading time, not plot end time)
     now_ms = int(pd.Timestamp.now().timestamp() * 1000)
-    time_ago_ms = now_ms - latest_time_ms
+    time_ago_ms = now_ms - latest_reading_ms
     time_ago_s = time_ago_ms / 1000
 
     # Format time ago

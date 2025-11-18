@@ -47,7 +47,7 @@ class DataAggregator:
         self._start_of_time = 0  # INTEGER timestamp: Unix epoch (Jan 1, 1970)
         self._stop_polling = threading.Event()
         self._polling_threads = {}  # Map sensor_name -> thread
-        self._start_time = datetime.now()  # Track when aggregator started
+        self._start_time = None  # Will be set from database in _init_database()
 
         # Build sensor poll intervals map
         self._sensor_poll_intervals = {}
@@ -71,12 +71,35 @@ class DataAggregator:
 
             # Enable WAL mode for crash safety and better concurrency
             cursor.execute("PRAGMA journal_mode=WAL")
-            
+
             # Performance optimizations for multi-sensor aggregation
             cursor.execute("PRAGMA synchronous=NORMAL")  # Balance safety/speed
             cursor.execute("PRAGMA cache_size=-64000")   # 64MB cache
             cursor.execute("PRAGMA temp_store=MEMORY")   # Use RAM for temp tables
             cursor.execute("PRAGMA mmap_size=268435456") # 256MB memory-mapped I/O
+
+            # Create server metadata table (stores server start time)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS server_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+
+            # Check if server start time exists, if not create it
+            cursor.execute("SELECT value FROM server_metadata WHERE key = 'start_time'")
+            result = cursor.fetchone()
+            if result is None:
+                # First time - store current time as server start
+                start_time_str = datetime.now().isoformat()
+                cursor.execute("INSERT INTO server_metadata (key, value) VALUES ('start_time', ?)",
+                             (start_time_str,))
+                self._start_time = datetime.now()
+                logger.info(f"Server started at {start_time_str}")
+            else:
+                # Load existing start time from database
+                self._start_time = datetime.fromisoformat(result[0])
+                logger.info(f"Server originally started at {result[0]} (uptime: {datetime.now() - self._start_time})")
 
             # Create metadata table
             cursor.execute("""
