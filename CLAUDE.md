@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Deployment Context
+
+**Production Environment:**
+- **Lab Server (Windows)**: Runs `server/bokeh_app.py` at work/university, accessible from campus network
+- **Raspberry Pi Clients**: Deployed in various rooms (Room 307, etc.), connected via Headscale VPN
+- **Live System**: Real DHT22 sensors logging 24/7, data aggregated to central dashboard
+
+**Local Development:**
+- This machine is used for **development and testing only**
+- The `dev/` folder contains test harness with simulated sensors
+- Local config files (`config.ini`, `server/config_server.ini`) are NOT the production configs
+- Production configs exist on deployed devices and are not synced to this repo
+
+**Important:** When making changes, consider impact on the live production system running at work/university.
+
 ## Project Overview
 
 This is a **distributed** Raspberry Pi temperature and humidity monitoring system with two deployment modes:

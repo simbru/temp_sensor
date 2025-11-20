@@ -235,8 +235,8 @@ class DataAggregator:
         """
         table_name = self._get_table_name(sensor_name)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] Fetching data from sensor: {sensor_name}")
-        logger.info(f"Updating data for sensor: {sensor_name}")
+        # Reduce log spam - only log at debug level for normal polling
+        logger.debug(f"[{timestamp}] Fetching data from sensor: {sensor_name}")
 
         try:
             last_timestamp = self._fetch_last_timestamp(table_name)
@@ -631,7 +631,7 @@ class DataAggregator:
 
     def _poll_sensor_loop(self, sensor_name: str, poll_interval: int):
         """
-        Background polling loop for a single sensor.
+        Background polling loop for a single sensor with exponential backoff on errors.
         Each sensor has its own thread with its own poll interval.
 
         Args:
@@ -639,6 +639,9 @@ class DataAggregator:
             poll_interval: Seconds between polls for this sensor
         """
         logger.info(f"Started polling loop for {sensor_name} (interval: {poll_interval}s)")
+
+        consecutive_errors = 0
+        max_backoff = min(poll_interval * 8, 300)  # Cap at 5 minutes or 8x poll interval
 
         while not self._stop_polling.is_set():
             try:
@@ -652,10 +655,25 @@ class DataAggregator:
 
                 logger.debug(f"[{timestamp}] Polling complete for {sensor_name}. Next poll in {poll_interval}s.")
 
+                # Reset error counter on success
+                consecutive_errors = 0
+
             except Exception as e:
+                consecutive_errors += 1
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{timestamp}] ERROR polling {sensor_name}: {e}")
-                logger.error(f"Error polling {sensor_name}: {e}")
+
+                # Calculate exponential backoff delay
+                backoff_delay = min(poll_interval * (2 ** (consecutive_errors - 1)), max_backoff)
+
+                # Only log every 5 errors to avoid flooding logs
+                if consecutive_errors % 5 == 1:
+                    print(f"[{timestamp}] ERROR polling {sensor_name} ({consecutive_errors} consecutive failures): {e}")
+                    print(f"[{timestamp}] Will retry in {backoff_delay:.1f}s (backoff active)")
+                    logger.error(f"Error polling {sensor_name} ({consecutive_errors} failures): {e} - backing off {backoff_delay:.1f}s")
+
+                # Wait with backoff before retrying
+                self._stop_polling.wait(backoff_delay)
+                continue
 
             # Wait for next poll cycle (or until stop signal)
             self._stop_polling.wait(poll_interval)

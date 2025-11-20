@@ -43,6 +43,10 @@ uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1
 **What you need:** Raspberry Pi with DHT22 sensor wired to GPIO4
 
 ```bash
+# Install system dependencies
+sudo apt-get update
+sudo apt-get install python3-dev git
+
 # Clone and install
 cd ~
 git clone <your-repo-url> temp_sensor
@@ -92,12 +96,49 @@ git pull  # Your configs won't be touched!
 ## Prerequisites
 
 ### Hardware (Pi Only)
-- Raspberry Pi with GPIO
-- DHT22 sensor: VCC→3.3V, GND→GND, Data→GPIO4
+
+**Required components:**
+- Raspberry Pi with GPIO pins
+- DHT22 sensor module (the 3-pin breakout board version)
+
+**Wiring:**
+- **VCC (or +)** → Pin 1 (3.3V power)
+- **Data (or OUT)** → Pin 7 (GPIO4)
+- **GND (or -)** → Pin 9 (Ground)
+
+![DHT22 Wiring Diagram](https://www.cedarwarman.com/img/blog/2022-03-09_DHT22_RPi0.jpg)
+
+*Image credit: [Cedar Warman](https://www.cedarwarman.com/2022/03/08/raspberry-pi-dht22-sensor.html)*
+
+**Note:** This assumes you're using a DHT22 module (breakout board with built-in pull-up resistor). If using a bare DHT22 sensor, you'll need to add a 10kΩ pull-up resistor between VCC and Data.
 
 ### Software
-- Python 3.11+ with `uv` package manager
-- Git
+
+**Required:**
+- **Python 3.11+**
+- **uv** (package manager) - [Installation guide](#installing-uv)
+- **Git**
+- **Raspberry Pi only:** `python3-dev` (for compiling hardware libraries)
+
+**Installing uv:**
+
+**Linux/macOS/Raspberry Pi:**
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env  # Add to PATH
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
+```
+
+**Verify installation:**
+```bash
+uv --version
+```
+
+For more details, see the [official uv documentation](https://docs.astral.sh/uv/).
 
 ### Network
 - Pi must be reachable from server (campus network or VPN)
@@ -307,6 +348,35 @@ netsh interface portproxy show all
 Get-NetFirewallRule -DisplayName "Temperature Dashboard HTTP"
 ```
 
+### Server logs flooded with errors
+**Symptom:** Rapid error messages like `"Failed to fetch data from Room 307"` filling terminal
+
+**Cause:** Sensor is unreachable (network issue, Pi offline) and server is polling faster than the timeout
+
+**Automatic behavior:**
+- Server uses **exponential backoff** when sensors fail
+- First error: Retry after `poll_interval` seconds
+- Subsequent errors: Doubles delay (2s → 4s → 8s → 16s...) up to 5 minutes max
+- Errors logged every 5th failure to reduce spam
+- When sensor recovers, normal polling resumes immediately
+
+**Manual intervention (optional):**
+```powershell
+# Temporarily increase poll interval in server/config_server.ini
+[SERVER]
+poll_interval_s = 30  # Up from 2s
+
+# Or disable specific sensors by commenting them out
+[SENSORS]
+# Room_307 = http://100.64.0.5:5000  # Temporarily disabled
+```
+
+**Best practice:**
+- Set `poll_interval_s` ≥ sensor's `loginterval_s` to avoid overlapping requests
+- For slow-changing environments (room temp), use 60-900s poll intervals
+- For fast-changing environments (perfusion), use 1-5s poll intervals
+- Backoff prevents log flooding during transient network issues
+
 ---
 
 ## Configuration Reference
@@ -488,21 +558,22 @@ uv run bokeh serve server/bokeh_app.py --show
 
 ---
 
-## Headscale VPN Setup (Recommended for Campus Deployment)
+## Tailscale VPN Setup (Recommended for Campus Deployment)
 
-### Why Use Headscale?
+### Why Use Tailscale?
 
 **The Problem:** Campus network assigns dynamic IPs to devices via DHCP. When a Raspberry Pi reboots, it may receive a different IP address, causing sensor outages until `server/config_server.ini` is manually updated.
 
-**The Solution:** The lab runs a self-hosted Headscale instance that provides stable private IPs (100.x.x.x range) to all sensors and the server. Devices connect to the Headscale "tailnet" using the Tailscale client app.
+**The Solution:** Use Tailscale VPN to provide stable private IPs (100.x.x.x range) to all sensors and the server. Devices connect securely via Tailscale's mesh network.
 
 **Benefits:**
 - **Stable IPs:** Sensors keep the same private IP even after reboots
 - **Fast deployment:** Add new sensors without waiting for IT to assign static campus IPs
 - **Reduced bureaucracy:** No IT approval needed for each new sensor
-- **Automatic reconnection:** Sensors auto-connect to Headscale on startup
+- **Automatic reconnection:** Sensors auto-connect to Tailscale on startup
+- **Secure:** Encrypted peer-to-peer connections
 
-**User Access:** Dashboard users still access via the server's static public IP (configured by IT) - **no VPN needed for viewing the dashboard**.
+**User Access:** Dashboard users still access via the server's static campus IP - **no VPN needed for viewing the dashboard**.
 
 ---
 
@@ -519,22 +590,20 @@ curl -fsSL https://tailscale.com/install.sh | sh
 - Download installer from [tailscale.com](https://tailscale.com/download)
 - Install and run
 
-**2. Connect to the lab's Headscale tailnet:**
-
-Each device needs to authenticate with the lab's Headscale server (not Tailscale's public servers).
-
-**Authentication key:** Available on the lab's internal wiki.
+**2. Connect to the lab's Tailscale network:**
 
 **On Raspberry Pi:**
 ```bash
-# Replace with actual auth key from wiki
-sudo tailscale up --login-server=https://<HEADSCALE_SERVER_URL> --authkey=<AUTH_KEY_FROM_WIKI>
+# Authenticate with Tailscale (opens browser login)
+sudo tailscale up
 ```
 
+Copy the URL shown and open it in a browser to authenticate. Contact the lab admin to be added to the shared Tailscale network.
+
 **On Windows Server:**
-- Open Tailscale app settings
-- Configure custom login server: `https://<HEADSCALE_SERVER_URL>`
-- Authenticate with auth key from wiki
+- Open Tailscale app
+- Sign in with your account
+- Request access to the lab's tailnet from the admin
 
 **3. Verify connectivity:**
 
@@ -546,37 +615,38 @@ tailscale status
 tailscale ip -4
 
 # Test connectivity between server and Pi
-ping <headscale-private-ip>
+ping <tailscale-ip>
 ```
 
-**4. Update server config to use Headscale IPs:**
+**4. Update server config to use Tailscale IPs:**
 
 Edit `server/config_server.ini`:
 ```ini
 [SENSORS]
-Room_307 = http://100.64.0.5:5000
-Lab_Bench = http://100.64.0.6:5000
-Incubator = http://100.64.0.7:5000
+Room_307 = http://100.x.x.x:5000   # Use the Tailscale IP from 'tailscale ip -4'
+Lab_Bench = http://100.x.x.x:5000
+Incubator = http://100.x.x.x:5000
 ```
 
 **5. Configure auto-start:**
 
-Tailscale automatically starts on boot (systemd on Pi, Windows service on server). Sensors will reconnect to Headscale after reboots without manual intervention.
+Tailscale automatically starts on boot (systemd on Pi, Windows service on server). Sensors will reconnect after reboots without manual intervention.
 
 ---
 
-### Security Notes
+### Joining the Lab's Tailscale Network
 
-- **Keep auth keys private** - do not commit to git
-- Auth keys are found on the lab's internal wiki (access restricted)
-- Headscale server is managed by the lab (not public Tailscale servers)
-- Only devices with valid auth keys can join the tailnet
+To add a new sensor to the lab's Tailscale network, contact the lab admin with:
+- Device name (e.g., "Room 307 Sensor")
+- Tailscale email/account you used to sign up
+
+The admin will approve your device to join the shared tailnet.
 
 ---
 
 ### Troubleshooting
 
-**Pi can't connect to Headscale:**
+**Pi can't connect to Tailscale:**
 ```bash
 # Check Tailscale status
 sudo tailscale status
@@ -585,7 +655,7 @@ sudo tailscale status
 sudo systemctl restart tailscaled
 
 # Re-authenticate if needed
-sudo tailscale up --login-server=https://<HEADSCALE_SERVER_URL> --authkey=<AUTH_KEY>
+sudo tailscale up
 ```
 
 **Server can't reach Pi:**
@@ -593,20 +663,20 @@ sudo tailscale up --login-server=https://<HEADSCALE_SERVER_URL> --authkey=<AUTH_
 # Verify Pi is online in tailnet
 tailscale status
 
-# Test API directly via Headscale IP
-curl http://100.64.0.5:5000/status
+# Test API directly via Tailscale IP
+curl http://100.x.x.x:5000/status
 ```
 
 ---
 
 ### Alternative: Direct Campus Network (Not Recommended)
 
-If you choose to use campus IPs directly without Headscale, be aware:
+If you choose to use campus IPs directly without Tailscale, be aware:
 - **Sensor IPs may change on reboot** → outages until config updated
 - **IT approval required** for static IP assignment (bureaucratic delay)
 - Only viable if cross-subnet routing is enabled and IPs are made static by IT
 
-For production deployment on campus, **Headscale is strongly recommended**.
+For production deployment on campus, **Tailscale is strongly recommended**.
 
 ---
 
