@@ -655,6 +655,11 @@ class DataAggregator:
 
                 logger.debug(f"[{timestamp}] Polling complete for {sensor_name}. Next poll in {poll_interval}s.")
 
+                # Log recovery if there were previous errors
+                if consecutive_errors > 0:
+                    print(f"[{timestamp}] ✓ {sensor_name}: Reconnected (after {consecutive_errors} failures)")
+                    logger.info(f"{sensor_name} recovered after {consecutive_errors} failures")
+
                 # Reset error counter on success
                 consecutive_errors = 0
 
@@ -665,10 +670,12 @@ class DataAggregator:
                 # Calculate exponential backoff delay
                 backoff_delay = min(poll_interval * (2 ** (consecutive_errors - 1)), max_backoff)
 
-                # Only log every 5 errors to avoid flooding logs
-                if consecutive_errors % 5 == 1:
-                    print(f"[{timestamp}] ERROR polling {sensor_name} ({consecutive_errors} consecutive failures): {e}")
-                    print(f"[{timestamp}] Will retry in {backoff_delay:.1f}s (backoff active)")
+                # Log first error immediately, then every 5 errors to avoid flooding
+                if consecutive_errors == 1:
+                    print(f"[{timestamp}] ⚠ {sensor_name}: Connection failed, retrying with backoff...")
+                    logger.warning(f"Polling failed for {sensor_name}: {e}")
+                elif consecutive_errors % 5 == 0:
+                    print(f"[{timestamp}] ⚠ {sensor_name}: Still offline ({consecutive_errors} failures, backoff: {backoff_delay:.0f}s)")
                     logger.error(f"Error polling {sensor_name} ({consecutive_errors} failures): {e} - backing off {backoff_delay:.1f}s")
 
                 # Wait with backoff before retrying
