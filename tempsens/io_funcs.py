@@ -186,6 +186,18 @@ def write_data(timestamp, temperature, humidity, filename=None):
         abs_path = pathlib.Path(filename).resolve()
         if str(abs_path).startswith('/mnt/'):
             cursor.execute("PRAGMA journal_mode=DELETE")
+
+        # Defensive: Ensure table exists before writing (protects against race condition)
+        # This is idempotent and fast - SQLite checks schema cache before executing
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sensor_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL UNIQUE,
+                temperature REAL,
+                humidity REAL
+            )
+        """)
+
         cursor.execute(
             "INSERT OR IGNORE INTO sensor_data (timestamp, temperature, humidity) VALUES (?, ?, ?)",
             (timestamp, temperature, humidity)
