@@ -4,6 +4,7 @@ Run with: bokeh serve --show server/bokeh_app.py
 """
 import configparser
 import logging
+import logging.handlers
 import math
 import pathlib
 import sys
@@ -25,8 +26,40 @@ from bokeh.models.widgets import Div
 from server.api_client import MultiSensorClient
 from server.data_aggregator import DataAggregator
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging to both file and console
+log_dir = _project_root / "logs"
+log_dir.mkdir(exist_ok=True)
+log_file = log_dir / "server.log"
+
+# Create formatter
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# File handler with rotation (10MB max, keep 5 old files)
+file_handler = logging.handlers.RotatingFileHandler(
+    log_file,
+    maxBytes=10 * 1024 * 1024,  # 10MB
+    backupCount=5,
+    encoding='utf-8'
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+
+# Console handler (still show logs in terminal)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+
+# Configure root logger
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[file_handler, console_handler]
+)
+
 logger = logging.getLogger(__name__)
+logger.info(f"Logging to: {log_file}")
 
 # Load server configuration
 CONFIG_PATH = _project_root / "server" / "config_server.ini"
