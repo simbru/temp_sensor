@@ -48,9 +48,18 @@ def main():
         print("\nBoth processes started successfully!")
         print("Press Ctrl+C to stop...")
 
-        # Wait for both processes
+        # Wait for both processes and check for crashes
         logger_process.join()
         api_process.join()
+
+        # If we reach here, one or both processes exited unexpectedly
+        # Check exit codes and fail if either crashed
+        if logger_process.exitcode != 0:
+            print(f"\n❌ ERROR: Sensor logger crashed with exit code {logger_process.exitcode}")
+            sys.exit(1)
+        if api_process.exitcode != 0:
+            print(f"\n❌ ERROR: API server crashed with exit code {api_process.exitcode}")
+            sys.exit(1)
 
     except KeyboardInterrupt:
         print("\n\nShutting down...")
