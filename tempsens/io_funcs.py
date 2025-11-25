@@ -96,8 +96,25 @@ schedule = sched.scheduler(time.time, time.sleep)
 last_valid_reading = {"temperature": None, "humidity": None}
 
 # Track consecutive None readings for hardware failure detection
-consecutive_none_readings = 0
 HARDWARE_FAILURE_THRESHOLD = 5  # Consider hardware failed after 5 consecutive None readings
+
+def _get_consecutive_failures():
+    """Get consecutive failure count from file (shared across processes)."""
+    try:
+        failure_file = pathlib.Path(CONFIG["DEFAULT"]["outputfile"]).parent / ".sensor_failures"
+        if failure_file.exists():
+            return int(failure_file.read_text().strip())
+    except Exception:
+        pass
+    return 0
+
+def _set_consecutive_failures(count):
+    """Set consecutive failure count to file (shared across processes)."""
+    try:
+        failure_file = pathlib.Path(CONFIG["DEFAULT"]["outputfile"]).parent / ".sensor_failures"
+        failure_file.write_text(str(count))
+    except Exception:
+        pass
 
 def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar = 5):
     temp = tempbaseline + np.random.randint(tempvar)
@@ -209,7 +226,7 @@ def write_data(timestamp, temperature, humidity, filename=None):
         conn.commit()
 
 def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
-    global sensor_found, last_valid_reading, consecutive_none_readings
+    global sensor_found, last_valid_reading
     # Generate INTEGER timestamp (milliseconds since epoch)
     timestamp = int(datetime.datetime.now().timestamp() * 1000)
 
@@ -241,14 +258,15 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
 
     # Check for None readings from sensor (hardware failure)
     if temperature is None or humidity is None:
-        consecutive_none_readings += 1
+        consecutive_none_readings = _get_consecutive_failures() + 1
+        _set_consecutive_failures(consecutive_none_readings)
         print(f"[{format_timestamp(timestamp)}] ERROR: Sensor returned None values (temp={temperature}, hum={humidity}) - possible hardware failure!")
         if consecutive_none_readings >= HARDWARE_FAILURE_THRESHOLD:
             print(f"[{format_timestamp(timestamp)}] CRITICAL: {consecutive_none_readings} consecutive None readings - hardware failure detected!")
         print(f"[{format_timestamp(timestamp)}] Hardware may need replacement. Skipping write to database.")
     else:
         # Reset counter on successful read
-        consecutive_none_readings = 0
+        _set_consecutive_failures(0)
 
     # Apply calibration offsets to raw readings
     if temperature is not None and humidity is not None:

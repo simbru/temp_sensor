@@ -152,18 +152,19 @@ async def get_status():
         last_reading = {"error": str(e)}
 
     # Check for hardware failure
+    consecutive_failures = io_funcs._get_consecutive_failures()
     hardware_status = "ok"
-    if io_funcs.consecutive_none_readings >= io_funcs.HARDWARE_FAILURE_THRESHOLD:
+    if consecutive_failures >= io_funcs.HARDWARE_FAILURE_THRESHOLD:
         hardware_status = "hardware_failure"
-    elif io_funcs.consecutive_none_readings > 0:
-        hardware_status = f"degraded ({io_funcs.consecutive_none_readings} failed reads)"
+    elif consecutive_failures > 0:
+        hardware_status = f"degraded ({consecutive_failures} failed reads)"
 
     return {
         **device_info,
         "last_reading": last_reading,
         "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"]),
         "hardware_status": hardware_status,
-        "consecutive_failures": io_funcs.consecutive_none_readings
+        "consecutive_failures": consecutive_failures
     }
 
 
