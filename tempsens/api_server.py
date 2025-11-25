@@ -151,10 +151,19 @@ async def get_status():
     except Exception as e:
         last_reading = {"error": str(e)}
 
+    # Check for hardware failure
+    hardware_status = "ok"
+    if io_funcs.consecutive_none_readings >= io_funcs.HARDWARE_FAILURE_THRESHOLD:
+        hardware_status = "hardware_failure"
+    elif io_funcs.consecutive_none_readings > 0:
+        hardware_status = f"degraded ({io_funcs.consecutive_none_readings} failed reads)"
+
     return {
         **device_info,
         "last_reading": last_reading,
-        "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"])
+        "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"]),
+        "hardware_status": hardware_status,
+        "consecutive_failures": io_funcs.consecutive_none_readings
     }
 
 

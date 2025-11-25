@@ -141,6 +141,7 @@ STATUS_DISPLAY = {
     "active": {"icon": "🟢", "label": "Receiving data"},
     "idle": {"icon": "🔵", "label": "Connected · waiting"},
     "syncing": {"icon": "🟡", "label": "Syncing backlog"},
+    "hardware_failure": {"icon": "⛓️‍💥", "label": "Sensor hardware failure"},
     "error": {"icon": "🔴", "label": "Offline or unreachable"},
     "unknown": {"icon": "🔴", "label": "Status unavailable"},
 }

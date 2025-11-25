@@ -95,6 +95,10 @@ schedule = sched.scheduler(time.time, time.sleep)
 # Store last valid reading for spike filtering
 last_valid_reading = {"temperature": None, "humidity": None}
 
+# Track consecutive None readings for hardware failure detection
+consecutive_none_readings = 0
+HARDWARE_FAILURE_THRESHOLD = 5  # Consider hardware failed after 5 consecutive None readings
+
 def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar = 5):
     temp = tempbaseline + np.random.randint(tempvar)
     hum = humbaseline + np.random.randint(humvar)
@@ -193,7 +197,7 @@ def write_data(timestamp, temperature, humidity, filename=None):
         conn.commit()
 
 def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
-    global sensor_found, last_valid_reading
+    global sensor_found, last_valid_reading, consecutive_none_readings
     # Generate INTEGER timestamp (milliseconds since epoch)
     timestamp = int(datetime.datetime.now().timestamp() * 1000)
 
@@ -222,6 +226,17 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
                 temperature, humidity = None, None
             time.sleep(0.1)  # Small delay between retries
             continue
+
+    # Check for None readings from sensor (hardware failure)
+    if temperature is None or humidity is None:
+        consecutive_none_readings += 1
+        print(f"[{format_timestamp(timestamp)}] ERROR: Sensor returned None values (temp={temperature}, hum={humidity}) - possible hardware failure!")
+        if consecutive_none_readings >= HARDWARE_FAILURE_THRESHOLD:
+            print(f"[{format_timestamp(timestamp)}] CRITICAL: {consecutive_none_readings} consecutive None readings - hardware failure detected!")
+        print(f"[{format_timestamp(timestamp)}] Hardware may need replacement. Skipping write to database.")
+    else:
+        # Reset counter on successful read
+        consecutive_none_readings = 0
 
     # Apply calibration offsets to raw readings
     if temperature is not None and humidity is not None:

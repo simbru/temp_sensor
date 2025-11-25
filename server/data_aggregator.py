@@ -48,6 +48,7 @@ class DataAggregator:
         self._stop_polling = threading.Event()
         self._polling_threads = {}  # Map sensor_name -> thread
         self._start_time = None  # Will be set from database in _init_database()
+        self._last_poll_time = {}  # Track last successful poll for each sensor (for health checks)
 
         # Build sensor poll intervals map
         self._sensor_poll_intervals = {}
@@ -283,6 +284,10 @@ class DataAggregator:
             sensor_type = metrics.get("sensor_type") if metrics else None
             client_total_records = metrics.get("total_records") if metrics else None
 
+            # Check for hardware failure from status endpoint
+            status_info = self.client.sensors[sensor_name].get_status() if sensor_name in self.client.sensors else None
+            hardware_status = status_info.get("hardware_status") if status_info else "ok"
+            
             # Fetch log interval from client configuration
             config = self.client.get_sensor_config(sensor_name)
             log_interval_s = config.get("log_interval_s") if config else None
@@ -330,11 +335,18 @@ class DataAggregator:
 
                 logger.info(f"Added {len(new_records)} new records for {sensor_name}")
 
+            # Override status if hardware failure detected
+            if hardware_status == "hardware_failure":
+                status_value = "hardware_failure"
+                error_msg = "Sensor hardware failure: returning None values"
+            else:
+                error_msg = None
+
             self._update_metadata(
                 sensor_name,
                 device_ip=device_ip,
                 status=status_value,
-                error=None,
+                error=error_msg,
                 cpu_percent=cpu_percent,
                 memory_percent=memory_percent,
                 client_db_size_mb=client_db_size_mb,
@@ -391,6 +403,10 @@ class DataAggregator:
         log_interval_s: Optional[float] = None
     ):
         """Update sensor metadata in database."""
+        # Check for hardware failure pattern: error message contains "None values"
+        if error and "None values" in error:
+            status = "hardware_failure"
+        
         # Get total records count (server-side)
         total_records = self.get_total_records(sensor_name)
 
@@ -639,21 +655,25 @@ class DataAggregator:
             poll_interval: Seconds between polls for this sensor
         """
         logger.info(f"Started polling loop for {sensor_name} (interval: {poll_interval}s)")
-
+        
+        import threading
+        thread_id = threading.current_thread().name
         consecutive_errors = 0
         max_backoff = min(poll_interval * 8, 300)  # Cap at 5 minutes or 8x poll interval
+        loop_count = 0
 
         while not self._stop_polling.is_set():
+            loop_count += 1
             try:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                logger.debug(f"[{timestamp}] Polling {sensor_name}...")
+                logger.debug(f"[{thread_id}] [{timestamp}] Loop #{loop_count} - Polling {sensor_name}...")
 
                 # Poll this sensor with dynamic limit based on poll interval
                 # Fetch enough records to cover several polling cycles
                 dynamic_limit = max(10, int(poll_interval * 3))
                 self.update_sensor_data(sensor_name, limit=dynamic_limit)
 
-                logger.debug(f"[{timestamp}] Polling complete for {sensor_name}. Next poll in {poll_interval}s.")
+                logger.debug(f"[{thread_id}] [{timestamp}] Polling complete for {sensor_name}. Next poll in {poll_interval}s.")
 
                 # Log recovery if there were previous errors
                 if consecutive_errors > 0:
@@ -662,6 +682,9 @@ class DataAggregator:
 
                 # Reset error counter on success
                 consecutive_errors = 0
+                
+                # Update last poll time for health monitoring
+                self._last_poll_time[sensor_name] = datetime.now()
 
             except Exception as e:
                 consecutive_errors += 1
@@ -673,19 +696,54 @@ class DataAggregator:
                 # Log first error immediately, then every 5 errors to avoid flooding
                 if consecutive_errors == 1:
                     print(f"[{timestamp}] ⚠ {sensor_name}: Connection failed, retrying with backoff...")
-                    logger.warning(f"Polling failed for {sensor_name}: {e}")
+                    logger.warning(f"[{thread_id}] Polling failed for {sensor_name}: {e}", exc_info=True)
                 elif consecutive_errors % 5 == 0:
                     print(f"[{timestamp}] ⚠ {sensor_name}: Still offline ({consecutive_errors} failures, backoff: {backoff_delay:.0f}s)")
-                    logger.error(f"Error polling {sensor_name} ({consecutive_errors} failures): {e} - backing off {backoff_delay:.1f}s")
+                    logger.error(f"[{thread_id}] Error polling {sensor_name} ({consecutive_errors} failures): {e} - backing off {backoff_delay:.1f}s", exc_info=True)
 
                 # Wait with backoff before retrying
                 self._stop_polling.wait(backoff_delay)
                 continue
 
             # Wait for next poll cycle (or until stop signal)
+            logger.debug(f"[{thread_id}] Waiting {poll_interval}s until next poll of {sensor_name}")
             self._stop_polling.wait(poll_interval)
 
-        logger.info(f"Stopped polling loop for {sensor_name}")
+        logger.info(f"[{thread_id}] Stopped polling loop for {sensor_name} (ran {loop_count} iterations)")
+
+    def get_polling_health(self) -> Dict:
+        """Get health status of all polling threads."""
+        health = {}
+        now = datetime.now()
+        
+        for sensor_name, thread in self._polling_threads.items():
+            poll_interval = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
+            last_poll = self._last_poll_time.get(sensor_name)
+            
+            thread_alive = thread.is_alive() if thread else False
+            
+            if last_poll:
+                time_since_poll = (now - last_poll).total_seconds()
+                # Consider stalled if no poll in 3x the poll interval
+                is_stalled = time_since_poll > (poll_interval * 3)
+                
+                health[sensor_name] = {
+                    "thread_alive": thread_alive,
+                    "last_poll": last_poll.isoformat(),
+                    "seconds_since_poll": round(time_since_poll, 1),
+                    "poll_interval": poll_interval,
+                    "status": "stalled" if is_stalled else "healthy"
+                }
+            else:
+                health[sensor_name] = {
+                    "thread_alive": thread_alive,
+                    "last_poll": None,
+                    "seconds_since_poll": None,
+                    "poll_interval": poll_interval,
+                    "status": "never_polled" if thread_alive else "dead"
+                }
+        
+        return health
 
     def _polling_loop(self):
         """Background polling loop with parallel sensor updates."""
