@@ -297,33 +297,8 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
                                                   expected_interval_s=expected_interval_s)
 
     window = max(int(window_size), 1)
-    # Calculate moving average with min_periods=1 for smooth trends
-    temp_series = pd.Series(temps)
-    hum_series = pd.Series(hums)
-    
-    temp_ma = temp_series.rolling(window=window, min_periods=1).mean().to_numpy()
-    hum_ma = hum_series.rolling(window=window, min_periods=1).mean().to_numpy()
-    
-    # Where raw data has NaN gaps, also set moving average to NaN
-    # Additionally, set NaN in the moving average for window/2 points before and after each gap
-    # This prevents the MA from "reaching into" the gap from either side
-    nan_mask = np.isnan(temps)
-    if np.any(nan_mask):
-        # Expand NaN regions by half the window size on each side
-        half_window = max(1, window // 2)
-        expanded_mask = nan_mask.copy()
-        for i in range(len(nan_mask)):
-            if nan_mask[i]:
-                # Set window/2 points before and after this NaN to NaN
-                start_idx = max(0, i - half_window)
-                end_idx = min(len(nan_mask), i + half_window + 1)
-                expanded_mask[start_idx:end_idx] = True
-        temp_ma[expanded_mask] = np.nan
-        hum_ma[expanded_mask] = np.nan
-    else:
-        # No gaps, just set MA to NaN where data is NaN
-        temp_ma[nan_mask] = np.nan
-        hum_ma[nan_mask] = np.nan
+    temp_ma = pd.Series(temps).rolling(window=window, min_periods=1).mean().to_numpy()
+    hum_ma = pd.Series(hums).rolling(window=window, min_periods=1).mean().to_numpy()
 
     return {
         "time": time_vals,
