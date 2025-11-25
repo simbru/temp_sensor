@@ -297,11 +297,18 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
                                                   expected_interval_s=expected_interval_s)
 
     window = max(int(window_size), 1)
-    # Use min_periods to ensure moving average breaks at gaps
-    # Setting min_periods to ~50% of window prevents spurious averages across gaps
-    min_valid_points = max(1, window // 2)
-    temp_ma = pd.Series(temps).rolling(window=window, min_periods=min_valid_points).mean().to_numpy()
-    hum_ma = pd.Series(hums).rolling(window=window, min_periods=min_valid_points).mean().to_numpy()
+    # Use min_periods=1 but manually set NaN in moving average where gaps exist
+    # This preserves the moving average for valid data while breaking at gaps
+    temp_series = pd.Series(temps)
+    hum_series = pd.Series(hums)
+    
+    temp_ma = temp_series.rolling(window=window, min_periods=1).mean().to_numpy()
+    hum_ma = hum_series.rolling(window=window, min_periods=1).mean().to_numpy()
+    
+    # Where raw data is NaN (gaps), also set moving average to NaN
+    # This prevents the MA line from drawing across gaps
+    temp_ma[np.isnan(temps)] = np.nan
+    hum_ma[np.isnan(hums)] = np.nan
 
     return {
         "time": time_vals,
