@@ -297,8 +297,21 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
                                                   expected_interval_s=expected_interval_s)
 
     window = max(int(window_size), 1)
-    temp_ma = pd.Series(temps).rolling(window=window, min_periods=1).mean().to_numpy()
-    hum_ma = pd.Series(hums).rolling(window=window, min_periods=1).mean().to_numpy()
+
+    # Calculate rolling average, properly handling NaN gaps
+    # By default, pandas rolling().mean() will skip NaN values in the window,
+    # BUT if the entire window contains only NaN, the result is NaN.
+    # This is correct behavior - we want gaps to show as breaks in the MA line.
+    #
+    # The issue: after a large gap, the MA line should resume immediately with new data,
+    # not wait for 'window' samples to fill up. We use min_periods=1 to allow this.
+    temp_series = pd.Series(temps)
+    hum_series = pd.Series(hums)
+
+    # Key insight: rolling().mean() by default DOES exclude NaN from calculation (skipna=True)
+    # But we need to ensure that after a gap, the MA starts immediately with available data
+    temp_ma = temp_series.rolling(window=window, min_periods=1).mean().to_numpy()
+    hum_ma = hum_series.rolling(window=window, min_periods=1).mean().to_numpy()
 
     return {
         "time": time_vals,
@@ -1180,6 +1193,11 @@ def fetch_initial_data(sensor_name):
         data_cache["last_timestamp"] = new_data["time"][-1] if len(new_data["time"]) > 0 else None
         data_cache["last_fetch_time"] = time.time() * 1000
         data_cache["log_interval_s"] = log_interval_s  # Store for gap detection
+
+        # Invalidate prepared data cache to force recalculation
+        # This ensures moving averages are recalculated with the new data
+        data_cache["prepared_data"] = None
+        data_cache["prep_raw_hash"] = None
 
         return new_data
     except Exception as e:
