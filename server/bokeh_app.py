@@ -297,10 +297,11 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
                                                   expected_interval_s=expected_interval_s)
 
     window = max(int(window_size), 1)
-    # Use min_periods=1 so moving average smoothly interpolates across small gaps
-    # Raw data (with gap detection) shows the truth, moving average shows the trend
-    temp_ma = pd.Series(temps).rolling(window=window, min_periods=1).mean().to_numpy()
-    hum_ma = pd.Series(hums).rolling(window=window, min_periods=1).mean().to_numpy()
+    # Use min_periods to ensure moving average breaks at gaps
+    # Setting min_periods to ~50% of window prevents spurious averages across gaps
+    min_valid_points = max(1, window // 2)
+    temp_ma = pd.Series(temps).rolling(window=window, min_periods=min_valid_points).mean().to_numpy()
+    hum_ma = pd.Series(hums).rolling(window=window, min_periods=min_valid_points).mean().to_numpy()
 
     return {
         "time": time_vals,
