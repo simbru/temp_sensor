@@ -194,7 +194,8 @@ def _resolve_status_display(metadata: dict | None) -> tuple[str, str]:
     status_value = (metadata or {}).get("status") or "unknown"
     status_key = status_value.lower() if isinstance(status_value, str) else "unknown"
     display = STATUS_DISPLAY.get(status_key, DEFAULT_STATUS_DISPLAY)
-    if metadata and metadata.get("last_error"):
+    # Only override with error if it's not already a specific error type (like hardware_failure)
+    if metadata and metadata.get("last_error") and status_key not in ["hardware_failure"]:
         display = STATUS_DISPLAY["error"]
     return display["icon"], display["label"]
 
