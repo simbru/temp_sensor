@@ -49,7 +49,7 @@ sudo apt-get install python3-dev git
 
 # Clone and install
 cd ~
-git clone <your-repo-url> temp_sensor
+git clone https://github.com/simbru/temp_sensor temp_sensor
 cd temp_sensor
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
