@@ -234,11 +234,13 @@ class SimulatedSensor:
         return True
 
 
-# Sensor registry for auto-detection (order matters - try most common first)
+# Sensor registry for auto-detection (order matters!)
+# I2C sensors first (fast, reliable hardware detection via I2C bus)
+# DHT22 last (can only check if libraries exist, not if hardware is connected)
 SENSOR_REGISTRY = [
-    ("DHT22", DHT22Sensor),
     ("AHT20", AHT20Sensor),
     ("BME280", BME280Sensor),
+    ("DHT22", DHT22Sensor),
 ]
 
 
