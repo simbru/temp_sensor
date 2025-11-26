@@ -299,19 +299,11 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
     window = max(int(window_size), 1)
 
     # Calculate rolling average, properly handling NaN gaps
-    # By default, pandas rolling().mean() will skip NaN values in the window,
-    # BUT if the entire window contains only NaN, the result is NaN.
-    # This is correct behavior - we want gaps to show as breaks in the MA line.
-    #
-    # The issue: after a large gap, the MA line should resume immediately with new data,
-    # not wait for 'window' samples to fill up. We use min_periods=1 to allow this.
-    temp_series = pd.Series(temps)
-    hum_series = pd.Series(hums)
-
-    # Key insight: rolling().mean() by default DOES exclude NaN from calculation (skipna=True)
-    # But we need to ensure that after a gap, the MA starts immediately with available data
-    temp_ma = temp_series.rolling(window=window, min_periods=1).mean().to_numpy()
-    hum_ma = hum_series.rolling(window=window, min_periods=1).mean().to_numpy()
+    # pandas rolling().mean() automatically skips NaN values when calculating the mean,
+    # so gaps (NaN markers) won't corrupt the moving average on either side.
+    # min_periods=1 ensures MA starts immediately after a gap with available data.
+    temp_ma = pd.Series(temps).rolling(window=window, min_periods=1).mean().to_numpy()
+    hum_ma = pd.Series(hums).rolling(window=window, min_periods=1).mean().to_numpy()
 
     return {
         "time": time_vals,
@@ -326,9 +318,8 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_int
     """
     Insert NaN at time gaps to show missing data in plots.
 
-    Detects where time between consecutive points exceeds threshold and
-    inserts proportional NaN markers to prevent moving averages from
-    falsely interpolating across gaps.
+    Uses adaptive gap detection that auto-detects the actual logging interval
+    from the data itself, making it robust to changes in sensor logging rate.
 
     IMPORTANT: time_vals are milliseconds since epoch (float), not ISO strings.
     This is the format returned by data_aggregator for Bokeh plotting.
@@ -337,10 +328,8 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_int
         time_vals: Millisecond timestamps (float) - NOT ISO strings
         temps: Temperature values
         hums: Humidity values
-        gap_threshold_s: Time gap threshold in seconds (default 60s = 1 minute)
-                        Gaps larger than this are considered client outages
-        expected_interval_s: Expected sensor log interval in seconds (default 2s)
-                           Used to calculate proportional NaN markers
+        gap_threshold_s: Fallback gap threshold if auto-detection fails (default 60s)
+        expected_interval_s: Fallback interval if auto-detection fails (default 2s)
 
     Returns:
         Tuple of (times, temps, hums) with NaN inserted at gaps
@@ -351,11 +340,32 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_int
     # Calculate time gaps directly from milliseconds (avoid datetime conversion)
     time_diffs_ms = np.diff(time_vals)
     time_diffs_s = time_diffs_ms / 1000.0
-    
-    # Detect gaps larger than threshold (e.g., client offline)
-    gap_mask = time_diffs_s > gap_threshold_s
+
+    # ADAPTIVE GAP DETECTION:
+    # Calculate global median interval to understand typical logging rate
+    # Filter out extreme outliers (> 10x median) to avoid skewing by sensor outages
+    median_interval = np.median(time_diffs_s)
+
+    # Filter time_diffs for baseline calculation (remove outliers)
+    reasonable_diffs = time_diffs_s[time_diffs_s < median_interval * 10]
+
+    if len(reasonable_diffs) > 0:
+        # Use 95th percentile of reasonable intervals as baseline
+        baseline_interval = np.percentile(reasonable_diffs, 95)
+    else:
+        # Fallback if all data is outliers (shouldn't happen)
+        baseline_interval = expected_interval_s
+
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Gap detection - Median interval: {median_interval:.1f}s, Baseline (95th percentile): {baseline_interval:.1f}s")
+
+    # Detect gaps using adaptive threshold
+    # A gap is significant if it's 3x the baseline interval
+    adaptive_gap_threshold = max(baseline_interval * 3, gap_threshold_s)
+    gap_mask = time_diffs_s > adaptive_gap_threshold
     gap_indices = np.where(gap_mask)[0] + 1  # +1 because diff shifts indices
-    
+
     if len(gap_indices) == 0:
         return time_vals, temps, hums
     
@@ -364,7 +374,26 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_int
     for gap_idx in gap_indices:
         gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
         gap_size_seconds = gap_size_ms / 1000.0
-        num_missing = int(gap_size_seconds / expected_interval_s)
+
+        # LOCAL ADAPTIVE INTERVAL:
+        # Check local interval around this gap for more accurate NaN marker calculation
+        local_window_start = max(0, gap_idx - 50)
+        local_window_end = min(len(time_diffs_s), gap_idx + 50)
+        local_diffs = time_diffs_s[local_window_start:local_window_end]
+
+        # Filter out other large gaps in local window
+        local_reasonable = local_diffs[local_diffs < adaptive_gap_threshold]
+
+        if len(local_reasonable) > 5:
+            local_interval = np.median(local_reasonable)
+        else:
+            # Not enough local data, use global baseline
+            local_interval = baseline_interval
+
+        # Use the larger of baseline or local interval to be conservative
+        effective_interval = max(baseline_interval, local_interval)
+
+        num_missing = int(gap_size_seconds / effective_interval)
         num_nan_markers = max(min(num_missing, 100), 5)
         total_nan_markers += num_nan_markers
     
@@ -384,16 +413,29 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_int
         result_temps[write_idx:write_idx+chunk_size] = temps[prev_idx:gap_idx]
         result_hums[write_idx:write_idx+chunk_size] = hums[prev_idx:gap_idx]
         write_idx += chunk_size
-        
-        # Calculate how many NaN markers to insert based on gap size
+
+        # Calculate how many NaN markers to insert using adaptive interval
         gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
         gap_size_seconds = gap_size_ms / 1000.0
-        num_missing = int(gap_size_seconds / expected_interval_s)
+
+        # LOCAL ADAPTIVE INTERVAL (same logic as above):
+        local_window_start = max(0, gap_idx - 50)
+        local_window_end = min(len(time_diffs_s), gap_idx + 50)
+        local_diffs = time_diffs_s[local_window_start:local_window_end]
+        local_reasonable = local_diffs[local_diffs < adaptive_gap_threshold]
+
+        if len(local_reasonable) > 5:
+            local_interval = np.median(local_reasonable)
+        else:
+            local_interval = baseline_interval
+
+        effective_interval = max(baseline_interval, local_interval)
+        num_missing = int(gap_size_seconds / effective_interval)
 
         # Insert enough NaN markers to prevent moving average from bridging the gap
         # Minimum of 5 ensures even moderate MA windows show the break
         num_nan_markers = max(min(num_missing, 100), 5)  # Cap at 100 to avoid huge gaps
-        
+
         # Insert NaN with interpolated millisecond timestamps within the gap
         # Vectorized: create all NaN markers at once instead of loop
         gap_start_ms = time_vals[gap_idx - 1]
@@ -404,7 +446,7 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_int
         result_temps[write_idx:write_idx+num_nan_markers] = np.nan
         result_hums[write_idx:write_idx+num_nan_markers] = np.nan
         write_idx += num_nan_markers
-        
+
         prev_idx = gap_idx
     
     # Copy remaining data
