@@ -56,12 +56,16 @@ def get_device_info():
     boot_time = datetime.fromtimestamp(psutil.boot_time())
     uptime_seconds = (datetime.now() - boot_time).total_seconds()
 
+    # Get sensor type from config
+    config = io_funcs.fetch_config()
+    sensor_type = config["DEFAULT"].get("sensor_type", "AUTO")
+
     return {
         "device_name": device_name,
         "ip_address": ip_address,
         "hostname": socket.gethostname(),
         "uptime_seconds": uptime_seconds,
-        "sensor_type": "DHT22" if io_funcs.sensor_found else "simulated"
+        "sensor_type": sensor_type
     }
 
 
@@ -102,8 +106,9 @@ def get_system_metrics():
     except Exception:
         record_count = 0
 
-    # Get sensor type
-    sensor_type = "DHT22" if io_funcs.sensor_found else "simulated"
+    # Get sensor type from config
+    config = io_funcs.fetch_config()
+    sensor_type = config["DEFAULT"].get("sensor_type", "AUTO")
 
     metrics = {
         "cpu_percent": round(cpu_percent, 1),
@@ -261,7 +266,7 @@ async def get_config():
         "device_name": device_info["device_name"],
         "log_interval_s": float(config["DEFAULT"]["loginterval_s"]),
         "output_file": config["DEFAULT"]["outputfile"],
-        "sensor_type": "DHT22" if io_funcs.sensor_found else "simulated"
+        "sensor_type": config["DEFAULT"].get("sensor_type", "AUTO")
     }
 
 
