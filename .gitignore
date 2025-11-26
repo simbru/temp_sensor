@@ -13,6 +13,12 @@ sensor_data.db
 # Process ID files
 tempsens_running.pid
 
+# Runtime state files
+.sensor_failures
+
+# Claude Code local settings
+.claude/settings.local.json
+
 # Python cache
 **/__pycache__/
 

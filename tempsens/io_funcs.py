@@ -2,22 +2,16 @@ import configparser
 import pathlib
 import os
 import sqlite3
-import numpy as np
 import datetime
 import threading
 import time
 import sched
 
-# Import handling based on RasPi/dev
-try:
-    import adafruit_dht
-    import board
-    pin = board.D4
-    print("found dht sensor")
-    sensor_found = True
-except (ModuleNotFoundError, ImportError):
-    print("no dht sensor, generated data")
-    sensor_found = False
+# Import sensor drivers module
+from . import sensor_drivers
+
+# Global sensor instance (initialized on first log_data() call)
+_sensor_instance = None
 
 # Allow override via environment variable for running multiple test instances
 CONFIGPATH = os.environ.get('TEMPSENS_CONFIG', "config.ini")
@@ -31,6 +25,7 @@ DEFAULT_CONFIG_VALUES = {
     "max_humidity_delta_pct": "10.0",
     "temp_offset_c": "0.0",
     "humidity_offset_pct": "0.0",
+    "sensor_type": "AUTO",  # Options: AUTO, DHT22, AHT20, BME280, SIMULATED
 }
 
 def gen_default_config(config_loc=CONFIGPATH, force=False):
@@ -93,7 +88,7 @@ LOGINTERVAL = float(CONFIG["DEFAULT"]["loginterval_s"])
 schedule = sched.scheduler(time.time, time.sleep)
 
 # Store last valid reading for spike filtering
-last_valid_reading = {"temperature": None, "humidity": None}
+last_valid_reading: dict[str, float | None] = {"temperature": None, "humidity": None}
 
 # Track consecutive None readings for hardware failure detection
 HARDWARE_FAILURE_THRESHOLD = 5  # Consider hardware failed after 5 consecutive None readings
@@ -116,14 +111,21 @@ def _set_consecutive_failures(count):
     except Exception:
         pass
 
-def simulate_tempsens(tempbaseline = 20, tempvar = 5, humbaseline = 50, humvar = 5):
-    temp = tempbaseline + np.random.randint(tempvar)
-    hum = humbaseline + np.random.randint(humvar)
-    # Sensor fails read sometimes, simulate that (20% chance)
-    random_fail = np.random.randint(5)
-    if random_fail == 1:
-        raise RuntimeError("Simulated sensor read failure (checksum error)")
-    return temp, hum
+def _get_sensor():
+    """
+    Get or initialize the sensor instance based on config.
+
+    Returns:
+        Sensor object implementing SensorInterface
+    """
+    global _sensor_instance
+
+    if _sensor_instance is None:
+        sensor_type = CONFIG["DEFAULT"].get("sensor_type", "AUTO")
+        _sensor_instance = sensor_drivers.get_sensor(sensor_type)
+        print(f"Initialized {_sensor_instance.name} sensor")
+
+    return _sensor_instance
 
 def format_timestamp(timestamp_ms):
     """Convert milliseconds timestamp to human-readable string."""
@@ -226,11 +228,14 @@ def write_data(timestamp, temperature, humidity, filename=None):
         conn.commit()
 
 def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
-    global sensor_found, last_valid_reading
+    global last_valid_reading
     # Generate INTEGER timestamp (milliseconds since epoch)
     timestamp = int(datetime.datetime.now().timestamp() * 1000)
 
-    # Common retry logic for both real and simulated sensors
+    # Get sensor instance (initializes on first call)
+    sensor = _get_sensor()
+
+    # Common retry logic for all sensors
     good_read = False
     retry_count = 0
     max_retries = 5
@@ -238,12 +243,7 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
 
     while good_read is False and retry_count < max_retries:
         try:
-            if sensor_found is False:
-                temperature, humidity = simulate_tempsens()
-            else:
-                dht_device = adafruit_dht.DHT22(pin, use_pulseio=False)
-                temperature = dht_device.temperature
-                humidity = dht_device.humidity
+            temperature, humidity = sensor.read()
             good_read = True
         except RuntimeError as e:
             retry_count += 1
@@ -282,7 +282,7 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
         max_humidity_delta = float(CONFIG["DEFAULT"]["max_humidity_delta_pct"])
 
         # Check if we have a previous valid reading to compare against
-        if last_valid_reading["temperature"] is not None:
+        if last_valid_reading["temperature"] is not None and last_valid_reading["humidity"] is not None:
             temp_delta = abs(temperature - last_valid_reading["temperature"])
             humidity_delta = abs(humidity - last_valid_reading["humidity"])
 

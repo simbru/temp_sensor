@@ -1,6 +1,6 @@
 # Temperature Monitoring System
 
-A distributed temperature and humidity monitoring system for Raspberry Pi with DHT22 sensors.
+A distributed temperature and humidity monitoring system for Raspberry Pi with multiple sensor support (DHT22, AHT20, BME280).
 
 **Features:**
 - Multi-sensor dashboard with real-time updates
@@ -40,7 +40,10 @@ uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1
 
 ### 2. Pi Client Setup (Raspberry Pi)
 
-**What you need:** Raspberry Pi with DHT22 sensor wired to GPIO4
+**What you need:** Raspberry Pi with a supported temperature/humidity sensor:
+- **DHT22** wired to GPIO4 (digital sensor)
+- **AHT20** connected via I2C (more accurate, less prone to read failures)
+- **BME280** connected via I2C (includes pressure sensor for future expansion)
 
 ```bash
 # Install system dependencies
@@ -58,6 +61,7 @@ uv sync --group client --extra pi-hardware
 # Configure
 cp config.ini.example config.ini
 nano config.ini  # Set device_name = "Room 307"
+                 # Set sensor_type = "AUTO" (or "DHT22", "AHT20", "BME280")
 
 # Run client
 uv run python run_client.py
@@ -98,10 +102,13 @@ git pull  # Your configs won't be touched!
 ### Hardware (Pi Only)
 
 **Required components:**
-- Raspberry Pi with GPIO pins
-- DHT22 sensor module (the 3-pin breakout board version)
+- Raspberry Pi with GPIO pins (for DHT22) or I2C support (for AHT20/BME280)
+- One of the following sensors:
+  - **DHT22** - Digital temperature/humidity sensor
+  - **AHT20** - I2C temperature/humidity sensor (more accurate, fewer read failures)
+  - **BME280** - I2C temp/humidity/pressure sensor (Pimoroni Enviro module)
 
-**Wiring:**
+#### DHT22 Wiring (GPIO)
 - **VCC (or +)** → Pin 1 (3.3V power)
 - **Data (or OUT)** → Pin 7 (GPIO4)
 - **GND (or -)** → Pin 9 (Ground)
@@ -111,6 +118,38 @@ git pull  # Your configs won't be touched!
 *Image credit: [Cedar Warman](https://www.cedarwarman.com/2022/03/08/raspberry-pi-dht22-sensor.html)*
 
 **Note:** This assumes you're using a DHT22 module (breakout board with built-in pull-up resistor). If using a bare DHT22 sensor, you'll need to add a 10kΩ pull-up resistor between VCC and Data.
+
+#### AHT20/BME280 Wiring (I2C)
+- **VCC** → Pin 1 (3.3V power)
+- **SDA** → Pin 3 (I2C Data - GPIO2)
+- **SCL** → Pin 5 (I2C Clock - GPIO3)
+- **GND** → Pin 9 (Ground)
+
+**Advantages of I2C sensors:**
+- More accurate readings than DHT22
+- Fewer read failures (~99% success vs ~80% for DHT22)
+- Multiple sensors can share the same I2C bus
+- BME280 includes pressure sensing for future features
+
+#### Sensor Auto-Detection
+
+The system automatically detects which sensor is connected. To manually specify:
+
+```ini
+# config.ini
+sensor_type = AUTO        # Auto-detect (default)
+# sensor_type = DHT22     # Force DHT22
+# sensor_type = AHT20     # Force AHT20
+# sensor_type = BME280    # Force BME280
+```
+
+On startup, the system will report which sensor it detected:
+```
+Auto-detecting sensors...
+  Checking for DHT22... Not found
+  Checking for AHT20... Found!
+Initialized AHT20 sensor
+```
 
 ### Software
 
@@ -318,11 +357,25 @@ curl "http://<PI_IP>:5000/data/range?start=2025-11-14%2010:00:00&end=2025-11-14%
 
 ## Troubleshooting
 
-### "no dht sensor, generated data"
+### "No hardware sensors detected, using simulated sensor"
+**Cause:** System couldn't detect any connected sensors (DHT22, AHT20, or BME280)
+
 **Fix:**
 ```bash
-uv sync --group client --extra pi-hardware  # Ensure hardware libs installed
-# Check wiring: VCC→3.3V, GND→GND, Data→GPIO4
+# Ensure hardware libraries are installed
+uv sync --group client --extra pi-hardware
+
+# Check wiring matches sensor type:
+# DHT22: VCC→3.3V, GND→GND, Data→GPIO4
+# AHT20/BME280: VCC→3.3V, GND→GND, SDA→GPIO2, SCL→GPIO3
+
+# For I2C sensors, verify they appear on the bus
+i2cdetect -y 1
+# AHT20 should show at address 0x38
+# BME280 should show at address 0x76 or 0x77
+
+# Force specific sensor type if auto-detect fails
+nano config.ini  # Set sensor_type = "DHT22" or "AHT20" or "BME280"
 ```
 
 ### Dashboard can't reach Pi
@@ -388,6 +441,11 @@ loginterval_s = 10                    # Seconds between sensor reads
 device_name = Room 307                # Display name
 api_port = 5000                       # API server port
 outputfile = templog.db               # Local SQLite database
+sensor_type = AUTO                    # AUTO, DHT22, AHT20, BME280, or SIMULATED
+max_temp_delta_c = 3.0                # Spike filter: reject readings >3°C from last valid
+max_humidity_delta_pct = 10.0         # Spike filter: reject readings >10% from last valid
+temp_offset_c = 0.0                   # Calibration offset for temperature
+humidity_offset_pct = 0.0             # Calibration offset for humidity
 ```
 
 ### Server (`server/config_server.ini`)
