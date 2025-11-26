@@ -779,12 +779,31 @@ current_readings = Div(text="<h3>Loading...</h3>", sizing_mode="stretch_width")
 
 # Sensor selection dropdown
 sensor_names = [cfg["name"] for cfg in sensor_configs]
+
+# Default to first sensor
+initial_sensor = current_sensor_state["name"] if current_sensor_state["name"] else (sensor_names[0] if sensor_names else "No sensors")
+
 sensor_selector = Select(
     title="Select Sensor:",
-    value=current_sensor_state["name"],
+    value=initial_sensor,
     options=sensor_names,
     width=300
 )
+
+# JavaScript callback to save sensor selection to localStorage when changed
+save_sensor_js = CustomJS(args=dict(sensor_selector=sensor_selector), code="""
+    // Save the selected sensor to localStorage whenever it changes
+    localStorage.setItem('selected_sensor', sensor_selector.value);
+""")
+
+# JavaScript callback to restore sensor selection from localStorage on page load
+restore_sensor_js = CustomJS(args=dict(sensor_selector=sensor_selector, sensor_names=sensor_names), code="""
+    // Try to restore the last selected sensor from localStorage
+    const stored_sensor = localStorage.getItem('selected_sensor');
+    if (stored_sensor && sensor_names.includes(stored_sensor)) {
+        sensor_selector.value = stored_sensor;
+    }
+""")
 
 # Time window buttons
 btn_10min = Button(label="10 min", button_type="default", width=100)
@@ -829,8 +848,10 @@ temp_window_spinner = Spinner(title="Temperature range (°C)", low=MIN_TEMP_WIND
 hum_window_spinner = Spinner(title="Humidity range (%)", low=MIN_HUM_WINDOW,
                             high=MAX_HUM_WINDOW, step=1,
                             value=hum_window_state["value"], width=120)
-# temp_window_range_display = Div(text="", width=20, height=40)
-# hum_window_range_display = Div(text="", width=20, height=40)
+
+# Auto-fit toggles for Y-axis
+temp_auto_toggle = Toggle(label="Auto-fit", button_type="success", active=True, width=80)
+hum_auto_toggle = Toggle(label="Auto-fit", button_type="success", active=True, width=80)
 
 window_control_state = {
     "temp_syncing": False,
@@ -1054,7 +1075,9 @@ def _on_temp_window_change(attr, old, new):
         return
     value = _coerce_window(new, temp_window_state["value"], MIN_TEMP_WINDOW)
     temp_window_state["value"] = value
-    temp_window_state["auto"] = True
+    # User manually adjusted spinner - disable auto mode
+    temp_window_state["auto"] = False
+    temp_auto_toggle.active = False  # Sync toggle state
     temp_window_state["manual_center"] = None
     temp_window_state["pending"] = 2
     window_control_state["temp_syncing"] = True
@@ -1062,7 +1085,7 @@ def _on_temp_window_change(attr, old, new):
         temp_window_spinner.value = value
     finally:
         window_control_state["temp_syncing"] = False
-    _set_temp_y_range(latest_values["temp"], value, record_auto=True)
+    _set_temp_y_range(latest_values["temp"], value, record_auto=False)
     # _update_window_displays()
 
 
@@ -1071,7 +1094,9 @@ def _on_hum_window_change(attr, old, new):
         return
     value = _coerce_window(new, hum_window_state["value"], MIN_HUM_WINDOW, MAX_HUM_WINDOW)
     hum_window_state["value"] = value
-    hum_window_state["auto"] = True
+    # User manually adjusted spinner - disable auto mode
+    hum_window_state["auto"] = False
+    hum_auto_toggle.active = False  # Sync toggle state
     hum_window_state["manual_center"] = None
     hum_window_state["pending"] = 2
     window_control_state["hum_syncing"] = True
@@ -1079,7 +1104,7 @@ def _on_hum_window_change(attr, old, new):
         hum_window_spinner.value = value
     finally:
         window_control_state["hum_syncing"] = False
-    _set_hum_y_range(latest_values["hum"], value, record_auto=True)
+    _set_hum_y_range(latest_values["hum"], value, record_auto=False)
     # _update_window_displays()
 
 
@@ -1098,8 +1123,24 @@ btn_24h.on_click(lambda: (set_button_active(btn_24h), update_time_window(1440)))
 btn_1week.on_click(lambda: (set_button_active(btn_1week), update_time_window(10080)))
 btn_all.on_click(lambda: (set_button_active(btn_all), update_time_window(None)))
 
+def on_temp_auto_toggle(attr, old, new):
+    """Handle temperature auto-fit toggle."""
+    temp_window_state["auto"] = bool(new)
+    if new:
+        # Re-enable auto mode - trigger immediate update
+        update_view()
+
+def on_hum_auto_toggle(attr, old, new):
+    """Handle humidity auto-fit toggle."""
+    hum_window_state["auto"] = bool(new)
+    if new:
+        # Re-enable auto mode - trigger immediate update
+        update_view()
+
 temp_window_spinner.on_change("value", _on_temp_window_change)
 hum_window_spinner.on_change("value", _on_hum_window_change)
+temp_auto_toggle.on_change("active", on_temp_auto_toggle)
+hum_auto_toggle.on_change("active", on_hum_auto_toggle)
 
 # Initialize window displays with current values
 # _update_window_displays()
@@ -1171,6 +1212,8 @@ def on_sensor_change(attr, old, new):
 
 
 sensor_selector.on_change("value", on_sensor_change)
+# Also save to localStorage on client-side when changed
+sensor_selector.js_on_change("value", save_sensor_js)
 
 
 def fetch_initial_data(sensor_name):
@@ -1385,10 +1428,12 @@ def update_view():
         latest_values["temp"] = latest_temp_ma
         latest_values["hum"] = latest_hum_ma
 
-        if temp_window_state["auto"] and _should_auto_update_temp(latest_temp_ma):
-            _set_temp_y_range(latest_temp_ma, temp_window_state["value"], record_auto=True)
-        if hum_window_state["auto"] and _should_auto_update_hum(latest_hum_ma):
-            _set_hum_y_range(latest_hum_ma, hum_window_state["value"], record_auto=True)
+        # AUTO Y-AXIS RANGING: Fit to visible data instead of just latest value
+        # This ensures extreme values (like temperature drops) are visible
+        if temp_window_state["auto"] or hum_window_state["auto"]:
+            # Calculate min/max of VISIBLE data (will be used after X-range is set)
+            # We'll recalculate after setting X-range to get accurate visible bounds
+            pass  # Moved to after X-range update below
 
         # Track current data extents
         current_window["data_min"] = prepared["time"][0] if len(prepared["time"]) > 0 else None
@@ -1413,6 +1458,45 @@ def update_view():
                 start_ms = prepared["time"][0]
                 end_ms = latest_time_ms
                 set_programmatic_range(start_ms, end_ms)
+
+            # AUTO Y-AXIS FITTING: After setting X-range, fit Y-axis to visible data
+            # Get the current X-range (time window)
+            x_start = temp_plot.x_range.start
+            x_end = temp_plot.x_range.end
+
+            # Find indices of data within the visible time window
+            times = np.array(prepared["time"])
+            temps = np.array(prepared["temperature"])
+            hums = np.array(prepared["humidity"])
+
+            visible_mask = (times >= x_start) & (times <= x_end)
+            visible_temps = temps[visible_mask]
+            visible_hums = hums[visible_mask]
+
+            # Filter out NaN values
+            valid_temps = visible_temps[~np.isnan(visible_temps)]
+            valid_hums = visible_hums[~np.isnan(visible_hums)]
+
+            # Update Y-axis ranges if auto mode is enabled
+            if temp_window_state["auto"] and len(valid_temps) > 0:
+                temp_min = np.min(valid_temps)
+                temp_max = np.max(valid_temps)
+                temp_range = temp_max - temp_min
+                # Add 10% padding on each side
+                temp_padding = max(temp_range * 0.1, 0.5)  # At least 0.5°C padding
+                temp_plot.y_range.start = temp_min - temp_padding
+                temp_plot.y_range.end = temp_max + temp_padding
+                temp_window_state["last_auto_update"] = time.monotonic()
+
+            if hum_window_state["auto"] and len(valid_hums) > 0:
+                hum_min = np.min(valid_hums)
+                hum_max = np.max(valid_hums)
+                hum_range = hum_max - hum_min
+                # Add 10% padding on each side
+                hum_padding = max(hum_range * 0.1, 2.0)  # At least 2% padding
+                humidity_plot.y_range.start = max(0.0, hum_min - hum_padding)
+                humidity_plot.y_range.end = min(100.0, hum_max + hum_padding)
+                hum_window_state["last_auto_update"] = time.monotonic()
 
         # Sync toggle state with auto-range flag
         if not current_window["auto_range"] and auto_scroll_toggle.active:
@@ -1615,10 +1699,8 @@ window_control_row = row(
 )
 display_range_row = row(
     ma_spinner,
-    temp_window_spinner,
-    #temp_window_range_display,
-    hum_window_spinner,
-    #hum_window_range_display,
+    column(temp_window_spinner, temp_auto_toggle),
+    column(hum_window_spinner, hum_auto_toggle),
     data_display_select,  # Dropdown to select data display mode
     sizing_mode="scale_width"
 )
@@ -1645,3 +1727,6 @@ layout = column(
 
 curdoc().add_root(layout)
 curdoc().title = "Multi-Sensor Temperature Monitor"
+
+# Restore saved sensor selection from localStorage on page load
+curdoc().js_on_event('document_ready', restore_sensor_js)
