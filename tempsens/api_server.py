@@ -56,9 +56,19 @@ def get_device_info():
     boot_time = datetime.fromtimestamp(psutil.boot_time())
     uptime_seconds = (datetime.now() - boot_time).total_seconds()
 
-    # Get sensor type from config
+    # Get sensor type from config and actual detected sensor
     config = io_funcs.fetch_config()
-    sensor_type = config["DEFAULT"].get("sensor_type", "AUTO")
+    sensor_type_config = config["DEFAULT"].get("sensor_type", "AUTO")
+
+    # Get actual sensor name from the running sensor instance
+    sensor = io_funcs._get_sensor()
+    sensor_type_actual = sensor.name
+
+    # Format as "config | actual" if config is AUTO, otherwise just show the actual sensor
+    if sensor_type_config.upper() == "AUTO":
+        sensor_type = f"{sensor_type_config} | {sensor_type_actual}"
+    else:
+        sensor_type = sensor_type_actual
 
     return {
         "device_name": device_name,
@@ -106,9 +116,19 @@ def get_system_metrics():
     except Exception:
         record_count = 0
 
-    # Get sensor type from config
+    # Get sensor type from config and actual detected sensor
     config = io_funcs.fetch_config()
-    sensor_type = config["DEFAULT"].get("sensor_type", "AUTO")
+    sensor_type_config = config["DEFAULT"].get("sensor_type", "AUTO")
+
+    # Get actual sensor name from the running sensor instance
+    sensor = io_funcs._get_sensor()
+    sensor_type_actual = sensor.name
+
+    # Format as "config | actual" if config is AUTO, otherwise just show the actual sensor
+    if sensor_type_config.upper() == "AUTO":
+        sensor_type = f"{sensor_type_config} | {sensor_type_actual}"
+    else:
+        sensor_type = sensor_type_actual
 
     metrics = {
         "cpu_percent": round(cpu_percent, 1),
@@ -262,11 +282,24 @@ async def get_config():
     config = io_funcs.fetch_config()
     device_info = get_device_info()
 
+    # Get sensor type from config and actual detected sensor
+    sensor_type_config = config["DEFAULT"].get("sensor_type", "AUTO")
+
+    # Get actual sensor name from the running sensor instance
+    sensor = io_funcs._get_sensor()
+    sensor_type_actual = sensor.name
+
+    # Format as "config | actual" if config is AUTO, otherwise just show the actual sensor
+    if sensor_type_config.upper() == "AUTO":
+        sensor_type = f"{sensor_type_config} | {sensor_type_actual}"
+    else:
+        sensor_type = sensor_type_actual
+
     return {
         "device_name": device_info["device_name"],
         "log_interval_s": float(config["DEFAULT"]["loginterval_s"]),
         "output_file": config["DEFAULT"]["outputfile"],
-        "sensor_type": config["DEFAULT"].get("sensor_type", "AUTO")
+        "sensor_type": sensor_type
     }
 
 
