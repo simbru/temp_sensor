@@ -44,6 +44,8 @@ local-dev = [
 # Pi-specific hardware (must be installed separately on Raspberry Pi)
 # Install with: uv sync --extra pi-hardware
 pi-hardware = [
+    # CircuitPython compatibility layer (provides board module)
+    "adafruit-blinka; sys_platform == 'linux'",
     # DHT22 sensor support
     "adafruit-circuitpython-dht; sys_platform == 'linux'",
     "RPi.GPIO; sys_platform == 'linux'",
