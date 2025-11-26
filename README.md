@@ -18,7 +18,7 @@ A distributed temperature and humidity monitoring system for Raspberry Pi with D
 
 ```powershell
 # Clone and install
-git clone <your-repo-url> temp_sensor
+git clone https://github.com/simbru/temp_sensor temp_sensor
 cd temp_sensor
 irm https://astral.sh/uv/install.ps1 | iex
 uv sync --group server
