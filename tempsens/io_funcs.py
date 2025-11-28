@@ -25,7 +25,9 @@ DEFAULT_CONFIG_VALUES = {
     "max_humidity_delta_pct": "10.0",
     "temp_offset_c": "0.0",
     "humidity_offset_pct": "0.0",
-    "sensor_type": "AUTO",  # Options: AUTO, DHT22, AHT20, BME280, SIMULATED
+    "sensor_type": "AUTO",  # Options: AUTO, DHT22, AHT20, BME280, ENVIROPLUS, SIMULATED
+    "enable_lcd_display": "False",  # Enable LCD display for Enviro+ boards
+    "write_log_file": "True",  # Write logs to file (can disable for systemd journal only)
 }
 
 def gen_default_config(config_loc=CONFIGPATH, force=False):
