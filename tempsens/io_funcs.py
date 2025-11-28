@@ -323,20 +323,26 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
         max_temp_delta = float(CONFIG["DEFAULT"]["max_temp_delta_c"])
         max_humidity_delta = float(CONFIG["DEFAULT"]["max_humidity_delta_pct"])
 
-        # Only apply spike detection after warmup period
-        if _successful_reading_count >= SPIKE_DETECTION_WARMUP_SAMPLES:
-            # Check if we have a previous valid reading to compare against
-            if last_valid_reading["temperature"] is not None and last_valid_reading["humidity"] is not None:
-                temp_delta = abs(temperature - last_valid_reading["temperature"])
-                humidity_delta = abs(humidity - last_valid_reading["humidity"])
+        # During warmup period, increment counter but DON'T write to database
+        # This prevents unstable initial readings from polluting the data
+        if _successful_reading_count < SPIKE_DETECTION_WARMUP_SAMPLES:
+            _successful_reading_count += 1
+            print(f"[{format_timestamp(timestamp)}] Warmup reading {_successful_reading_count}/{SPIKE_DETECTION_WARMUP_SAMPLES} - skipping write to database")
+            # Schedule next run and return early - don't write warmup readings
+            schedule.enter(LOGINTERVAL, 0, log_data)
+            return None
 
-                if temp_delta > max_temp_delta or humidity_delta > max_humidity_delta:
-                    print(f"[{format_timestamp(timestamp)}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading")
-                    # Skip this reading entirely - don't write to database
-                    temperature, humidity = None, None
-                    pressure, light, noise = None, None, None
-        else:
-            print(f"[{format_timestamp(timestamp)}] Warmup reading {_successful_reading_count + 1}/{SPIKE_DETECTION_WARMUP_SAMPLES} - spike detection disabled")
+        # After warmup: apply spike detection
+        # Check if we have a previous valid reading to compare against
+        if last_valid_reading["temperature"] is not None and last_valid_reading["humidity"] is not None:
+            temp_delta = abs(temperature - last_valid_reading["temperature"])
+            humidity_delta = abs(humidity - last_valid_reading["humidity"])
+
+            if temp_delta > max_temp_delta or humidity_delta > max_humidity_delta:
+                print(f"[{format_timestamp(timestamp)}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading")
+                # Skip this reading entirely - don't write to database
+                temperature, humidity = None, None
+                pressure, light, noise = None, None, None
 
     # Skip writing failed reads or spike-filtered reads to save storage
     # Server-side dashboard will insert NaN for visualization where gaps exist
@@ -346,8 +352,6 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
         # Update last valid reading after successful write
         last_valid_reading["temperature"] = temperature
         last_valid_reading["humidity"] = humidity
-        # Increment successful reading counter for warmup tracking
-        _successful_reading_count += 1
 
     # Schedule the next run
     schedule.enter(LOGINTERVAL, 0, log_data)

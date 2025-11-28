@@ -65,8 +65,8 @@ class EnviroLCDDisplay:
         # Position for the top text bar (below which the graph is drawn)
         self.top_bar_height = 25
 
-        # Display modes - cycle through each sensor
-        self.variables = ["temperature", "pressure", "humidity", "light"]
+        # Display modes - dashboard first, then cycle through each sensor graph
+        self.modes = ["dashboard", "temperature", "pressure", "humidity", "light"]
         self.units = {
             "temperature": "°C",
             "pressure": "hPa",
@@ -133,10 +133,10 @@ class EnviroLCDDisplay:
             # Detect proximity crossing threshold with debounce
             if proximity > self.proximity_threshold and time.time() - self.last_page_time > self.proximity_debounce:
                 self.current_mode += 1
-                self.current_mode %= len(self.variables)
+                self.current_mode %= len(self.modes)
                 self.last_page_time = time.time()
-                current_var = self.variables[self.current_mode]
-                print(f"Switched to mode: {current_var}")
+                current_mode_name = self.modes[self.current_mode]
+                print(f"Switched to mode: {current_mode_name}")
                 return True
 
             return False
@@ -216,7 +216,83 @@ class EnviroLCDDisplay:
         # Write the text at the top in cyan (on black background)
         draw.text((0, 0), message, font=self.font, fill=self.text_color)
 
+        # Draw min/max labels on the right edge of the graph area
+        # These show the actual value range the colors represent
+        max_label = f"{vmax:.1f}"
+        min_label = f"{vmin:.1f}"
+        # Position labels at top and bottom of graph area, right-aligned
+        draw.text((self.width - 35, self.top_bar_height + 2), max_label, 
+                  font=self.font_sm, fill=self.accent_color)
+        draw.text((self.width - 35, self.height - 14), min_label, 
+                  font=self.font_sm, fill=self.accent_color)
+
         # Display the image
+        self.display.display(img)
+
+    def draw_dashboard(self, temperature: Optional[float], humidity: Optional[float],
+                       pressure: Optional[float] = None, light: Optional[float] = None):
+        """
+        Draw a mini dashboard showing all sensor readings at once.
+        
+        Layout (160x80 display):
+        - Temperature and Humidity on left side (large values)
+        - Pressure and Light on right side (smaller values)
+        
+        Args:
+            temperature: Temperature in Celsius
+            humidity: Humidity percentage
+            pressure: Atmospheric pressure in hPa
+            light: Light level in lux
+        """
+        img = Image.new("RGB", (self.width, self.height), color=self.bg_color)
+        draw = ImageDraw.Draw(img)
+
+        # Left column - Temperature and Humidity (main readings)
+        # Temperature - top left, large
+        if temperature is not None:
+            temp_str = f"{temperature:.1f}°"
+            draw.text((2, 2), temp_str, font=self.font, fill=self.text_color)
+        else:
+            draw.text((2, 2), "--°", font=self.font, fill=self.accent_color)
+
+        # Humidity - bottom left, large
+        if humidity is not None:
+            hum_str = f"{humidity:.0f}%"
+            draw.text((2, 28), hum_str, font=self.font, fill=self.text_color)
+        else:
+            draw.text((2, 28), "--%", font=self.font, fill=self.accent_color)
+
+        # Right column - Pressure and Light (secondary readings)
+        # Pressure - top right
+        if pressure is not None:
+            pres_str = f"{pressure:.0f}"
+            draw.text((85, 5), pres_str, font=self.font_lg, fill=self.text_color)
+            draw.text((85, 20), "hPa", font=self.font_sm, fill=self.accent_color)
+        else:
+            draw.text((85, 5), "----", font=self.font_lg, fill=self.accent_color)
+            draw.text((85, 20), "hPa", font=self.font_sm, fill=self.accent_color)
+
+        # Light - bottom right
+        if light is not None:
+            if light >= 1000:
+                light_str = f"{light/1000:.1f}k"
+            else:
+                light_str = f"{light:.0f}"
+            draw.text((85, 38), light_str, font=self.font_lg, fill=self.text_color)
+            draw.text((85, 53), "lux", font=self.font_sm, fill=self.accent_color)
+        else:
+            draw.text((85, 38), "----", font=self.font_lg, fill=self.accent_color)
+            draw.text((85, 53), "lux", font=self.font_sm, fill=self.accent_color)
+
+        # Draw a subtle vertical divider
+        for y in range(5, self.height - 5):
+            if y % 3 == 0:  # Dotted line
+                draw.point((80, y), fill=self.accent_color)
+
+        # Draw a subtle bottom indicator showing this is dashboard mode
+        draw.text((self.width // 2 - 20, self.height - 12), "[ALL]", 
+                  font=self.font_sm, fill=self.accent_color)
+
         self.display.display(img)
 
     def update_display(self, temperature: Optional[float], humidity: Optional[float],
@@ -233,22 +309,29 @@ class EnviroLCDDisplay:
         # Add readings to history
         self.add_reading(temperature, humidity, pressure, light)
 
-        # Get current variable and its data
-        variable = self.variables[self.current_mode]
-        unit = self.units[variable]
+        # Get current mode
+        mode = self.modes[self.current_mode]
+
+        # Dashboard mode - show all sensors
+        if mode == "dashboard":
+            self.draw_dashboard(temperature, humidity, pressure, light)
+            return
+
+        # Graph modes - show individual sensor with graph
+        unit = self.units[mode]
 
         # Get the current value for the active mode
-        if variable == "temperature" and temperature is not None:
-            self.display_text(variable, temperature, unit)
-        elif variable == "humidity" and humidity is not None:
-            self.display_text(variable, humidity, unit)
-        elif variable == "pressure" and pressure is not None:
-            self.display_text(variable, pressure, unit)
-        elif variable == "light" and light is not None:
-            self.display_text(variable, light, unit)
+        if mode == "temperature" and temperature is not None:
+            self.display_text(mode, temperature, unit)
+        elif mode == "humidity" and humidity is not None:
+            self.display_text(mode, humidity, unit)
+        elif mode == "pressure" and pressure is not None:
+            self.display_text(mode, pressure, unit)
+        elif mode == "light" and light is not None:
+            self.display_text(mode, light, unit)
         else:
             # No data available - show placeholder
-            self._show_no_data(variable, unit)
+            self._show_no_data(mode, unit)
 
     def _show_no_data(self, variable: str, unit: str):
         """Show a 'no data' screen for the current variable."""
@@ -294,8 +377,11 @@ def run_lcd_display_loop(update_interval_s: float = 0.25):
 
     print("LCD display initialized successfully")
     print("Cover the proximity sensor to cycle between modes:")
-    for i, var in enumerate(display.variables):
-        print(f"  {i + 1}. {var.capitalize()} ({display.units[var]})")
+    for i, mode in enumerate(display.modes):
+        if mode == "dashboard":
+            print(f"  {i + 1}. Dashboard (all sensors)")
+        else:
+            print(f"  {i + 1}. {mode.capitalize()} graph ({display.units[mode]})")
 
     # Read from database instead of accessing sensor directly to avoid I2C conflicts
     print("Reading sensor data from database to avoid I2C bus conflicts")
