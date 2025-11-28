@@ -39,6 +39,10 @@ local-dev = [
     "bokeh",
     "requests>=2.31.0",
 ]
+deployment = [
+    # Deployment automation dependencies (dev machine only)
+    "ansible>=8.0.0",
+]
 
 [project.optional-dependencies]
 # Pi-specific hardware (must be installed separately on Raspberry Pi)
