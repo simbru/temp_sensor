@@ -75,6 +75,9 @@ class EnviroLCDDisplay:
         }
         self.current_mode = 0
 
+        # List of sensor variables (for graph modes, excluding dashboard)
+        self.variables = ["temperature", "pressure", "humidity", "light"]
+
         # Data history for each variable (for graphing)
         self.values: Dict[str, List[float]] = {}
         for v in self.variables:
