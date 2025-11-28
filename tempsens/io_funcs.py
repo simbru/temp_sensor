@@ -180,13 +180,17 @@ def init_database(filename=None, use_wal=None):
         cursor.execute("PRAGMA temp_store=MEMORY")     # Use RAM for temporary tables
         cursor.execute("PRAGMA mmap_size=268435456")   # 256MB memory-mapped I/O for faster reads
 
-        # Create table if it doesn't exist
+        # Create table with extended sensor support (pressure, light, noise)
+        # Columns are nullable - only store what the sensor provides
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sensor_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp INTEGER NOT NULL UNIQUE,
                 temperature REAL,
-                humidity REAL
+                humidity REAL,
+                pressure REAL,
+                light REAL,
+                noise REAL
             )
         """)
 
@@ -198,8 +202,18 @@ def init_database(filename=None, use_wal=None):
 
         conn.commit()
 
-def write_data(timestamp, temperature, humidity, filename=None):
-    """Write sensor reading to SQLite database."""
+def write_data(timestamp, temperature, humidity, filename=None, pressure=None, light=None, noise=None):
+    """Write sensor reading to SQLite database.
+
+    Args:
+        timestamp: Integer timestamp in milliseconds since epoch
+        temperature: Temperature in Celsius (or None)
+        humidity: Humidity percentage (or None)
+        filename: Path to database file (uses config default if None)
+        pressure: Atmospheric pressure in hPa (optional, for Enviro+/BME280)
+        light: Light level in lux (optional, for Enviro+)
+        noise: Noise level in dBA (optional, for Enviro+)
+    """
     if filename is None:
         filename = CONFIG["DEFAULT"]["outputfile"]
 
@@ -217,13 +231,18 @@ def write_data(timestamp, temperature, humidity, filename=None):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp INTEGER NOT NULL UNIQUE,
                 temperature REAL,
-                humidity REAL
+                humidity REAL,
+                pressure REAL,
+                light REAL,
+                noise REAL
             )
         """)
 
         cursor.execute(
-            "INSERT OR IGNORE INTO sensor_data (timestamp, temperature, humidity) VALUES (?, ?, ?)",
-            (timestamp, temperature, humidity)
+            """INSERT OR IGNORE INTO sensor_data
+               (timestamp, temperature, humidity, pressure, light, noise)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (timestamp, temperature, humidity, pressure, light, noise)
         )
         conn.commit()
 
@@ -240,10 +259,24 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
     retry_count = 0
     max_retries = 5
     temperature, humidity = None, None
+    pressure, light, noise = None, None, None
+
+    # Check if sensor supports extended interface (Enviro+, etc.)
+    has_extended_data = hasattr(sensor, 'read_extended')
 
     while good_read is False and retry_count < max_retries:
         try:
-            temperature, humidity = sensor.read()
+            if has_extended_data:
+                # Use extended interface for multi-sensor devices
+                data = sensor.read_extended()
+                temperature = data.get("temperature")
+                humidity = data.get("humidity")
+                pressure = data.get("pressure")
+                light = data.get("light")
+                noise = data.get("noise")
+            else:
+                # Standard temp/humidity only
+                temperature, humidity = sensor.read()
             good_read = True
         except RuntimeError as e:
             retry_count += 1
@@ -253,6 +286,7 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
             elif retry_count >= max_retries:
                 print(f"[{format_timestamp(timestamp)}] ERROR: Failed to read sensor after {max_retries} attempts")
                 temperature, humidity = None, None
+                pressure, light, noise = None, None, None
             time.sleep(0.1)  # Small delay between retries
             continue
 
@@ -290,11 +324,12 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
                 print(f"[{format_timestamp(timestamp)}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading")
                 # Skip this reading entirely - don't write to database
                 temperature, humidity = None, None
+                pressure, light, noise = None, None, None
 
     # Skip writing failed reads or spike-filtered reads to save storage
     # Server-side dashboard will insert NaN for visualization where gaps exist
     if temperature is not None and humidity is not None:
-        write_data(timestamp, temperature, humidity, filename)
+        write_data(timestamp, temperature, humidity, filename, pressure, light, noise)
         print_to_console(timestamp, temperature, humidity)
         # Update last valid reading after successful write
         last_valid_reading["temperature"] = temperature
@@ -316,7 +351,8 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
         limit: If specified, return only the last N readings (ignores time filters)
 
     Returns:
-        Dictionary with keys 'time' (INTEGER milliseconds), 'temperature', 'humidity'
+        Dictionary with keys 'time' (INTEGER milliseconds), 'temperature', 'humidity',
+        and optionally 'pressure', 'light', 'noise' if available from sensor
     """
     with sqlite3.connect(filename) as conn:
         cursor = conn.cursor()
@@ -325,9 +361,9 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
         if limit is not None and not start_time and not end_time:
             # Original behavior: get last N readings regardless of range
             query = """
-                SELECT timestamp, temperature, humidity
+                SELECT timestamp, temperature, humidity, pressure, light, noise
                 FROM (
-                    SELECT timestamp, temperature, humidity
+                    SELECT timestamp, temperature, humidity, pressure, light, noise
                     FROM sensor_data
                     ORDER BY timestamp DESC
                     LIMIT ?
@@ -347,7 +383,7 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
                 params.append(end_time)
 
             where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
-            query = f"SELECT timestamp, temperature, humidity FROM sensor_data{where_clause} ORDER BY timestamp"
+            query = f"SELECT timestamp, temperature, humidity, pressure, light, noise FROM sensor_data{where_clause} ORDER BY timestamp"
 
             if limit is not None:
                 query += " LIMIT ?"
@@ -358,15 +394,28 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
         rows = cursor.fetchall()
 
     if not rows:
-        return {"time": [], "temperature": [], "humidity": []}
+        return {
+            "time": [],
+            "temperature": [],
+            "humidity": [],
+            "pressure": [],
+            "light": [],
+            "noise": []
+        }
 
     # Convert to lists (timestamps are already INTEGER milliseconds from database)
     times_ms = [row[0] for row in rows]
     temps = [row[1] for row in rows]
     hums = [row[2] for row in rows]
+    pressures = [row[3] for row in rows]
+    lights = [row[4] for row in rows]
+    noises = [row[5] for row in rows]
 
     return {
         "time": times_ms,
         "temperature": temps,
-        "humidity": hums
+        "humidity": hums,
+        "pressure": pressures,
+        "light": lights,
+        "noise": noises
     }

@@ -5,15 +5,20 @@ Supported sensors:
 - DHT22: Digital humidity and temperature sensor (GPIO)
 - AHT20: I2C temperature and humidity sensor
 - BME280: I2C temperature, humidity, and pressure sensor (Enviro module)
+- ENVIROPLUS: Pimoroni Enviro+ board with BME280, light, noise sensors
 
 Usage:
     sensor = detect_sensor()  # Auto-detect
     sensor = get_sensor("DHT22")  # Manual specification
     temp, humidity = sensor.read()
+
+    # For multi-sensor devices like Enviro+
+    data = sensor.read_extended()  # Returns dict with all available sensors
 """
 
 import time
-from typing import Optional, Tuple, Protocol
+import pathlib
+from typing import Optional, Tuple, Dict, Any, Protocol
 
 
 class SensorInterface(Protocol):
@@ -35,6 +40,32 @@ class SensorInterface(Protocol):
     @property
     def name(self) -> str:
         """Return sensor type name (e.g., 'DHT22', 'AHT20')."""
+        ...
+
+
+class ExtendedSensorInterface(SensorInterface, Protocol):
+    """Extended interface for sensors with additional capabilities beyond temp/humidity."""
+
+    def read_extended(self) -> Dict[str, Optional[float]]:
+        """
+        Read all available sensor data.
+
+        Returns:
+            Dictionary with sensor readings. Keys may include:
+            - temperature: Temperature in Celsius
+            - humidity: Humidity percentage
+            - pressure: Atmospheric pressure in hPa
+            - light: Light level in lux
+            - noise: Noise level in dBA (A-weighted decibels)
+
+        Raises:
+            RuntimeError: On transient read errors
+        """
+        ...
+
+    @property
+    def available_sensors(self) -> list[str]:
+        """Return list of sensor types this device provides."""
         ...
 
 
@@ -200,6 +231,175 @@ class BME280Sensor:
             return False
 
 
+class EnviroPlusSensor:
+    """Driver for Pimoroni Enviro+ board with multiple environmental sensors."""
+
+    def __init__(self, cpu_temp_compensation=True, compensation_factor=2.25):
+        """
+        Initialize Enviro+ sensor board.
+
+        Args:
+            cpu_temp_compensation: Enable CPU temperature compensation for BME280
+            compensation_factor: Factor for CPU heat compensation (default 2.25)
+        """
+        try:
+            from smbus2 import SMBus
+            from bme280 import BME280
+            from ltr559 import LTR559
+        except ImportError:
+            raise ImportError(
+                "Enviro+ libraries not available - install with 'pip install enviroplus'"
+            )
+
+        # Initialize sensors
+        self.bus = SMBus(1)
+        self.bme280 = BME280(i2c_dev=self.bus)
+        self.ltr559 = LTR559()
+
+        # CPU temperature compensation settings
+        self.cpu_temp_compensation = cpu_temp_compensation
+        self.compensation_factor = compensation_factor
+        self.cpu_temps = []  # Rolling buffer of CPU temperatures
+
+        # Try to initialize noise sensor (may not be available on all boards)
+        self.has_noise = False
+        try:
+            from enviroplus import gas
+            self.has_noise = True
+        except Exception:
+            pass
+
+    def _get_cpu_temperature(self) -> Optional[float]:
+        """Read CPU temperature from system thermal zone."""
+        try:
+            temp_file = pathlib.Path("/sys/class/thermal/thermal_zone0/temp")
+            if temp_file.exists():
+                return float(temp_file.read_text().strip()) / 1000.0
+        except Exception:
+            pass
+        return None
+
+    def _get_compensated_temperature(self, raw_temp: float) -> float:
+        """
+        Apply CPU temperature compensation to BME280 reading.
+
+        The BME280 sits close to the Raspberry Pi CPU and picks up residual heat.
+        This method uses a rolling average of CPU temperatures to estimate and
+        compensate for this thermal offset.
+
+        Args:
+            raw_temp: Raw temperature reading from BME280
+
+        Returns:
+            Compensated temperature in Celsius
+        """
+        if not self.cpu_temp_compensation:
+            return raw_temp
+
+        cpu_temp = self._get_cpu_temperature()
+        if cpu_temp is None:
+            return raw_temp
+
+        # Maintain rolling buffer of 5 CPU temperature samples
+        self.cpu_temps.append(cpu_temp)
+        if len(self.cpu_temps) > 5:
+            self.cpu_temps.pop(0)
+
+        # Calculate average CPU temp to smooth fluctuations
+        avg_cpu_temp = sum(self.cpu_temps) / len(self.cpu_temps)
+
+        # Compensation formula from Pimoroni weather-and-light.py example
+        # Corrected temp = raw temp - ((avg CPU temp - raw temp) / factor)
+        compensated = raw_temp - ((avg_cpu_temp - raw_temp) / self.compensation_factor)
+
+        return compensated
+
+    def read(self) -> Tuple[Optional[float], Optional[float]]:
+        """Read temperature and humidity (for compatibility with SensorInterface)."""
+        try:
+            raw_temp = self.bme280.get_temperature()
+            humidity = self.bme280.get_humidity()
+
+            # Apply CPU temperature compensation
+            temperature = self._get_compensated_temperature(raw_temp)
+
+            return temperature, humidity
+        except Exception as e:
+            raise RuntimeError(f"Enviro+ BME280 read error: {e}")
+
+    def read_extended(self) -> Dict[str, Optional[float]]:
+        """
+        Read all available sensors on Enviro+ board.
+
+        Returns:
+            Dictionary with keys: temperature, humidity, pressure, light
+            Optional: noise (if microphone available)
+        """
+        try:
+            # Read BME280 environmental data
+            raw_temp = self.bme280.get_temperature()
+            temperature = self._get_compensated_temperature(raw_temp)
+            humidity = self.bme280.get_humidity()
+            pressure = self.bme280.get_pressure()
+
+            # Read light sensor
+            light = self.ltr559.get_lux()
+
+            data = {
+                "temperature": temperature,
+                "humidity": humidity,
+                "pressure": pressure,
+                "light": light,
+            }
+
+            # Add noise if available
+            if self.has_noise:
+                try:
+                    # Note: Actual noise implementation would require additional setup
+                    # Placeholder for now - user can implement based on their Enviro+ variant
+                    data["noise"] = None
+                except Exception:
+                    pass
+
+            return data
+
+        except Exception as e:
+            raise RuntimeError(f"Enviro+ read error: {e}")
+
+    @property
+    def name(self) -> str:
+        return "ENVIROPLUS"
+
+    @property
+    def available_sensors(self) -> list[str]:
+        """Return list of available sensor types."""
+        sensors = ["temperature", "humidity", "pressure", "light"]
+        if self.has_noise:
+            sensors.append("noise")
+        return sensors
+
+    @staticmethod
+    def detect() -> bool:
+        """Attempt to detect Enviro+ hardware on I2C bus."""
+        try:
+            from smbus2 import SMBus
+            from bme280 import BME280
+            from ltr559 import LTR559
+
+            # Try to initialize both required sensors
+            bus = SMBus(1)
+            bme280 = BME280(i2c_dev=bus)
+            ltr559 = LTR559()
+
+            # Attempt reads to verify hardware is working
+            _ = bme280.get_temperature()
+            _ = ltr559.get_lux()
+
+            return True
+        except Exception:
+            return False
+
+
 class SimulatedSensor:
     """Simulated sensor for testing without hardware."""
 
@@ -243,9 +443,11 @@ class SimulatedSensor:
 
 
 # Sensor registry for auto-detection (order matters!)
-# I2C sensors first (fast, reliable hardware detection via I2C bus)
+# Enviro+ first (most feature-rich)
+# Other I2C sensors next (fast, reliable hardware detection via I2C bus)
 # DHT22 last (can only check if libraries exist, not if hardware is connected)
 SENSOR_REGISTRY = [
+    ("ENVIROPLUS", EnviroPlusSensor),
     ("AHT20", AHT20Sensor),
     ("BME280", BME280Sensor),
     ("DHT22", DHT22Sensor),

@@ -54,4 +54,15 @@ pi-hardware = [
     # BME280 sensor support (Enviro module)
     "adafruit-circuitpython-bme280; sys_platform == 'linux'",
 ]
+# Pimoroni Enviro+ support (BME280, light, noise sensors with LCD display)
+# Install with: uv sync --extra enviroplus
+enviroplus = [
+    "pimoroni-bme280; sys_platform == 'linux'",
+    "smbus2; sys_platform == 'linux'",
+    "ltr559; sys_platform == 'linux'",
+    "st7735; sys_platform == 'linux'",
+    "fonts; sys_platform == 'linux'",
+    "font-roboto; sys_platform == 'linux'",
+    "paho-mqtt; sys_platform == 'linux'",
+]
 

@@ -168,9 +168,16 @@ async def get_status():
         if data and len(data["time"]) > 0:
             last_reading = {
                 "timestamp": data["time"][0],
-                "temperature_c": float(data["temperature"][0]),
-                "humidity_pct": float(data["humidity"][0])
+                "temperature_c": safe_float(data["temperature"][0]),
+                "humidity_pct": safe_float(data["humidity"][0]),
             }
+            # Add extended sensor data if available
+            if data["pressure"][0] is not None:
+                last_reading["pressure_hpa"] = safe_float(data["pressure"][0])
+            if data["light"][0] is not None:
+                last_reading["light_lux"] = safe_float(data["light"][0])
+            if data["noise"][0] is not None:
+                last_reading["noise_dba"] = safe_float(data["noise"][0])
         else:
             last_reading = None
     except Exception as e:
@@ -184,12 +191,19 @@ async def get_status():
     elif consecutive_failures > 0:
         hardware_status = f"degraded ({consecutive_failures} failed reads)"
 
+    # Get available sensors from sensor instance
+    sensor = io_funcs._get_sensor()
+    available_sensors = ["temperature", "humidity"]  # All sensors have these
+    if hasattr(sensor, 'available_sensors'):
+        available_sensors = sensor.available_sensors
+
     return {
         **device_info,
         "last_reading": last_reading,
         "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"]),
         "hardware_status": hardware_status,
-        "consecutive_failures": consecutive_failures
+        "consecutive_failures": consecutive_failures,
+        "available_sensors": available_sensors
     }
 
 
@@ -204,23 +218,36 @@ async def get_latest_data(
         limit: Number of readings to return (1-50000, default 100)
 
     Returns:
-        JSON with arrays of time (INTEGER milliseconds since epoch), temperature (°C), and humidity (%)
+        JSON with arrays of time (INTEGER milliseconds since epoch), temperature (°C), humidity (%),
+        and optionally pressure (hPa), light (lux), noise (dBA) if available from sensor
     """
     try:
         data = io_funcs.fetch_log_data_range(limit=limit)
         device_info = get_device_info()
 
+        # Build response with available sensor data
+        response_data = {
+            "time": data["time"],
+            "temperature": [safe_float(t) for t in data["temperature"]],
+            "humidity": [safe_float(h) for h in data["humidity"]]
+        }
+
+        # Add extended sensor data if present (filter out all-None arrays)
+        if any(p is not None for p in data["pressure"]):
+            response_data["pressure"] = [safe_float(p) for p in data["pressure"]]
+        if any(light_val is not None for light_val in data["light"]):
+            response_data["light"] = [safe_float(light_val) for light_val in data["light"]]
+        if any(n is not None for n in data["noise"]):
+            response_data["noise"] = [safe_float(n) for n in data["noise"]]
+
         return {
             "device_name": device_info["device_name"],
             "device_ip": device_info["ip_address"],
-            "data": {
-                "time": data["time"],
-                "temperature": [safe_float(t) for t in data["temperature"]],
-                "humidity": [safe_float(h) for h in data["humidity"]]
-            },
+            "data": response_data,
             "metadata": {
                 "count": len(data["time"]),
-                "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"])
+                "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"]),
+                "available_sensors": list(response_data.keys())
             }
         }
     except Exception as e:
@@ -245,26 +272,39 @@ async def get_data_range(
         limit: Maximum number of readings to return (optional)
 
     Returns:
-        JSON with arrays of time (INTEGER milliseconds since epoch), temperature (°C), and humidity (%)
+        JSON with arrays of time (INTEGER milliseconds since epoch), temperature (°C), humidity (%),
+        and optionally pressure (hPa), light (lux), noise (dBA) if available from sensor
     """
     try:
         data = io_funcs.fetch_log_data_range(start_time=start, end_time=end, limit=limit)
         device_info = get_device_info()
 
+        # Build response with available sensor data
+        response_data = {
+            "time": data["time"],
+            "temperature": [safe_float(t) for t in data["temperature"]],
+            "humidity": [safe_float(h) for h in data["humidity"]]
+        }
+
+        # Add extended sensor data if present (filter out all-None arrays)
+        if any(p is not None for p in data["pressure"]):
+            response_data["pressure"] = [safe_float(p) for p in data["pressure"]]
+        if any(light_val is not None for light_val in data["light"]):
+            response_data["light"] = [safe_float(light_val) for light_val in data["light"]]
+        if any(n is not None for n in data["noise"]):
+            response_data["noise"] = [safe_float(n) for n in data["noise"]]
+
         return {
             "device_name": device_info["device_name"],
             "device_ip": device_info["ip_address"],
-            "data": {
-                "time": data["time"],
-                "temperature": [safe_float(t) for t in data["temperature"]],
-                "humidity": [safe_float(h) for h in data["humidity"]]
-            },
+            "data": response_data,
             "metadata": {
                 "count": len(data["time"]),
                 "start": start,
                 "end": end,
                 "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"]),
-                "limit": limit
+                "limit": limit,
+                "available_sensors": list(response_data.keys())
             }
         }
     except Exception as e:
