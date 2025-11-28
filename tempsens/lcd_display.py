@@ -3,16 +3,19 @@ LCD display module for Pimoroni Enviro+ board.
 Displays real-time sensor readings on ST7735 160x80 LCD screen with interactive modes.
 
 Modes:
-- Dashboard: All sensor readings at once (temperature, humidity, pressure, light)
-- Graph: Rolling graph of selected sensor (cycles: temp -> humidity -> pressure -> light)
+- Temperature: Color gradient graph with large value display
+- Humidity: Color gradient graph with large value display
+- Pressure: Color gradient graph with large value display
+- Light: Color gradient graph with large value display
 
 Switch modes by covering the proximity sensor (LTR559).
+
+Inspired by Pimoroni's all-in-one-enviro-mini.py and weather-and-light.py examples.
 """
 
 import time
-import socket
-from typing import Optional, List, Deque
-from collections import deque
+import colorsys
+from typing import Optional, List, Dict
 from PIL import Image, ImageDraw, ImageFont
 
 from . import io_funcs
@@ -21,13 +24,13 @@ from . import io_funcs
 class EnviroLCDDisplay:
     """LCD display manager for Pimoroni Enviro+ board with interactive modes."""
 
-    def __init__(self, rotation=90, graph_history_length=80):
+    def __init__(self, rotation=90, history_length=160):
         """
         Initialize the ST7735 LCD display.
 
         Args:
             rotation: Display rotation in degrees (0, 90, 180, 270)
-            graph_history_length: Number of data points to keep for graph mode
+            history_length: Number of data points to keep for graph mode (matches display width)
         """
         try:
             from st7735 import ST7735
@@ -39,8 +42,8 @@ class EnviroLCDDisplay:
         self.display = ST7735(
             port=0,
             cs=1,
-            dc=9,
-            backlight=12,
+            dc="GPIO9",
+            backlight="GPIO12",
             rotation=rotation,
             spi_speed_hz=10000000
         )
@@ -54,57 +57,72 @@ class EnviroLCDDisplay:
         self.width = self.display.width
         self.height = self.display.height
 
-        # Load fonts
-        try:
-            self.font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
-            self.font_medium = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-            self.font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
-        except Exception:
-            # Fallback to default font if TrueType fonts not available
-            self.font_large = ImageFont.load_default()
-            self.font_medium = ImageFont.load_default()
-            self.font_small = ImageFont.load_default()
+        # Load fonts - try RobotoMedium first (Pimoroni's preferred font), then DejaVu, then default
+        self.font = self._load_font(20)
+        self.font_sm = self._load_font(12)
+        self.font_lg = self._load_font(14)
 
-        # Colors
-        self.bg_color = (0, 0, 0)  # Black background
-        self.text_color = (255, 255, 255)  # White text
-        self.highlight_color = (0, 255, 0)  # Green for readings
-        self.graph_color = (0, 200, 255)  # Cyan for graphs
+        # Position for the top text bar (below which the graph is drawn)
+        self.top_bar_height = 25
 
-        # Display modes
-        self.modes = ["dashboard", "temp_graph", "humidity_graph", "pressure_graph", "light_graph"]
-        self.current_mode_index = 0
-        self.mode_names = {
-            "dashboard": "Dashboard",
-            "temp_graph": "Temperature",
-            "humidity_graph": "Humidity",
-            "pressure_graph": "Pressure",
-            "light_graph": "Light"
+        # Display modes - cycle through each sensor
+        self.variables = ["temperature", "pressure", "humidity", "light"]
+        self.units = {
+            "temperature": "°C",
+            "pressure": "hPa",
+            "humidity": "%",
+            "light": "Lux"
         }
+        self.current_mode = 0
 
-        # Graph history buffers
-        self.graph_history_length = graph_history_length
-        self.temp_history: Deque[Optional[float]] = deque(maxlen=graph_history_length)
-        self.humidity_history: Deque[Optional[float]] = deque(maxlen=graph_history_length)
-        self.pressure_history: Deque[Optional[float]] = deque(maxlen=graph_history_length)
-        self.light_history: Deque[Optional[float]] = deque(maxlen=graph_history_length)
+        # Data history for each variable (for graphing)
+        self.values: Dict[str, List[float]] = {}
+        for v in self.variables:
+            self.values[v] = [1.0] * self.width  # Initialize with 1s to avoid division by zero
 
         # Proximity sensor state for mode switching
-        self.last_proximity = 0
-        self.proximity_trigger_threshold = 1500  # Trigger when hand covers sensor
+        self.last_page_time = 0
+        self.proximity_debounce = 0.3  # seconds (fast response)
+        self.proximity_threshold = 1500
 
-    def _get_device_ip(self) -> str:
-        """Get local IP address."""
+        # Custom color scheme - cyan/blue on black
+        self.bg_color = (0, 0, 0)  # Black background
+        self.text_color = (0, 200, 255)  # Cyan text
+        self.accent_color = (0, 150, 200)  # Darker cyan for accents
+        self.graph_line_color = (0, 255, 200)  # Bright cyan-green for graph line
+
+    def _load_font(self, size: int) -> ImageFont.ImageFont:
+        """Load the best available font at the specified size."""
+        font_paths = [
+            # Pimoroni's preferred font
+            "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Medium.ttf",
+            # fonts.ttf package location
+            None,  # Will try fonts.ttf import
+            # DejaVu fallback
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+
+        # Try to import from fonts.ttf package (Pimoroni's approach)
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return "no network"
+            from fonts.ttf import RobotoMedium as UserFont
+            return ImageFont.truetype(UserFont, size)
+        except ImportError:
+            pass
 
-    def check_mode_switch(self):
+        # Try each font path
+        for font_path in font_paths:
+            if font_path is None:
+                continue
+            try:
+                return ImageFont.truetype(font_path, size)
+            except Exception:
+                continue
+
+        # Fallback to default
+        return ImageFont.load_default()
+
+    def check_mode_switch(self) -> bool:
         """
         Check proximity sensor and switch mode if triggered.
         Returns True if mode was switched.
@@ -112,16 +130,15 @@ class EnviroLCDDisplay:
         try:
             proximity = self.ltr559.get_proximity()
 
-            # Detect rising edge (hand covering sensor)
-            if proximity > self.proximity_trigger_threshold and self.last_proximity <= self.proximity_trigger_threshold:
-                # Switch to next mode
-                self.current_mode_index = (self.current_mode_index + 1) % len(self.modes)
-                current_mode = self.modes[self.current_mode_index]
-                print(f"Switched to mode: {self.mode_names[current_mode]}")
-                self.last_proximity = proximity
+            # Detect proximity crossing threshold with debounce
+            if proximity > self.proximity_threshold and time.time() - self.last_page_time > self.proximity_debounce:
+                self.current_mode += 1
+                self.current_mode %= len(self.variables)
+                self.last_page_time = time.time()
+                current_var = self.variables[self.current_mode]
+                print(f"Switched to mode: {current_var}")
                 return True
 
-            self.last_proximity = proximity
             return False
         except Exception:
             return False
@@ -137,146 +154,67 @@ class EnviroLCDDisplay:
             pressure: Atmospheric pressure in hPa
             light: Light level in lux
         """
-        self.temp_history.append(temperature)
-        self.humidity_history.append(humidity)
-        self.pressure_history.append(pressure)
-        self.light_history.append(light)
-
-    def draw_dashboard(self, temperature: Optional[float], humidity: Optional[float],
-                      pressure: Optional[float] = None, light: Optional[float] = None):
-        """
-        Draw dashboard view with all sensor readings.
-
-        Args:
-            temperature: Temperature in Celsius
-            humidity: Humidity percentage
-            pressure: Atmospheric pressure in hPa
-            light: Light level in lux
-        """
-        # Create blank image
-        img = Image.new('RGB', (self.width, self.height), color=self.bg_color)
-        draw = ImageDraw.Draw(img)
-
-        # Get device info
-        config = io_funcs.fetch_config()
-        device_name = config["DEFAULT"].get("device_name", socket.gethostname())
-        ip_address = self._get_device_ip()
-
-        # Layout parameters
-        y_offset = 2
-        line_height = 18
-
-        # Draw device name (top line, small font)
-        draw.text((2, y_offset), device_name[:20], font=self.font_small, fill=self.text_color)
-        y_offset += 12
-
-        # Draw temperature
+        # Update each variable's history (shift left and add new value)
         if temperature is not None:
-            temp_text = f"{temperature:.1f}°C"
-            draw.text((2, y_offset), temp_text, font=self.font_large, fill=self.highlight_color)
-        else:
-            draw.text((2, y_offset), "-- °C", font=self.font_large, fill=(255, 0, 0))
-        y_offset += line_height
-
-        # Draw humidity
+            self.values["temperature"] = self.values["temperature"][1:] + [temperature]
         if humidity is not None:
-            hum_text = f"{humidity:.1f}%"
-            draw.text((2, y_offset), hum_text, font=self.font_large, fill=self.highlight_color)
-        else:
-            draw.text((2, y_offset), "-- %", font=self.font_large, fill=(255, 0, 0))
-        y_offset += line_height
-
-        # Draw pressure (if available)
+            self.values["humidity"] = self.values["humidity"][1:] + [humidity]
         if pressure is not None:
-            pressure_text = f"{pressure:.0f}hPa"
-            draw.text((2, y_offset), pressure_text, font=self.font_small, fill=self.text_color)
-        y_offset += 12
-
-        # Draw light level (if available)
+            self.values["pressure"] = self.values["pressure"][1:] + [pressure]
         if light is not None:
-            light_text = f"{light:.0f}lux"
-            draw.text((90, y_offset), light_text, font=self.font_small, fill=self.text_color)
+            self.values["light"] = self.values["light"][1:] + [light]
 
-        # Draw IP address (bottom line)
-        draw.text((2, self.height - 12), ip_address, font=self.font_small, fill=self.text_color)
-
-        # Display the image
-        self.display.display(img)
-
-    def draw_graph(self, data_history: Deque[Optional[float]], title: str, unit: str, color: tuple):
+    def display_text(self, variable: str, data: float, unit: str):
         """
-        Draw a rolling graph of sensor data.
+        Display sensor data with a color gradient graph.
+        
+        Custom styling with cyan/blue on black theme:
+        - Top bar shows sensor name and current value in cyan text on black
+        - Bottom section shows a color gradient graph (cyan=high, dark blue=low)
+        - A bright cyan-green line traces the actual values
 
         Args:
-            data_history: Deque of historical data points
-            title: Graph title (e.g., "Temperature")
-            unit: Unit string (e.g., "°C")
-            color: RGB tuple for graph line color
+            variable: The variable name (temperature, humidity, pressure, light)
+            data: The current sensor value
+            unit: The unit string (°C, %, hPa, Lux)
         """
-        # Create blank image
-        img = Image.new('RGB', (self.width, self.height), color=self.bg_color)
+        # Create new image with black background
+        img = Image.new("RGB", (self.width, self.height), color=self.bg_color)
         draw = ImageDraw.Draw(img)
 
-        # Draw title
-        draw.text((2, 2), title, font=self.font_small, fill=self.text_color)
+        # Get the values for this variable and calculate scaling
+        values = self.values[variable]
+        vmin = min(values)
+        vmax = max(values)
+        
+        # Normalize colors (0 to 1 scale)
+        # Add 1 to avoid division by zero when all values are the same
+        colours = [(v - vmin + 1) / (vmax - vmin + 1) for v in values]
 
-        # Filter out None values for scaling
-        valid_data = [v for v in data_history if v is not None]
+        # Format the message for the top bar
+        # Use abbreviated variable name (4 chars) for small display
+        message = f"{variable[:4]}: {data:.1f} {unit}"
 
-        if len(valid_data) < 2:
-            # Not enough data to draw graph
-            draw.text((self.width // 2 - 30, self.height // 2), "No data", font=self.font_small, fill=self.text_color)
-            self.display.display(img)
-            return
+        # Draw the color gradient graph with cyan/blue theme
+        for i in range(len(colours)):
+            # Custom blue gradient: high values = bright cyan (hue 0.5), low values = dark blue (hue 0.6)
+            # Saturation and value vary with the data
+            intensity = colours[i]
+            hue = 0.55 - (intensity * 0.1)  # Slight hue shift from blue to cyan
+            sat = 0.8 + (intensity * 0.2)   # More saturated when higher
+            val = 0.2 + (intensity * 0.6)   # Brighter when higher
+            r, g, b = [int(x * 255.0) for x in colorsys.hsv_to_rgb(hue, sat, val)]
+            
+            # Draw a 1-pixel wide rectangle of colour from top_bar to bottom
+            draw.rectangle((i, self.top_bar_height, i + 1, self.height), (r, g, b))
+            
+            # Draw a bright line graph overlaying the colors
+            graph_height = self.height - self.top_bar_height
+            line_y = self.height - (colours[i] * graph_height)
+            draw.rectangle((i, line_y, i + 1, line_y + 1), self.graph_line_color)
 
-        # Calculate scaling
-        min_val = min(valid_data)
-        max_val = max(valid_data)
-        value_range = max_val - min_val
-
-        # Add 10% padding to range
-        if value_range > 0:
-            padding = value_range * 0.1
-            min_val -= padding
-            max_val += padding
-            value_range = max_val - min_val
-        else:
-            # All values are the same
-            min_val -= 1
-            max_val += 1
-            value_range = 2
-
-        # Graph area (leave space for title and current value)
-        graph_top = 15
-        graph_bottom = self.height - 15
-        graph_height = graph_bottom - graph_top
-        graph_left = 5
-        graph_right = self.width - 5
-        graph_width = graph_right - graph_left
-
-        # Draw current value
-        if data_history[-1] is not None:
-            current_text = f"{data_history[-1]:.1f}{unit}"
-            draw.text((self.width - 60, self.height - 12), current_text, font=self.font_small, fill=self.highlight_color)
-
-        # Draw graph lines
-        data_list = list(data_history)
-        for i in range(1, len(data_list)):
-            if data_list[i - 1] is not None and data_list[i] is not None:
-                # Calculate x positions (spread across graph width)
-                x1 = graph_left + int((i - 1) * graph_width / (self.graph_history_length - 1))
-                x2 = graph_left + int(i * graph_width / (self.graph_history_length - 1))
-
-                # Calculate y positions (inverted because screen y=0 is top)
-                y1 = graph_bottom - int((data_list[i - 1] - min_val) / value_range * graph_height)
-                y2 = graph_bottom - int((data_list[i] - min_val) / value_range * graph_height)
-
-                # Draw line segment
-                draw.line([(x1, y1), (x2, y2)], fill=color, width=2)
-
-        # Draw min/max labels
-        draw.text((2, graph_top), f"{max_val:.0f}", font=self.font_small, fill=self.text_color)
-        draw.text((2, graph_bottom - 10), f"{min_val:.0f}", font=self.font_small, fill=self.text_color)
+        # Write the text at the top in cyan (on black background)
+        draw.text((0, 0), message, font=self.font, fill=self.text_color)
 
         # Display the image
         self.display.display(img)
@@ -295,24 +233,36 @@ class EnviroLCDDisplay:
         # Add readings to history
         self.add_reading(temperature, humidity, pressure, light)
 
-        # Get current mode
-        mode = self.modes[self.current_mode_index]
+        # Get current variable and its data
+        variable = self.variables[self.current_mode]
+        unit = self.units[variable]
 
-        # Draw based on mode
-        if mode == "dashboard":
-            self.draw_dashboard(temperature, humidity, pressure, light)
-        elif mode == "temp_graph":
-            self.draw_graph(self.temp_history, "Temperature", "°C", self.graph_color)
-        elif mode == "humidity_graph":
-            self.draw_graph(self.humidity_history, "Humidity", "%", self.graph_color)
-        elif mode == "pressure_graph":
-            self.draw_graph(self.pressure_history, "Pressure", "hPa", (255, 150, 0))
-        elif mode == "light_graph":
-            self.draw_graph(self.light_history, "Light", "lux", (255, 255, 0))
+        # Get the current value for the active mode
+        if variable == "temperature" and temperature is not None:
+            self.display_text(variable, temperature, unit)
+        elif variable == "humidity" and humidity is not None:
+            self.display_text(variable, humidity, unit)
+        elif variable == "pressure" and pressure is not None:
+            self.display_text(variable, pressure, unit)
+        elif variable == "light" and light is not None:
+            self.display_text(variable, light, unit)
+        else:
+            # No data available - show placeholder
+            self._show_no_data(variable, unit)
+
+    def _show_no_data(self, variable: str, unit: str):
+        """Show a 'no data' screen for the current variable."""
+        img = Image.new("RGB", (self.width, self.height), color=self.bg_color)
+        draw = ImageDraw.Draw(img)
+        message = f"{variable[:4]}: -- {unit}"
+        draw.text((0, 0), message, font=self.font, fill=self.accent_color)
+        draw.text((self.width // 2 - 30, self.height // 2), "No data", 
+                  font=self.font_sm, fill=self.accent_color)
+        self.display.display(img)
 
     def clear(self):
         """Clear the display."""
-        img = Image.new('RGB', (self.width, self.height), color=self.bg_color)
+        img = Image.new('RGB', (self.width, self.height), color=(0, 0, 0))
         self.display.display(img)
 
     def show_startup_message(self, message: str):
@@ -320,42 +270,35 @@ class EnviroLCDDisplay:
         img = Image.new('RGB', (self.width, self.height), color=self.bg_color)
         draw = ImageDraw.Draw(img)
 
-        # Center the message
-        draw.text((5, self.height // 2 - 10), message, font=self.font_medium, fill=self.text_color)
+        # Center the message in cyan
+        draw.text((5, self.height // 2 - 10), message, font=self.font, fill=self.text_color)
         self.display.display(img)
 
 
-def run_lcd_display_loop(update_interval_s: float = 1.0):
+def run_lcd_display_loop(update_interval_s: float = 0.25):
     """
     Main loop for updating LCD display with sensor readings and interactive mode switching.
 
     Args:
-        update_interval_s: Seconds between display updates (default: 1.0s for responsive mode switching)
+        update_interval_s: Seconds between display updates (default: 0.25s for snappy mode switching)
     """
     print("Initializing Enviro+ LCD display...")
 
     try:
-        display = EnviroLCDDisplay(rotation=90, graph_history_length=80)
-        display.show_startup_message("Starting up...")
-        time.sleep(2)
+        display = EnviroLCDDisplay(rotation=90, history_length=160)
+        display.show_startup_message("Starting...")
+        time.sleep(1)
     except Exception as e:
         print(f"Failed to initialize LCD display: {e}")
         return
 
     print("LCD display initialized successfully")
-    print("Cover the proximity sensor to switch between modes:")
-    print("  1. Dashboard (all sensors)")
-    print("  2. Temperature graph")
-    print("  3. Humidity graph")
-    print("  4. Pressure graph")
-    print("  5. Light graph")
+    print("Cover the proximity sensor to cycle between modes:")
+    for i, var in enumerate(display.variables):
+        print(f"  {i + 1}. {var.capitalize()} ({display.units[var]})")
 
-    # Get sensor instance
-    sensor = io_funcs._get_sensor()
-    print(f"Using sensor: {sensor.name}")
-
-    # Check if sensor supports extended readings
-    has_extended = hasattr(sensor, 'read_extended')
+    # Read from database instead of accessing sensor directly to avoid I2C conflicts
+    print("Reading sensor data from database to avoid I2C bus conflicts")
 
     # Track consecutive errors
     error_count = 0
@@ -363,19 +306,19 @@ def run_lcd_display_loop(update_interval_s: float = 1.0):
 
     while True:
         try:
-            # Check for mode switch
+            # Check for mode switch via proximity sensor
             display.check_mode_switch()
 
-            # Read sensor data
-            if has_extended:
-                data = sensor.read_extended()
-                temperature = data.get("temperature")
-                humidity = data.get("humidity")
-                pressure = data.get("pressure")
-                light = data.get("light")
+            # Read latest sensor data from database (written by sensor logger process)
+            data = io_funcs.fetch_log_data_range(limit=1)
+
+            if data and len(data["time"]) > 0:
+                temperature = data["temperature"][0]
+                humidity = data["humidity"][0]
+                pressure = data.get("pressure", [None])[0]
+                light = data.get("light", [None])[0]
             else:
-                temperature, humidity = sensor.read()
-                pressure, light = None, None
+                temperature, humidity, pressure, light = None, None, None, None
 
             # Update display with current mode
             display.update_display(temperature, humidity, pressure, light)
@@ -392,9 +335,9 @@ def run_lcd_display_loop(update_interval_s: float = 1.0):
                 display.clear()
                 img = Image.new('RGB', (display.width, display.height), color=(0, 0, 0))
                 draw = ImageDraw.Draw(img)
-                draw.text((5, 30), "Sensor Error", font=display.font_medium, fill=(255, 0, 0))
+                draw.text((5, 30), "Sensor Error", font=display.font, fill=(255, 50, 50))
                 display.display.display(img)
-            time.sleep(0.5)  # Shorter retry interval
+            time.sleep(0.25)  # Quick retry
             continue
 
         except Exception as e:
@@ -409,5 +352,5 @@ def run_lcd_display_loop(update_interval_s: float = 1.0):
 
 if __name__ == "__main__":
     # Run standalone LCD display loop
-    # Update every 1 second for responsive mode switching
-    run_lcd_display_loop(update_interval_s=1.0)
+    # Update every 0.25 seconds for snappy mode switching
+    run_lcd_display_loop(update_interval_s=0.25)
