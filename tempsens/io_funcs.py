@@ -129,7 +129,23 @@ def _get_sensor():
 
     if _sensor_instance is None:
         sensor_type = CONFIG["DEFAULT"].get("sensor_type", "AUTO")
-        _sensor_instance = sensor_drivers.get_sensor(sensor_type)
+        
+        # Read Enviro+ calibration settings from config
+        enviro_kwargs = {
+            "compensation_factor": CONFIG["DEFAULT"].getfloat("enviro_cpu_factor", 2.25),
+            "temp_scale": CONFIG["DEFAULT"].getfloat("enviro_temp_scale", 1.0),
+            "temp_offset": CONFIG["DEFAULT"].getfloat("enviro_temp_offset", 0.0),
+            "humidity_scale": CONFIG["DEFAULT"].getfloat("enviro_humidity_scale", 1.0),
+            "humidity_offset": CONFIG["DEFAULT"].getfloat("enviro_humidity_offset", 0.0),
+            "pressure_scale": CONFIG["DEFAULT"].getfloat("enviro_pressure_scale", 1.0),
+            "pressure_offset": CONFIG["DEFAULT"].getfloat("enviro_pressure_offset", 0.0),
+            "light_scale": CONFIG["DEFAULT"].getfloat("enviro_light_scale", 1.0),
+            "light_offset": CONFIG["DEFAULT"].getfloat("enviro_light_offset", 0.0),
+            "noise_scale": CONFIG["DEFAULT"].getfloat("enviro_noise_scale", 1.0),
+            "noise_offset": CONFIG["DEFAULT"].getfloat("enviro_noise_offset", 0.0),
+        }
+        
+        _sensor_instance = sensor_drivers.get_sensor(sensor_type, **enviro_kwargs)
         print(f"Initialized {_sensor_instance.name} sensor")
 
     return _sensor_instance

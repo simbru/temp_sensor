@@ -234,13 +234,28 @@ class BME280Sensor:
 class EnviroPlusSensor:
     """Driver for Pimoroni Enviro+ board with multiple environmental sensors."""
 
-    def __init__(self, cpu_temp_compensation=True, compensation_factor=2.25):
+    def __init__(self, cpu_temp_compensation=True, compensation_factor=2.25,
+                 temp_scale=1.0, temp_offset=0.0,
+                 humidity_scale=1.0, humidity_offset=0.0,
+                 pressure_scale=1.0, pressure_offset=0.0,
+                 light_scale=1.0, light_offset=0.0,
+                 noise_scale=1.0, noise_offset=0.0):
         """
         Initialize Enviro+ sensor board.
 
         Args:
             cpu_temp_compensation: Enable CPU temperature compensation for BME280
             compensation_factor: Factor for CPU heat compensation (default 2.25)
+            temp_scale: Linear scaling factor for temperature (default 1.0)
+            temp_offset: Offset to add to temperature after scaling (default 0.0)
+            humidity_scale: Linear scaling factor for humidity (default 1.0)
+            humidity_offset: Offset to add to humidity after scaling (default 0.0)
+            pressure_scale: Linear scaling factor for pressure (default 1.0)
+            pressure_offset: Offset to add to pressure after scaling (default 0.0)
+            light_scale: Linear scaling factor for light/lux (default 1.0)
+            light_offset: Offset to add to light after scaling (default 0.0)
+            noise_scale: Linear scaling factor for noise (default 1.0)
+            noise_offset: Offset to add to noise after scaling (default 0.0)
         """
         try:
             from smbus2 import SMBus
@@ -260,6 +275,18 @@ class EnviroPlusSensor:
         self.cpu_temp_compensation = cpu_temp_compensation
         self.compensation_factor = compensation_factor
         self.cpu_temps = []  # Rolling buffer of CPU temperatures
+        
+        # Linear calibration settings
+        self.temp_scale = temp_scale
+        self.temp_offset = temp_offset
+        self.humidity_scale = humidity_scale
+        self.humidity_offset = humidity_offset
+        self.pressure_scale = pressure_scale
+        self.pressure_offset = pressure_offset
+        self.light_scale = light_scale
+        self.light_offset = light_offset
+        self.noise_scale = noise_scale
+        self.noise_offset = noise_offset
 
         # Try to initialize noise sensor (may not be available on all boards)
         self.has_noise = False
@@ -360,6 +387,13 @@ class EnviroPlusSensor:
             
             # Apply humidity compensation based on temperature correction
             humidity = self._get_compensated_humidity(raw_humidity, raw_temp, temperature)
+            
+            # Apply linear calibration: final = (value * scale) + offset
+            temperature = (temperature * self.temp_scale) + self.temp_offset
+            humidity = (humidity * self.humidity_scale) + self.humidity_offset
+            
+            # Clamp humidity to valid range
+            humidity = max(0, min(100, humidity))
 
             return temperature, humidity
         except Exception as e:
@@ -377,16 +411,26 @@ class EnviroPlusSensor:
             # Read BME280 environmental data
             raw_temp = self.bme280.get_temperature()
             raw_humidity = self.bme280.get_humidity()
-            pressure = self.bme280.get_pressure()
+            raw_pressure = self.bme280.get_pressure()
             
             # Apply CPU temperature compensation
             temperature = self._get_compensated_temperature(raw_temp)
             
             # Apply humidity compensation based on temperature correction
             humidity = self._get_compensated_humidity(raw_humidity, raw_temp, temperature)
+            
+            # Apply linear calibration: final = (value * scale) + offset
+            temperature = (temperature * self.temp_scale) + self.temp_offset
+            humidity = (humidity * self.humidity_scale) + self.humidity_offset
+            pressure = (raw_pressure * self.pressure_scale) + self.pressure_offset
+            
+            # Clamp humidity to valid range
+            humidity = max(0, min(100, humidity))
 
-            # Read light sensor
-            light = self.ltr559.get_lux()
+            # Read light sensor and apply calibration
+            raw_light = self.ltr559.get_lux()
+            light = (raw_light * self.light_scale) + self.light_offset
+            light = max(0, light)  # Light can't be negative
 
             data = {
                 "temperature": temperature,
@@ -400,9 +444,14 @@ class EnviroPlusSensor:
                 try:
                     # Note: Actual noise implementation would require additional setup
                     # Placeholder for now - user can implement based on their Enviro+ variant
-                    data["noise"] = None
+                    raw_noise = None
+                    if raw_noise is not None:
+                        noise = (raw_noise * self.noise_scale) + self.noise_offset
+                        data["noise"] = max(0, noise)
+                    else:
+                        data["noise"] = None
                 except Exception:
-                    pass
+                    data["noise"] = None
 
             return data
 
@@ -497,12 +546,15 @@ SENSOR_REGISTRY = [
 ]
 
 
-def detect_sensor() -> SensorInterface:
+def detect_sensor(**kwargs) -> SensorInterface:
     """
     Auto-detect available temperature/humidity sensor.
 
-    Tries sensors in order: DHT22, AHT20, BME280.
+    Tries sensors in order: ENVIROPLUS, AHT20, BME280, DHT22.
     Falls back to simulated sensor if no hardware found.
+
+    Args:
+        **kwargs: Additional arguments passed to sensor constructor (e.g., for EnviroPlusSensor)
 
     Returns:
         Initialized sensor object implementing SensorInterface
@@ -514,7 +566,11 @@ def detect_sensor() -> SensorInterface:
         try:
             if sensor_class.detect():
                 print("Found!")
-                sensor = sensor_class()
+                # Pass kwargs to sensors that support them (like EnviroPlusSensor)
+                if sensor_name == "ENVIROPLUS":
+                    sensor = sensor_class(**kwargs)
+                else:
+                    sensor = sensor_class()
                 return sensor
         except Exception as e:
             pass
@@ -524,13 +580,20 @@ def detect_sensor() -> SensorInterface:
     return SimulatedSensor()
 
 
-def get_sensor(sensor_type: str) -> SensorInterface:
+def get_sensor(sensor_type: str, **kwargs) -> SensorInterface:
     """
     Get sensor by explicit type specification.
 
     Args:
         sensor_type: Sensor type string (case-insensitive):
-                    "DHT22", "AHT20", "BME280", "AUTO", or "SIMULATED"
+                    "DHT22", "AHT20", "BME280", "ENVIROPLUS", "AUTO", or "SIMULATED"
+        **kwargs: Additional arguments passed to sensor constructor.
+                  For ENVIROPLUS, these can include:
+                  - compensation_factor: CPU temp compensation factor (default 2.25)
+                  - temp_scale: Linear scaling for temperature (default 1.0)
+                  - temp_offset: Offset for temperature (default 0.0)
+                  - humidity_scale: Linear scaling for humidity (default 1.0)
+                  - humidity_offset: Offset for humidity (default 0.0)
 
     Returns:
         Initialized sensor object implementing SensorInterface
@@ -543,7 +606,7 @@ def get_sensor(sensor_type: str) -> SensorInterface:
     sensor_type = sensor_type.upper().strip()
 
     if sensor_type == "AUTO":
-        return detect_sensor()
+        return detect_sensor(**kwargs)
 
     if sensor_type == "SIMULATED":
         return SimulatedSensor()
@@ -553,7 +616,11 @@ def get_sensor(sensor_type: str) -> SensorInterface:
         if name == sensor_type:
             print(f"Initializing {sensor_type} sensor...")
             try:
-                sensor = sensor_class()
+                # Pass kwargs to sensors that support them (like EnviroPlusSensor)
+                if name == "ENVIROPLUS":
+                    sensor = sensor_class(**kwargs)
+                else:
+                    sensor = sensor_class()
                 print(f"{sensor_type} initialized successfully")
                 return sensor
             except ImportError as e:

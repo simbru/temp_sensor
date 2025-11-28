@@ -9,3 +9,47 @@ max_humidity_delta_pct = 10.0
 # File logging configuration
 # Enable/disable writing logs to logs/client.log (systemd journal always enabled)
 write_log_file = True
+
+# Sensor type: AUTO, DHT22, AHT20, BME280, ENVIROPLUS, or SIMULATED
+sensor_type = AUTO
+
+# LCD display for Enviro+ boards
+enable_lcd_display = False
+
+# ============================================================================
+# Enviro+ BME280 Calibration Settings
+# ============================================================================
+# The BME280 on Enviro+ sits close to the Pi CPU and reads too hot.
+# These settings allow calibration against a known-good reference sensor.
+#
+# CPU compensation factor (default 2.25, Pimoroni's recommendation)
+# Lower values = more aggressive temperature reduction
+# Try 1.0-1.5 if temperature still reads too high
+enviro_cpu_factor = 2.25
+
+# Linear calibration applied AFTER CPU compensation:
+#   final_value = (compensated_value * scale) + offset
+#
+# Temperature calibration (adjust to match a reference thermometer)
+enviro_temp_scale = 1.0
+enviro_temp_offset = 0.0
+
+# Humidity calibration (adjust to match a reference hygrometer)  
+enviro_humidity_scale = 1.0
+enviro_humidity_offset = 0.0
+
+# Pressure calibration (adjust to match a reference barometer, in hPa)
+enviro_pressure_scale = 1.0
+enviro_pressure_offset = 0.0
+
+# Light calibration (adjust to match a reference lux meter)
+enviro_light_scale = 1.0
+enviro_light_offset = 0.0
+
+# Noise calibration (if using microphone)
+enviro_noise_scale = 1.0
+enviro_noise_offset = 0.0
+#
+# Example: If your Enviro+ reads 5°C too high after CPU compensation,
+# set enviro_temp_offset = -5.0
+# ============================================================================
