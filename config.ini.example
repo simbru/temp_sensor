@@ -5,51 +5,19 @@ device_name = Temperature Sensor
 api_port = 5000
 max_temp_delta_c = 3.0
 max_humidity_delta_pct = 10.0
-
-# File logging configuration
-# Enable/disable writing logs to logs/client.log (systemd journal always enabled)
 write_log_file = True
-
-# Sensor type: AUTO, DHT22, AHT20, BME280, ENVIROPLUS, or SIMULATED
 sensor_type = AUTO
-
-# LCD display for Enviro+ boards
 enable_lcd_display = False
 
-# ============================================================================
-# Sensor Calibration Settings
-# ============================================================================
-# These settings allow calibration against a known-good reference sensor.
-# Applies to all sensor types (DHT22, AHT20, BME280, Enviro+, etc.)
-#
-# CPU compensation factor (Enviro+ only, default 2.25, Pimoroni's recommendation)
-# Lower values = more aggressive temperature reduction
-# Try 1.0-1.5 if temperature still reads too high
+# Sensor calibration - see README.md for details
 cpu_temp_factor = 2.25
-
-# Linear calibration applied AFTER any sensor-specific compensation:
-#   final_value = (compensated_value * scale) + offset
-#
-# Temperature calibration (adjust to match a reference thermometer)
 temp_scale = 1.0
 temp_calibration_offset = 0.0
-
-# Humidity calibration (adjust to match a reference hygrometer)  
 humidity_scale = 1.0
 humidity_calibration_offset = 0.0
-
-# Pressure calibration (adjust to match a reference barometer, in hPa)
 pressure_scale = 1.0
 pressure_calibration_offset = 0.0
-
-# Light calibration (adjust to match a reference lux meter)
 light_scale = 1.0
 light_calibration_offset = 0.0
-
-# Noise calibration (if using microphone)
 noise_scale = 1.0
 noise_calibration_offset = 0.0
-#
-# Example: If your sensor reads 5°C too high,
-# set temp_calibration_offset = -5.0
-# ============================================================================

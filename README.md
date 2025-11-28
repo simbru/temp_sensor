@@ -441,11 +441,17 @@ loginterval_s = 10                    # Seconds between sensor reads
 device_name = Room 307                # Display name
 api_port = 5000                       # API server port
 outputfile = templog.db               # Local SQLite database
-sensor_type = AUTO                    # AUTO, DHT22, AHT20, BME280, or SIMULATED
+sensor_type = AUTO                    # AUTO, DHT22, AHT20, BME280, ENVIROPLUS, or SIMULATED
 max_temp_delta_c = 3.0                # Spike filter: reject readings >3°C from last valid
 max_humidity_delta_pct = 10.0         # Spike filter: reject readings >10% from last valid
-temp_offset_c = 0.0                   # Calibration offset for temperature
-humidity_offset_pct = 0.0             # Calibration offset for humidity
+enable_lcd_display = False            # Enable ST7735 LCD on Enviro+ boards
+
+# Sensor calibration (see "Sensor Calibration" section below)
+cpu_temp_factor = 2.25
+temp_scale = 1.0
+temp_calibration_offset = 0.0
+humidity_scale = 1.0
+humidity_calibration_offset = 0.0
 ```
 
 ### Server (`server/config_server.ini`)
@@ -468,6 +474,58 @@ Lab_Bench = http://<PI_IP_2>:5000
 1. **On new Pi:** Follow "Pi Client Setup", set unique `device_name`
 2. **On server:** Edit `server/config_server.ini`, add sensor to `[SENSORS]`
 3. **Restart:** Server will auto-detect new sensor
+
+---
+
+## Sensor Calibration
+
+All sensors support calibration against a known-good reference. This is especially useful for the **Enviro+** board where CPU heat affects readings.
+
+### Calibration Formula
+
+Readings are processed in two steps:
+
+1. **Sensor-specific compensation** (Enviro+ only): CPU heat correction using `cpu_temp_factor`
+2. **Linear calibration**: `final = (compensated * scale) + offset`
+
+### Configuration Options
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `cpu_temp_factor` | 2.25 | CPU heat compensation factor (Enviro+ only). Lower = more aggressive cooling. Try 1.0-1.5 if readings still too warm. |
+| `temp_scale` | 1.0 | Temperature multiplier |
+| `temp_calibration_offset` | 0.0 | Temperature offset in °C (negative = cooler readings) |
+| `humidity_scale` | 1.0 | Humidity multiplier |
+| `humidity_calibration_offset` | 0.0 | Humidity offset in % |
+| `pressure_scale` | 1.0 | Pressure multiplier |
+| `pressure_calibration_offset` | 0.0 | Pressure offset in hPa |
+| `light_scale` | 1.0 | Light multiplier |
+| `light_calibration_offset` | 0.0 | Light offset in lux |
+| `noise_scale` | 1.0 | Noise multiplier |
+| `noise_calibration_offset` | 0.0 | Noise offset |
+
+### Calibration Procedure
+
+1. Place your sensor next to a trusted reference (e.g., lab thermometer, calibrated hygrometer)
+2. Wait 15-30 minutes for thermal equilibrium
+3. Compare readings and calculate the offset:
+   - If sensor reads 25°C but reference shows 23°C, set `temp_calibration_offset = -2.0`
+   - If sensor reads 40% RH but reference shows 45%, set `humidity_calibration_offset = 5.0`
+4. Restart the client service: `sudo systemctl restart tempsens`
+
+### Enviro+ CPU Heat Notes
+
+The Pimoroni Enviro+ places the BME280 close to the Pi's CPU, causing elevated temperature readings. The compensation uses:
+
+```
+corrected_temp = raw_temp - ((cpu_temp - raw_temp) / cpu_temp_factor)
+```
+
+Humidity is also compensated using a dewpoint-based correction after temperature adjustment.
+
+**Typical values:**
+- `cpu_temp_factor = 2.25` (Pimoroni's default, works well for idle Pi)
+- `cpu_temp_factor = 1.2` (more aggressive, may undercorrect humidity)
 
 ---
 
