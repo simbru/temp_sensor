@@ -62,6 +62,7 @@ enviroplus = [
     "smbus2; sys_platform == 'linux'",
     "ltr559; sys_platform == 'linux'",
     "st7735; sys_platform == 'linux'",
+    "pillow; sys_platform == 'linux'",  # Required for LCD display
     "fonts; sys_platform == 'linux'",
     "font-roboto; sys_platform == 'linux'",
     "paho-mqtt; sys_platform == 'linux'",
