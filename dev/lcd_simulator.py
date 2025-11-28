@@ -253,13 +253,78 @@ def patch_hardware_imports():
     print("[Simulator] Hardware imports patched with mocks")
 
 
-def run_simulation(duration: float = 30.0, update_interval: float = 0.5):
+def download_icons():
+    """
+    Download Pimoroni's icons for local testing.
+    
+    Downloads icons from the enviroplus-python repo to dev/icons/
+    """
+    import urllib.request
+    
+    icons_dir = Path(__file__).parent / "icons"
+    icons_dir.mkdir(exist_ok=True)
+    
+    icon_files = [
+        "temperature.png",
+        "humidity.png",
+        "humidity-good.png",
+        "humidity-bad.png",
+        "bulb-dark.png",
+        "bulb-dim.png",
+        "bulb-light.png",
+        "bulb-bright.png",
+        "weather-storm.png",
+        "weather-rain.png",
+        "weather-change.png",
+        "weather-fair.png",
+        "weather-dry.png",
+    ]
+    
+    base_url = "https://raw.githubusercontent.com/pimoroni/enviroplus-python/main/examples/icons/"
+    
+    downloaded = 0
+    for icon_file in icon_files:
+        icon_path = icons_dir / icon_file
+        if not icon_path.exists():
+            try:
+                url = base_url + icon_file
+                print(f"  Downloading {icon_file}...")
+                urllib.request.urlretrieve(url, icon_path)
+                downloaded += 1
+            except Exception as e:
+                print(f"  WARNING: Failed to download {icon_file}: {e}")
+    
+    if downloaded > 0:
+        print(f"[Simulator] Downloaded {downloaded} icons to {icons_dir}")
+    
+    return icons_dir
+
+
+def patch_icons_path():
+    """
+    Download icons and prepare the path. Must be called AFTER patch_hardware_imports
+    and BEFORE creating EnviroLCDDisplay instance.
+    
+    Returns the icons directory path.
+    """
+    icons_dir = Path(__file__).parent / "icons"
+    
+    # Download icons if not present
+    if not icons_dir.exists() or not any(icons_dir.glob("*.png")):
+        print("[Simulator] Downloading Pimoroni icons for testing...")
+        download_icons()
+    
+    return icons_dir
+
+
+def run_simulation(duration: float = 30.0, update_interval: float = 0.5, auto_cycle: float = 0):
     """
     Run a simulation of the LCD display with fake sensor data.
     
     Args:
         duration: How long to run the simulation (seconds)
         update_interval: Time between display updates (seconds)
+        auto_cycle: If > 0, automatically cycle modes every N seconds (0 = manual/Enter key)
     """
     import math
     import random
@@ -267,7 +332,16 @@ def run_simulation(duration: float = 30.0, update_interval: float = 0.5):
     # Patch hardware imports before importing lcd_display
     patch_hardware_imports()
     
-    # Now we can import lcd_display (it will use our mocks)
+    # Download icons if needed
+    icons_dir = patch_icons_path()
+    
+    # Now import lcd_display and patch the icons path function
+    import tempsens.lcd_display as lcd_module
+    original_find_icons = lcd_module._find_icons_path
+    lcd_module._find_icons_path = lambda: icons_dir if icons_dir.exists() else original_find_icons()
+    print(f"[Simulator] Icons path patched to: {icons_dir}")
+    
+    # Now we can import the class
     from tempsens.lcd_display import EnviroLCDDisplay
     
     print("\n" + "=" * 60)
@@ -275,6 +349,11 @@ def run_simulation(duration: float = 30.0, update_interval: float = 0.5):
     print("=" * 60)
     print(f"Running for {duration} seconds")
     print(f"Frames saved to: dev/lcd_frames/")
+    if auto_cycle > 0:
+        print(f"Auto-cycling modes every {auto_cycle} seconds")
+    else:
+        print("Press Enter to cycle modes (or use --cycle N)")
+    print(f"View latest frame: dev/lcd_frames/latest.png")
     print(f"View latest frame: dev/lcd_frames/latest.png")
     print("Press Ctrl+C to stop")
     print("=" * 60 + "\n")
@@ -291,6 +370,7 @@ def run_simulation(duration: float = 30.0, update_interval: float = 0.5):
     base_humidity = 45.0
     base_pressure = 1013.0
     base_light = 300.0
+    last_mode_switch = 0  # For auto-cycling
     
     try:
         while time.time() - start_time < duration:
@@ -305,8 +385,14 @@ def run_simulation(duration: float = 30.0, update_interval: float = 0.5):
             # Clamp values to realistic ranges
             humidity = max(0, min(100, humidity))
             
-            # Check for mode switch
-            lcd.check_mode_switch()
+            # Auto-cycle modes if enabled
+            if auto_cycle > 0 and elapsed - last_mode_switch >= auto_cycle:
+                lcd.current_mode = (lcd.current_mode + 1) % len(lcd.modes)
+                last_mode_switch = elapsed
+                print(f"\n[Auto-cycle] Switched to: {lcd.modes[lcd.current_mode]}")
+            else:
+                # Check for manual mode switch (Enter key)
+                lcd.check_mode_switch()
             
             # Update display
             lcd.update_display(
@@ -378,6 +464,8 @@ if __name__ == "__main__":
                        help="Simulation duration in seconds (default: 60)")
     parser.add_argument("--interval", "-i", type=float, default=0.25,
                        help="Update interval in seconds (default: 0.25)")
+    parser.add_argument("--cycle", "-c", type=float, default=0,
+                       help="Auto-cycle through modes every N seconds (default: 0 = manual)")
     parser.add_argument("--animate", "-a", action="store_true",
                        help="Create animation from existing frames instead of running simulation")
     parser.add_argument("--fps", type=int, default=4,
@@ -388,4 +476,4 @@ if __name__ == "__main__":
     if args.animate:
         create_animation(fps=args.fps)
     else:
-        run_simulation(duration=args.duration, update_interval=args.interval)
+        run_simulation(duration=args.duration, update_interval=args.interval, auto_cycle=args.cycle)

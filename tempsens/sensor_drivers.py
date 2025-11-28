@@ -314,14 +314,52 @@ class EnviroPlusSensor:
 
         return compensated
 
+    def _get_compensated_humidity(self, raw_humidity: float, raw_temp: float, 
+                                   comp_temp: float) -> float:
+        """
+        Compensate humidity reading based on temperature correction.
+        
+        The BME280's humidity reading is calculated internally using its measured
+        temperature. When the sensor runs hot (due to CPU heat), it underestimates
+        humidity. This method recalculates humidity using the corrected temperature.
+        
+        Formula from Pimoroni weather-and-light.py:
+        1. Calculate dewpoint from raw readings
+        2. Recalculate humidity using corrected temperature and dewpoint
+        
+        Args:
+            raw_humidity: Raw humidity reading from BME280 (%)
+            raw_temp: Raw temperature reading from BME280 (°C)
+            comp_temp: Compensated temperature (°C)
+            
+        Returns:
+            Compensated humidity percentage (capped at 100%)
+        """
+        if not self.cpu_temp_compensation:
+            return raw_humidity
+            
+        # Magnus formula approximation for dewpoint
+        # dewpoint ≈ T - (100 - RH) / 5
+        dewpoint = raw_temp - ((100 - raw_humidity) / 5)
+        
+        # Recalculate humidity using compensated temperature
+        # RH ≈ 100 - 5 * (T_corrected - dewpoint)
+        comp_humidity = 100 - (5 * (comp_temp - dewpoint))
+        
+        # Clamp to valid range
+        return max(0, min(100, comp_humidity))
+
     def read(self) -> Tuple[Optional[float], Optional[float]]:
         """Read temperature and humidity (for compatibility with SensorInterface)."""
         try:
             raw_temp = self.bme280.get_temperature()
-            humidity = self.bme280.get_humidity()
+            raw_humidity = self.bme280.get_humidity()
 
             # Apply CPU temperature compensation
             temperature = self._get_compensated_temperature(raw_temp)
+            
+            # Apply humidity compensation based on temperature correction
+            humidity = self._get_compensated_humidity(raw_humidity, raw_temp, temperature)
 
             return temperature, humidity
         except Exception as e:
@@ -338,9 +376,14 @@ class EnviroPlusSensor:
         try:
             # Read BME280 environmental data
             raw_temp = self.bme280.get_temperature()
-            temperature = self._get_compensated_temperature(raw_temp)
-            humidity = self.bme280.get_humidity()
+            raw_humidity = self.bme280.get_humidity()
             pressure = self.bme280.get_pressure()
+            
+            # Apply CPU temperature compensation
+            temperature = self._get_compensated_temperature(raw_temp)
+            
+            # Apply humidity compensation based on temperature correction
+            humidity = self._get_compensated_humidity(raw_humidity, raw_temp, temperature)
 
             # Read light sensor
             light = self.ltr559.get_lux()

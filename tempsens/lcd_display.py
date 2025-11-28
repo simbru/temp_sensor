@@ -16,10 +16,40 @@ Inspired by Pimoroni's all-in-one-enviro-mini.py and weather-and-light.py exampl
 import math
 import time
 import colorsys
+import pathlib
 from typing import Optional, List, Dict
 from PIL import Image, ImageDraw, ImageFont
 
 from . import io_funcs
+
+
+def _find_icons_path() -> Optional[pathlib.Path]:
+    """
+    Find the path to Pimoroni's enviroplus icons.
+    
+    The icons are in the examples/icons folder of the enviroplus-python repo.
+    When installed via pip, they're typically in site-packages.
+    """
+    try:
+        import enviroplus
+        # Icons are in examples/icons relative to the package
+        package_dir = pathlib.Path(enviroplus.__file__).parent.parent
+        icons_path = package_dir / "examples" / "icons"
+        if icons_path.exists():
+            return icons_path
+    except ImportError:
+        pass
+    
+    # Fallback: check common locations
+    fallback_paths = [
+        pathlib.Path("/usr/local/lib/python3.11/dist-packages/examples/icons"),
+        pathlib.Path.home() / ".local/lib/python3.11/site-packages/examples/icons",
+    ]
+    for p in fallback_paths:
+        if p.exists():
+            return p
+    
+    return None
 
 
 class EnviroLCDDisplay:
@@ -59,10 +89,15 @@ class EnviroLCDDisplay:
         self.height = self.display.height
 
         # Load fonts - try RobotoMedium first (Pimoroni's preferred font), then DejaVu, then default
-        self.font = self._load_font(20)
-        self.font_sm = self._load_font(12)
-        self.font_lg = self._load_font(14)
-        self.font_dashboard = self._load_font(40)  # Extra large for dashboard screen
+        self.font = self._load_font(16)
+        self.font_sm = self._load_font(10)
+        self.font_lg = self._load_font(12)
+        self.font_dashboard = self._load_font(32)  # Extra large for dashboard screen
+
+        # Load icons from enviroplus package
+        self.icons_path = _find_icons_path()
+        self.icons: Dict[str, Image.Image] = {}
+        self._load_icons()
 
         # Position for the top text bar (below which the graph is drawn)
         self.top_bar_height = 25
@@ -81,9 +116,10 @@ class EnviroLCDDisplay:
         self.variables = ["temperature", "pressure", "humidity", "light"]
 
         # Data history for each variable (for graphing)
-        self.values: Dict[str, List[float]] = {}
+        # Use None for empty slots so we know where real data starts
+        self.values: Dict[str, List[Optional[float]]] = {}
         for v in self.variables:
-            self.values[v] = [1.0] * self.width  # Initialize with 1s to avoid division by zero
+            self.values[v] = [None] * self.width  # None = no data yet
 
         # Proximity sensor state for mode switching
         self.last_page_time = 0
@@ -124,6 +160,80 @@ class EnviroLCDDisplay:
         # Last resort - PIL's default (this is tiny and ignores size!)
         print(f"WARNING: Could not load any TrueType font, using default bitmap font (size {size} will be ignored)")
         return ImageFont.load_default()
+
+    def _load_icons(self):
+        """Load Pimoroni's icons from the enviroplus package."""
+        if self.icons_path is None:
+            print("WARNING: Could not find enviroplus icons path, using fallback drawn icons")
+            return
+        
+        icon_files = [
+            # Temperature
+            "temperature.png",
+            # Humidity - reactive based on level
+            "humidity.png",
+            "humidity-good.png",
+            "humidity-bad.png",
+            # Light - reactive based on brightness
+            "bulb-dark.png",
+            "bulb-dim.png",
+            "bulb-light.png",
+            "bulb-bright.png",
+            # Weather/Pressure - reactive based on pressure
+            "weather-storm.png",
+            "weather-rain.png",
+            "weather-change.png",
+            "weather-fair.png",
+            "weather-dry.png",
+        ]
+        
+        for icon_file in icon_files:
+            icon_path = self.icons_path / icon_file
+            if icon_path.exists():
+                try:
+                    self.icons[icon_file.replace(".png", "")] = Image.open(icon_path)
+                except Exception as e:
+                    print(f"WARNING: Could not load icon {icon_file}: {e}")
+        
+        if self.icons:
+            print(f"Loaded {len(self.icons)} icons from {self.icons_path}")
+
+    def _get_humidity_icon(self, humidity: Optional[float]) -> Optional[Image.Image]:
+        """Get the appropriate humidity icon based on level."""
+        if humidity is None:
+            return self.icons.get("humidity")
+        elif 40 < humidity < 60:
+            return self.icons.get("humidity-good", self.icons.get("humidity"))
+        else:
+            return self.icons.get("humidity-bad", self.icons.get("humidity"))
+
+    def _get_light_icon(self, light: Optional[float]) -> Optional[Image.Image]:
+        """Get the appropriate light/bulb icon based on lux level."""
+        if light is None:
+            return self.icons.get("bulb-dim")
+        elif light < 50:
+            return self.icons.get("bulb-dark", self.icons.get("bulb-dim"))
+        elif light < 100:
+            return self.icons.get("bulb-dim")
+        elif light < 500:
+            return self.icons.get("bulb-light", self.icons.get("bulb-dim"))
+        else:
+            return self.icons.get("bulb-bright", self.icons.get("bulb-light"))
+
+    def _get_pressure_icon(self, pressure: Optional[float]) -> Optional[Image.Image]:
+        """Get the appropriate weather icon based on pressure."""
+        if pressure is None:
+            return self.icons.get("weather-fair")
+        elif pressure < 970:
+            return self.icons.get("weather-storm", self.icons.get("weather-rain"))
+        elif pressure < 990:
+            return self.icons.get("weather-rain", self.icons.get("weather-change"))
+        elif pressure < 1010:
+            return self.icons.get("weather-change", self.icons.get("weather-fair"))
+        elif pressure < 1030:
+            return self.icons.get("weather-fair")
+        else:
+            return self.icons.get("weather-dry", self.icons.get("weather-fair"))
 
     def check_mode_switch(self) -> bool:
         """
@@ -169,12 +279,12 @@ class EnviroLCDDisplay:
 
     def display_text(self, variable: str, data: float, unit: str):
         """
-        Display sensor data with a color gradient graph.
+        Display sensor data with a line graph.
         
-        Custom styling with cyan/blue on black theme:
-        - Top bar shows sensor name and current value in cyan text on black
-        - Bottom section shows a color gradient graph (cyan=high, dark blue=low)
-        - A bright cyan-green line traces the actual values
+        Clean styling with cyan on black theme:
+        - Top bar shows sensor name and current value in cyan text
+        - Bottom section shows a simple line graph on black background
+        - Empty/no-data regions are left black
 
         Args:
             variable: The variable name (temperature, humidity, pressure, light)
@@ -185,49 +295,56 @@ class EnviroLCDDisplay:
         img = Image.new("RGB", (self.width, self.height), color=self.bg_color)
         draw = ImageDraw.Draw(img)
 
-        # Get the values for this variable and calculate scaling
-        values = self.values[variable]
-        vmin = min(values)
-        vmax = max(values)
+        # Get the values for this variable, filtering out None (no data yet)
+        all_values = self.values[variable]
+        real_values = [v for v in all_values if v is not None]
         
-        # Normalize colors (0 to 1 scale)
-        # Add 1 to avoid division by zero when all values are the same
-        colours = [(v - vmin + 1) / (vmax - vmin + 1) for v in values]
+        # If no real data yet, just show the text
+        if not real_values:
+            message = f"{data:.1f} {unit}"
+            draw.text((0, 0), message, font=self.font, fill=self.text_color)
+            draw.text((self.width // 2 - 30, self.height // 2), "waiting...", 
+                      font=self.font_sm, fill=self.accent_color)
+            self.display.display(img)
+            return
+        
+        vmin = min(real_values)
+        vmax = max(real_values)
+        value_range = vmax - vmin if vmax != vmin else 1.0  # Avoid division by zero
 
-        # Format the message for the top bar
-        # Use abbreviated variable name (4 chars) for small display
-        message = f"{variable[:4]}: {data:.1f} {unit}"
+        # Format the message for the top bar - just value and unit, no label needed
+        message = f"{data:.1f} {unit}"
 
-        # Draw the color gradient graph with cyan/blue theme
-        for i in range(len(colours)):
-            # Custom blue gradient: high values = bright cyan (hue 0.5), low values = dark blue (hue 0.6)
-            # Saturation and value vary with the data
-            intensity = colours[i]
-            hue = 0.55 - (intensity * 0.1)  # Slight hue shift from blue to cyan
-            sat = 0.8 + (intensity * 0.2)   # More saturated when higher
-            val = 0.2 + (intensity * 0.6)   # Brighter when higher
-            r, g, b = [int(x * 255.0) for x in colorsys.hsv_to_rgb(hue, sat, val)]
-            
-            # Draw a 1-pixel wide rectangle of colour from top_bar to bottom
-            draw.rectangle((i, self.top_bar_height, i + 1, self.height), (r, g, b))
-            
-            # Draw a bright line graph overlaying the colors
-            graph_height = self.height - self.top_bar_height
-            line_y = self.height - (colours[i] * graph_height)
-            draw.rectangle((i, line_y, i + 1, line_y + 1), self.graph_line_color)
+        graph_height = self.height - self.top_bar_height
+        line_width = 2  # Line thickness
+        
+        # Collect line points where we have data
+        line_points = []
+        for i in range(len(all_values)):
+            v = all_values[i]
+            if v is not None:
+                intensity = (v - vmin) / value_range if value_range > 0 else 0.5
+                line_y = self.height - int(intensity * graph_height) - 1
+                line_points.append((i, line_y))
 
-        # Write the text at the top in cyan (on black background)
+        # Draw continuous line connecting all points
+        if len(line_points) >= 2:
+            draw.line(line_points, fill=self.text_color, width=line_width)
+        elif len(line_points) == 1:
+            # Just one point - draw a small dot
+            x, y = line_points[0]
+            draw.ellipse((x-1, y-1, x+1, y+1), fill=self.text_color)
+
+        # Write the text at the top in cyan
         draw.text((0, 0), message, font=self.font, fill=self.text_color)
 
         # Draw min/max labels on the right edge of the graph area
-        # These show the actual value range the colors represent
         max_label = f"{vmax:.1f}"
         min_label = f"{vmin:.1f}"
-        # Position labels at top and bottom of graph area, right-aligned
         draw.text((self.width - 35, self.top_bar_height + 2), max_label, 
-                  font=self.font_sm, fill=self.accent_color)
+                  font=self.font_sm, fill=(255, 255, 255))
         draw.text((self.width - 35, self.height - 14), min_label, 
-                  font=self.font_sm, fill=self.accent_color)
+                  font=self.font_sm, fill=(255, 255, 255))
 
         # Display the image
         self.display.display(img)
@@ -408,9 +525,12 @@ class EnviroLCDDisplay:
         """
         Draw a mini dashboard showing all sensor readings with icons.
         
+        Uses Pimoroni's reactive icons when available (humidity, light, pressure
+        icons change based on sensor values), falls back to drawn icons if not.
+        
         Layout (160x80 display):
         - 2x2 grid with icon + large value for each sensor
-        - Icons change color/style based on reading levels
+        - Icons change based on reading levels
         
         Args:
             temperature: Temperature in Celsius
@@ -429,61 +549,73 @@ class EnviroLCDDisplay:
         right_col = 84
         top_row = 4
         bottom_row = 42
+        text_offset = icon_size + 6
+
+        # Helper to paste icon with transparency
+        def paste_icon(icon: Optional[Image.Image], x: int, y: int):
+            if icon is not None:
+                # Convert to RGBA if needed and paste with transparency
+                if icon.mode == 'RGBA':
+                    img.paste(icon, (x, y), mask=icon)
+                else:
+                    img.paste(icon, (x, y))
+                return True
+            return False
 
         # ===== TEMPERATURE (top left) =====
-        self._draw_thermometer_icon(draw, left_col, top_row, temperature, icon_size)
+        temp_icon = self.icons.get("temperature")
+        if not paste_icon(temp_icon, left_col, top_row):
+            self._draw_thermometer_icon(draw, left_col, top_row, temperature, icon_size)
+        
         if temperature is not None:
             temp_str = f"{temperature:.1f}°"
-            draw.text((left_col + icon_size + 4, top_row), temp_str, 
+            draw.text((left_col + text_offset, top_row), temp_str, 
                      font=self.font, fill=self.text_color)
         else:
-            draw.text((left_col + icon_size + 4, top_row), "--°", 
+            draw.text((left_col + text_offset, top_row), "--°", 
                      font=self.font, fill=self.accent_color)
 
-        # ===== HUMIDITY (top right) =====
-        self._draw_droplet_icon(draw, right_col, top_row, humidity, icon_size)
+        # ===== HUMIDITY (top right) - reactive icon =====
+        hum_icon = self._get_humidity_icon(humidity)
+        if not paste_icon(hum_icon, right_col, top_row):
+            self._draw_droplet_icon(draw, right_col, top_row, humidity, icon_size)
+        
         if humidity is not None:
             hum_str = f"{humidity:.0f}%"
-            draw.text((right_col + icon_size + 4, top_row), hum_str, 
+            draw.text((right_col + text_offset, top_row), hum_str, 
                      font=self.font, fill=self.text_color)
         else:
-            draw.text((right_col + icon_size + 4, top_row), "--%", 
+            draw.text((right_col + text_offset, top_row), "--%", 
                      font=self.font, fill=self.accent_color)
 
-        # ===== PRESSURE (bottom left) =====
-        self._draw_pressure_icon(draw, left_col, bottom_row, pressure, icon_size)
+        # ===== PRESSURE (bottom left) - reactive weather icon =====
+        pres_icon = self._get_pressure_icon(pressure)
+        if not paste_icon(pres_icon, left_col, bottom_row):
+            self._draw_pressure_icon(draw, left_col, bottom_row, pressure, icon_size)
+        
         if pressure is not None:
             pres_str = f"{pressure:.0f}"
-            draw.text((left_col + icon_size + 4, bottom_row - 2), pres_str, 
+            draw.text((left_col + text_offset, bottom_row - 2), pres_str, 
                      font=self.font, fill=self.text_color)
         else:
-            draw.text((left_col + icon_size + 4, bottom_row - 2), "----", 
+            draw.text((left_col + text_offset, bottom_row - 2), "----", 
                      font=self.font, fill=self.accent_color)
 
-        # ===== LIGHT (bottom right) =====
-        self._draw_light_icon(draw, right_col, bottom_row, light, icon_size)
+        # ===== LIGHT (bottom right) - reactive bulb icon =====
+        light_icon = self._get_light_icon(light)
+        if not paste_icon(light_icon, right_col, bottom_row):
+            self._draw_light_icon(draw, right_col, bottom_row, light, icon_size)
+        
         if light is not None:
             if light >= 1000:
                 light_str = f"{light/1000:.1f}k"
             else:
                 light_str = f"{light:.0f}"
-            draw.text((right_col + icon_size + 4, bottom_row - 2), light_str, 
+            draw.text((right_col + text_offset, bottom_row - 2), light_str, 
                      font=self.font, fill=self.text_color)
         else:
-            draw.text((right_col + icon_size + 4, bottom_row - 2), "----", 
+            draw.text((right_col + text_offset, bottom_row - 2), "----", 
                      font=self.font, fill=self.accent_color)
-
-        # Subtle grid dividers
-        mid_x = self.width // 2
-        mid_y = self.height // 2
-        # Vertical divider
-        for y in range(8, self.height - 8):
-            if y % 4 == 0:
-                draw.point((mid_x - 2, y), fill=self.accent_color)
-        # Horizontal divider  
-        for x in range(8, self.width - 8):
-            if x % 4 == 0:
-                draw.point((x, mid_y), fill=self.accent_color)
 
         self.display.display(img)
 
