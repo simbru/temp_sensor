@@ -30,10 +30,10 @@ class EnviroLCDDisplay:
             graph_history_length: Number of data points to keep for graph mode
         """
         try:
-            from ST7735 import ST7735
+            from st7735 import ST7735
             from ltr559 import LTR559
-        except ImportError:
-            raise ImportError("ST7735 and ltr559 libraries not available - install with 'uv sync --extra enviroplus'")
+        except ImportError as e:
+            raise ImportError(f"ST7735 and ltr559 libraries not available - install with 'uv sync --extra enviroplus'. Error: {e}")
 
         # Initialize display
         self.display = ST7735(
