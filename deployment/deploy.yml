@@ -1,0 +1,107 @@
+---
+# Ansible Playbook: Deploy Temperature Sensor Updates
+#
+# Usage:
+#   ansible-playbook -i deployment/inventory.ini deployment/deploy.yml
+#   ansible-playbook -i deployment/inventory.ini deployment/deploy.yml --limit pi-room-307
+#
+# Features:
+# - Pulls latest code from git
+# - Updates dependencies with uv
+# - Generates config.ini from server config (avoids duplication)
+# - Restarts systemd service
+# - Verifies API health
+
+- name: Deploy temperature sensor updates
+  hosts: temperature_sensors
+  become: yes
+  vars:
+    repo_path: /home/pi/temp_sensor
+    # Git settings - can be overridden via -e flag or read from deployment config
+    git_repo: "{{ lookup('ini', 'git_repo section=DEPLOYMENT file=../deployment/config_deployment.ini default=https://github.com/yourusername/temp_sensor.git') }}"
+    git_version: "{{ lookup('ini', 'git_version section=DEPLOYMENT file=../deployment/config_deployment.ini default=main') }}"
+    service_name: tempsensor
+
+  tasks:
+    - name: Check if uv is installed
+      stat:
+        path: /home/pi/.local/bin/uv
+      register: uv_binary
+      become_user: pi
+
+    - name: Install uv if missing
+      shell: curl -LsSf https://astral.sh/uv/install.sh | sh
+      when: not uv_binary.stat.exists
+      become_user: pi
+      args:
+        executable: /bin/bash
+
+    - name: Pull latest code from git
+      git:
+        repo: '{{ git_repo }}'
+        dest: '{{ repo_path }}'
+        version: '{{ git_version }}'
+        force: yes
+      become_user: pi
+      register: git_result
+
+    - name: Install/update dependencies
+      shell: |
+        cd {{ repo_path }}
+        /home/pi/.local/bin/uv sync --extra pi
+      become_user: pi
+      args:
+        executable: /bin/bash
+      when: git_result.changed
+
+    - name: Generate config.ini from sensor metadata
+      template:
+        src: config.ini.j2
+        dest: '{{ repo_path }}/config.ini'
+        owner: pi
+        group: pi
+        mode: '0644'
+
+    - name: Check if systemd service exists
+      stat:
+        path: /etc/systemd/system/{{ service_name }}.service
+      register: service_file
+
+    - name: Install systemd service if missing
+      template:
+        src: tempsensor.service.j2
+        dest: /etc/systemd/system/{{ service_name }}.service
+        owner: root
+        group: root
+        mode: '0644'
+      when: not service_file.stat.exists
+      register: new_service
+
+    - name: Enable and start service (first time)
+      systemd:
+        name: '{{ service_name }}'
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      when: new_service.changed
+
+    - name: Restart service (if code changed)
+      systemd:
+        name: '{{ service_name }}'
+        state: restarted
+        daemon_reload: yes
+      when: git_result.changed and not new_service.changed
+
+    - name: Wait for API to be ready
+      uri:
+        url: "http://localhost:{{ sensor_port }}/status"
+        method: GET
+        status_code: 200
+        return_content: yes
+      retries: 10
+      delay: 2
+      register: health_check
+
+    - name: Display sensor health
+      debug:
+        msg: "{{ sensor_name }}: {{ health_check.json.device_name }} - {{ health_check.json.status }}"

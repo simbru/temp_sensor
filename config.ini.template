@@ -1,0 +1,28 @@
+# Temperature Sensor Client Configuration Template
+#
+# This is a TEMPLATE file tracked in git.
+# Copy this to config.ini and customize for your specific sensor:
+#   cp config.ini.template config.ini
+#
+# Note: When using Ansible deployment, this file is auto-generated
+# on each Pi from deployment/templates/config.ini.j2
+
+[SENSOR]
+# How often to read sensor (seconds)
+loginterval_s = 10
+
+# Output database file (SQLite)
+outputfile = templog.db
+
+# Device name (shown in API responses and dashboard)
+# UPDATE THIS for each sensor deployment
+device_name = My Sensor
+
+# API server port
+api_port = 5000
+
+# Spike filtering: reject unrealistic temperature changes
+max_temp_delta_c = 3
+
+# Spike filtering: reject unrealistic humidity changes
+max_humidity_delta_pct = 10

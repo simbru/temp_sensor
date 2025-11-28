@@ -1,0 +1,76 @@
+# Deployment Configuration Template
+#
+# This file contains deployment-specific settings (IP addresses, credentials, etc.)
+# that should NOT be committed to git.
+#
+# SETUP:
+#   1. Copy this template: cp deployment/config_deployment.ini.template deployment/config_deployment.ini
+#   2. Fill in your actual values
+#   3. The .gitignore ensures config_deployment.ini stays local
+#
+# This config is used by:
+#   - Ansible inventory generation (extracts sensor IPs)
+#   - Deployment scripts (git repo URL, SSH settings)
+
+[DEPLOYMENT]
+# Git repository URL (HTTPS or SSH)
+git_repo = https://github.com/yourusername/temp_sensor.git
+
+# Git branch/tag to deploy (usually 'main')
+git_version = main
+
+# SSH user for Raspberry Pis (usually 'pi')
+ansible_user = pi
+
+# Python interpreter path on Pis
+ansible_python_interpreter = /usr/bin/python3
+
+[SENSORS]
+# Production sensors with their Headscale IPs
+# Format: sensor_name = http://ip:port, poll_interval_s
+#
+# Example:
+# Room_307 = http://100.64.0.5:5000, 60
+# Perfusion_Sensor = http://100.64.0.6:5000, 1
+# Lab_Bench = http://100.64.0.7:5000, 60
+# Incubator = http://100.64.0.8:5000, 30
+
+# REPLACE THESE with your actual sensors:
+# Sensor_1 = http://100.64.0.X:5000, 30
+# Sensor_2 = http://100.64.0.Y:5000, 30
+# Sensor_3 = http://100.64.0.Z:5000, 30
+
+[SERVER]
+# Lab server settings (where dashboard runs)
+# These get copied to server/config_server.ini during deployment
+
+# Server connection info (for deployment)
+# If blank, assumes you'll deploy manually (git pull on server)
+# If set, enables remote deployment via SSH
+server_host =
+server_user =
+server_path =
+
+# Example for remote deployment:
+# server_host = 139.184.163.16
+# server_user = your_username
+# server_path = /path/to/temp_sensor
+
+# Dashboard settings (copied to server/config_server.ini)
+# Default poll interval for sensors (seconds)
+poll_interval_s = 2
+
+# Minimum gap before marking sensor offline
+min_gap_threshold_s = 60
+
+# Dashboard web server port
+dashboard_port = 8000
+
+# SQLite database path
+database_path = sensor_data.db
+
+# Dashboard refresh rate (milliseconds)
+dashboard_update_ms = 4000
+
+# Maximum plot points for performance
+max_plot_points = 10000

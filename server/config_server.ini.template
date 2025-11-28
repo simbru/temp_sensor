@@ -1,0 +1,48 @@
+# Server Configuration Template for Multi-Sensor Temperature Monitoring Dashboard
+#
+# This is a TEMPLATE file tracked in git.
+# Copy this to config_server.ini and fill in your actual sensor IPs:
+#   cp server/config_server.ini.template server/config_server.ini
+#
+# Each sensor section should have a unique name and specify the sensor's API URL.
+
+[SERVER]
+# How often to poll sensors for new data (seconds)
+poll_interval_s = 2
+
+# Minimum time before marking sensor offline (seconds)
+# Grace period = max(poll_interval_s * 2, min_gap_threshold_s)
+# Increase to reduce false alarms, decrease for faster offline detection
+min_gap_threshold_s = 60
+
+# Port for Bokeh dashboard
+dashboard_port = 8000
+
+# SQLite database path for cached sensor data
+database_path = sensor_data.db
+
+# Dashboard update interval (milliseconds)
+dashboard_update_ms = 4000
+
+# Maximum data points to plot (for performance)
+# If sensor has more data, it will be downsampled
+# Default: 10000 (good for ~5.5 hours at 2s intervals, or full detail for shorter windows)
+# Increase for more detail, decrease for faster rendering
+# Note: With smart windowing, this mainly affects "All data" view
+max_plot_points = 10000
+
+[SENSORS]
+# List of sensors to monitor
+# Format: sensor_name = http://headscale_ip:port, poll_interval_s
+# Poll interval is optional - defaults to 30s if not specified
+#
+# PRODUCTION EXAMPLE (update with your actual Headscale IPs):
+# Room_307 = http://100.64.0.5:5000, 60
+# Perfusion_Sensor = http://100.64.0.6:5000, 1
+# Lab_Bench = http://100.64.0.7:5000, 60
+# Incubator = http://100.64.0.8:5000, 30
+#
+# LOCAL TESTING (simulated sensors):
+Test_Sensor_1 = http://localhost:5001, 2
+Test_Sensor_2 = http://localhost:5002, 2
+Test_Sensor_3 = http://localhost:5003, 2

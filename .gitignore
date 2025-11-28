@@ -25,9 +25,11 @@ tempsens_running.pid
 # User settings
 settings.ini
 
-# Configuration files (site-specific, don't overwrite on pull)
+# Configuration files (deployment-specific, contain real IPs/secrets)
+# Templates (.template files) ARE tracked in git
 config.ini
 server/config_server.ini
+deployment/config_deployment.ini
 
 # Internal documentation (security-sensitive)
 HEADSCALE.md
@@ -43,3 +45,6 @@ uv.lock
 # Service logs (Windows dashboard service)
 logs/
 *.log
+
+# Ansible auto-generated files
+deployment/inventory.ini
