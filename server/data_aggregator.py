@@ -136,7 +136,7 @@ class DataAggregator:
                     cursor.execute(f"ALTER TABLE sensor_metadata ADD COLUMN {col_name} {col_type}")
                     logger.info(f"Added column {col_name} to sensor_metadata table")
 
-            # Create a table for each sensor
+            # Create a table for each sensor with extended fields for multi-sensor devices
             for sensor_name in self.client.get_all_sensor_names():
                 table_name = self._get_table_name(sensor_name)
                 cursor.execute(f"""
@@ -145,6 +145,9 @@ class DataAggregator:
                         timestamp INTEGER NOT NULL,
                         temperature REAL,
                         humidity REAL,
+                        pressure REAL,
+                        light REAL,
+                        noise REAL,
                         UNIQUE(timestamp)
                     )
                 """)
@@ -152,6 +155,15 @@ class DataAggregator:
                     CREATE INDEX IF NOT EXISTS idx_{table_name}_timestamp
                     ON {table_name}(timestamp DESC)
                 """)
+
+                # Migrate existing tables: add extended sensor columns if they don't exist
+                cursor.execute(f"PRAGMA table_info({table_name})")
+                existing_cols = {row[1] for row in cursor.fetchall()}
+                new_sensor_cols = ["pressure", "light", "noise"]
+                for col_name in new_sensor_cols:
+                    if col_name not in existing_cols:
+                        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} REAL")
+                        logger.info(f"Added column {col_name} to {table_name}")
 
             conn.commit()
 
@@ -189,13 +201,16 @@ class DataAggregator:
             times = sensor_data.get("time", [])
             temperatures = sensor_data.get("temperature", [])
             humidities = sensor_data.get("humidity", [])
+            pressures = sensor_data.get("pressure", [None] * len(times))  # Default to None if not present
+            lights = sensor_data.get("light", [None] * len(times))
+            noises = sensor_data.get("noise", [None] * len(times))
 
             if len(times) == 0:
                 logger.warning(f"No historical data available for {sensor_name}")
                 return False
 
-            # Prepare records for insertion
-            records = list(zip(times, temperatures, humidities))
+            # Prepare records for insertion (6-tuple now)
+            records = list(zip(times, temperatures, humidities, pressures, lights, noises))
             total_records = len(records)
 
             # Insert in batches to avoid memory issues
@@ -207,7 +222,7 @@ class DataAggregator:
                 for i in range(0, total_records, batch_size):
                     batch = records[i:i + batch_size]
                     cursor.executemany(
-                        f"INSERT OR IGNORE INTO {table_name} (timestamp, temperature, humidity) VALUES (?, ?, ?)",
+                        f"INSERT OR IGNORE INTO {table_name} (timestamp, temperature, humidity, pressure, light, noise) VALUES (?, ?, ?, ?, ?, ?)",
                         batch
                     )
                     inserted_count += len(batch)
@@ -328,7 +343,7 @@ class DataAggregator:
                 with sqlite3.connect(self.db_path) as conn:
                     cursor = conn.cursor()
                     cursor.executemany(
-                        f"INSERT OR IGNORE INTO {table_name} (timestamp, temperature, humidity) VALUES (?, ?, ?)",
+                        f"INSERT OR IGNORE INTO {table_name} (timestamp, temperature, humidity, pressure, light, noise) VALUES (?, ?, ?, ?, ?, ?)",
                         new_records
                     )
                     conn.commit()
@@ -438,7 +453,8 @@ class DataAggregator:
             end_time: End timestamp (INTEGER milliseconds since epoch)
 
         Returns:
-            Dictionary with 'time', 'temperature', 'humidity' arrays (as milliseconds for Bokeh)
+            Dictionary with arrays for 'time', 'temperature', 'humidity', and optionally
+            'pressure', 'light', 'noise' (as milliseconds for Bokeh compatibility)
         """
         table_name = self._get_table_name(sensor_name)
 
@@ -449,9 +465,9 @@ class DataAggregator:
             if limit is not None:
                 # Get last N readings in descending order, then reverse to chronological
                 query = f"""
-                    SELECT timestamp, temperature, humidity
+                    SELECT timestamp, temperature, humidity, pressure, light, noise
                     FROM (
-                        SELECT timestamp, temperature, humidity
+                        SELECT timestamp, temperature, humidity, pressure, light, noise
                         FROM {table_name}
                         ORDER BY timestamp DESC
                         LIMIT ?
@@ -471,27 +487,47 @@ class DataAggregator:
                     params.append(end_time)
 
                 where_clause = " AND ".join(conditions)
-                query = f"SELECT timestamp, temperature, humidity FROM {table_name} WHERE {where_clause} ORDER BY timestamp"
+                query = f"SELECT timestamp, temperature, humidity, pressure, light, noise FROM {table_name} WHERE {where_clause} ORDER BY timestamp"
                 cursor.execute(query, params)
             else:
-                query = f"SELECT timestamp, temperature, humidity FROM {table_name} ORDER BY timestamp"
+                query = f"SELECT timestamp, temperature, humidity, pressure, light, noise FROM {table_name} ORDER BY timestamp"
                 cursor.execute(query)
 
             rows = cursor.fetchall()
 
         if not rows:
-            return {"time": np.array([]), "temperature": np.array([]), "humidity": np.array([])}
+            return {
+                "time": np.array([]),
+                "temperature": np.array([]),
+                "humidity": np.array([]),
+                "pressure": np.array([]),
+                "light": np.array([]),
+                "noise": np.array([])
+            }
 
         # Convert to arrays (timestamps are already INTEGER milliseconds from database)
         times_ms = np.array([row[0] for row in rows], dtype=np.float64)
         temperatures = np.array([row[1] for row in rows], dtype=np.float32)
         humidities = np.array([row[2] for row in rows], dtype=np.float32)
+        pressures = np.array([row[3] if row[3] is not None else np.nan for row in rows], dtype=np.float32)
+        lights = np.array([row[4] if row[4] is not None else np.nan for row in rows], dtype=np.float32)
+        noises = np.array([row[5] if row[5] is not None else np.nan for row in rows], dtype=np.float32)
 
-        return {
+        result = {
             "time": times_ms,
             "temperature": temperatures,
             "humidity": humidities
         }
+
+        # Only include extended sensor arrays if they contain actual data (not all NaN)
+        if not np.all(np.isnan(pressures)):
+            result["pressure"] = pressures
+        if not np.all(np.isnan(lights)):
+            result["light"] = lights
+        if not np.all(np.isnan(noises)):
+            result["noise"] = noises
+
+        return result
 
     def get_sensor_metadata(self, sensor_name: str) -> Optional[Dict]:
         """Get metadata for a specific sensor."""
@@ -904,16 +940,33 @@ class DataAggregator:
         return records, device_ip
 
     @staticmethod
-    def _extract_new_records(sensor_data: Dict, last_timestamp: Optional[int]) -> List[Tuple[int, float, float]]:
+    def _extract_new_records(sensor_data: Dict, last_timestamp: Optional[int]) -> List[Tuple]:
+        """
+        Extract new records from sensor data, supporting extended sensor fields.
+
+        Returns:
+            List of tuples: (timestamp, temp, hum, pressure, light, noise)
+            Extended fields default to None if not present in data
+        """
         times = sensor_data.get("time", [])
         temps = sensor_data.get("temperature", [])
         hums = sensor_data.get("humidity", [])
+        pressures = sensor_data.get("pressure", [None] * len(times))
+        lights = sensor_data.get("light", [None] * len(times))
+        noises = sensor_data.get("noise", [None] * len(times))
 
-        new_records: List[Tuple[int, float, float]] = []
+        new_records: List[Tuple] = []
         for i in range(len(times)):
             timestamp = times[i]
             if last_timestamp is None or timestamp > last_timestamp:
-                new_records.append((timestamp, temps[i], hums[i]))
+                new_records.append((
+                    timestamp,
+                    temps[i],
+                    hums[i],
+                    pressures[i] if i < len(pressures) else None,
+                    lights[i] if i < len(lights) else None,
+                    noises[i] if i < len(noises) else None
+                ))
 
         return new_records
 
