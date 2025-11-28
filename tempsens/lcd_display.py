@@ -13,6 +13,7 @@ Switch modes by covering the proximity sensor (LTR559).
 Inspired by Pimoroni's all-in-one-enviro-mini.py and weather-and-light.py examples.
 """
 
+import math
 import time
 import colorsys
 from typing import Optional, List, Dict
@@ -232,14 +233,184 @@ class EnviroLCDDisplay:
         # Display the image
         self.display.display(img)
 
+    def _draw_thermometer_icon(self, draw: ImageDraw.Draw, x: int, y: int, 
+                                temp: Optional[float], size: int = 16):
+        """Draw a thermometer icon with fill level based on temperature."""
+        # Color based on temperature
+        if temp is None:
+            fill_color = self.accent_color
+            fill_pct = 0.3
+        elif temp < 10:
+            fill_color = (80, 120, 255)  # Cold blue
+            fill_pct = 0.2
+        elif temp < 20:
+            fill_color = (0, 200, 255)  # Cool cyan
+            fill_pct = 0.4
+        elif temp < 25:
+            fill_color = (0, 255, 180)  # Nice green-cyan
+            fill_pct = 0.6
+        elif temp < 30:
+            fill_color = (255, 200, 0)  # Warm yellow
+            fill_pct = 0.8
+        else:
+            fill_color = (255, 80, 80)  # Hot red
+            fill_pct = 1.0
+
+        # Draw thermometer body (vertical tube)
+        tube_w = 4
+        tube_h = size - 6
+        tx = x + (size - tube_w) // 2
+        ty = y
+        draw.rectangle([tx, ty, tx + tube_w, ty + tube_h], outline=fill_color)
+        
+        # Draw bulb at bottom
+        bulb_r = 4
+        bx = x + size // 2
+        by = y + size - bulb_r
+        draw.ellipse([bx - bulb_r, by - bulb_r, bx + bulb_r, by + bulb_r], fill=fill_color)
+        
+        # Fill level inside tube
+        fill_h = int((tube_h - 2) * fill_pct)
+        if fill_h > 0:
+            draw.rectangle([tx + 1, ty + tube_h - 1 - fill_h, tx + tube_w - 1, ty + tube_h - 1], 
+                          fill=fill_color)
+
+    def _draw_droplet_icon(self, draw: ImageDraw.Draw, x: int, y: int,
+                           humidity: Optional[float], size: int = 16):
+        """Draw a water droplet icon with fill based on humidity."""
+        # Color based on humidity level
+        if humidity is None:
+            color = self.accent_color
+            fill_pct = 0.3
+        elif humidity < 30:
+            color = (255, 150, 50)  # Dry orange
+            fill_pct = 0.2
+        elif humidity < 50:
+            color = (0, 200, 255)  # Good cyan
+            fill_pct = 0.5
+        elif humidity < 70:
+            color = (0, 255, 200)  # Nice green-cyan
+            fill_pct = 0.7
+        else:
+            color = (80, 150, 255)  # Very humid blue
+            fill_pct = 1.0
+
+        # Draw droplet shape using polygon
+        cx = x + size // 2
+        # Droplet points: top point, curves down to round bottom
+        points = [
+            (cx, y + 2),           # Top point
+            (cx - 5, y + 8),       # Left curve
+            (cx - 4, y + 12),      # Left bottom
+            (cx, y + 14),          # Bottom center
+            (cx + 4, y + 12),      # Right bottom
+            (cx + 5, y + 8),       # Right curve
+        ]
+        draw.polygon(points, outline=color)
+        
+        # Fill based on humidity (simple horizontal fill from bottom)
+        fill_h = int(10 * fill_pct)
+        if fill_h > 0:
+            # Small filled ellipse at bottom of droplet
+            draw.ellipse([cx - 3, y + 14 - fill_h, cx + 3, y + 14], fill=color)
+
+    def _draw_pressure_icon(self, draw: ImageDraw.Draw, x: int, y: int,
+                            pressure: Optional[float], size: int = 16):
+        """Draw a barometer/weather icon based on pressure."""
+        # Determine weather based on pressure
+        if pressure is None:
+            color = self.accent_color
+            weather = "unknown"
+        elif pressure < 1000:
+            color = (150, 100, 255)  # Stormy purple
+            weather = "storm"
+        elif pressure < 1010:
+            color = (100, 150, 255)  # Rainy blue
+            weather = "rain"
+        elif pressure < 1020:
+            color = (0, 200, 255)  # Fair cyan
+            weather = "fair"
+        else:
+            color = (0, 255, 180)  # High pressure green
+            weather = "high"
+
+        cx = x + size // 2
+        cy = y + size // 2
+
+        if weather == "storm":
+            # Lightning bolt
+            points = [(cx, y + 2), (cx - 3, cy + 2), (cx + 1, cy + 2), 
+                     (cx - 2, y + size - 2)]
+            draw.line(points, fill=color, width=2)
+        elif weather == "rain":
+            # Cloud with rain drops
+            draw.arc([x + 2, y + 2, x + 10, y + 10], 0, 180, fill=color)
+            draw.arc([x + 6, y + 2, x + 14, y + 10], 0, 180, fill=color)
+            # Rain drops
+            for dx in [4, 8, 12]:
+                draw.line([(x + dx, y + 10), (x + dx - 1, y + 14)], fill=color)
+        elif weather == "high":
+            # Sun rays
+            draw.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], outline=color)
+            for angle in range(0, 360, 45):
+                rad = math.radians(angle)
+                x1 = cx + int(5 * math.cos(rad))
+                y1 = cy + int(5 * math.sin(rad))
+                x2 = cx + int(7 * math.cos(rad))
+                y2 = cy + int(7 * math.sin(rad))
+                draw.line([(x1, y1), (x2, y2)], fill=color)
+        else:
+            # Fair weather - simple cloud
+            draw.arc([x + 1, y + 4, x + 9, y + 12], 0, 180, fill=color)
+            draw.arc([x + 5, y + 3, x + 14, y + 12], 0, 180, fill=color)
+            draw.line([(x + 3, y + 10), (x + 12, y + 10)], fill=color)
+
+    def _draw_light_icon(self, draw: ImageDraw.Draw, x: int, y: int,
+                         light: Optional[float], size: int = 16):
+        """Draw a light bulb icon with brightness indication."""
+        # Brightness level and color
+        if light is None:
+            color = self.accent_color
+            rays = False
+        elif light < 10:
+            color = (60, 80, 100)  # Very dim
+            rays = False
+        elif light < 100:
+            color = (100, 150, 200)  # Dim
+            rays = False
+        elif light < 500:
+            color = (0, 200, 255)  # Medium
+            rays = True
+        else:
+            color = (0, 255, 200)  # Bright
+            rays = True
+
+        cx = x + size // 2
+        
+        # Bulb shape - ellipse for glass
+        draw.ellipse([cx - 5, y + 1, cx + 5, y + 10], outline=color)
+        
+        # Screw base
+        draw.rectangle([cx - 3, y + 10, cx + 3, y + 14], outline=color)
+        
+        # Fill bulb if light is on
+        if light is not None and light > 50:
+            draw.ellipse([cx - 4, y + 2, cx + 4, y + 9], fill=color)
+        
+        # Light rays if bright
+        if rays:
+            # Small dots around the bulb
+            for dx, dy in [(-7, 4), (7, 4), (-5, -1), (5, -1)]:
+                draw.point((cx + dx, y + 5 + dy), fill=color)
+
     def draw_dashboard(self, temperature: Optional[float], humidity: Optional[float],
                        pressure: Optional[float] = None, light: Optional[float] = None):
         """
-        Draw a mini dashboard showing all sensor readings at once.
+        Draw a mini dashboard showing all sensor readings with icons.
         
         Layout (160x80 display):
-        - Temperature and Humidity on left side (large values)
-        - Pressure and Light on right side (smaller values)
+        - 2x2 grid with icon + large value for each sensor
+        - Icons change color/style based on reading levels
         
         Args:
             temperature: Temperature in Celsius
@@ -250,51 +421,69 @@ class EnviroLCDDisplay:
         img = Image.new("RGB", (self.width, self.height), color=self.bg_color)
         draw = ImageDraw.Draw(img)
 
-        # Left column - Temperature and Humidity (main readings)
-        # Temperature - top left, large
+        # 2x2 grid layout
+        # Top row: Temperature | Humidity
+        # Bottom row: Pressure | Light
+        icon_size = 16
+        left_col = 4
+        right_col = 84
+        top_row = 4
+        bottom_row = 42
+
+        # ===== TEMPERATURE (top left) =====
+        self._draw_thermometer_icon(draw, left_col, top_row, temperature, icon_size)
         if temperature is not None:
             temp_str = f"{temperature:.1f}°"
-            draw.text((2, 2), temp_str, font=self.font, fill=self.text_color)
+            draw.text((left_col + icon_size + 4, top_row), temp_str, 
+                     font=self.font, fill=self.text_color)
         else:
-            draw.text((2, 2), "--°", font=self.font, fill=self.accent_color)
+            draw.text((left_col + icon_size + 4, top_row), "--°", 
+                     font=self.font, fill=self.accent_color)
 
-        # Humidity - bottom left, large
+        # ===== HUMIDITY (top right) =====
+        self._draw_droplet_icon(draw, right_col, top_row, humidity, icon_size)
         if humidity is not None:
             hum_str = f"{humidity:.0f}%"
-            draw.text((2, 28), hum_str, font=self.font, fill=self.text_color)
+            draw.text((right_col + icon_size + 4, top_row), hum_str, 
+                     font=self.font, fill=self.text_color)
         else:
-            draw.text((2, 28), "--%", font=self.font, fill=self.accent_color)
+            draw.text((right_col + icon_size + 4, top_row), "--%", 
+                     font=self.font, fill=self.accent_color)
 
-        # Right column - Pressure and Light (secondary readings)
-        # Pressure - top right
+        # ===== PRESSURE (bottom left) =====
+        self._draw_pressure_icon(draw, left_col, bottom_row, pressure, icon_size)
         if pressure is not None:
             pres_str = f"{pressure:.0f}"
-            draw.text((85, 5), pres_str, font=self.font_lg, fill=self.text_color)
-            draw.text((85, 20), "hPa", font=self.font_sm, fill=self.accent_color)
+            draw.text((left_col + icon_size + 4, bottom_row - 2), pres_str, 
+                     font=self.font, fill=self.text_color)
         else:
-            draw.text((85, 5), "----", font=self.font_lg, fill=self.accent_color)
-            draw.text((85, 20), "hPa", font=self.font_sm, fill=self.accent_color)
+            draw.text((left_col + icon_size + 4, bottom_row - 2), "----", 
+                     font=self.font, fill=self.accent_color)
 
-        # Light - bottom right
+        # ===== LIGHT (bottom right) =====
+        self._draw_light_icon(draw, right_col, bottom_row, light, icon_size)
         if light is not None:
             if light >= 1000:
                 light_str = f"{light/1000:.1f}k"
             else:
                 light_str = f"{light:.0f}"
-            draw.text((85, 38), light_str, font=self.font_lg, fill=self.text_color)
-            draw.text((85, 53), "lux", font=self.font_sm, fill=self.accent_color)
+            draw.text((right_col + icon_size + 4, bottom_row - 2), light_str, 
+                     font=self.font, fill=self.text_color)
         else:
-            draw.text((85, 38), "----", font=self.font_lg, fill=self.accent_color)
-            draw.text((85, 53), "lux", font=self.font_sm, fill=self.accent_color)
+            draw.text((right_col + icon_size + 4, bottom_row - 2), "----", 
+                     font=self.font, fill=self.accent_color)
 
-        # Draw a subtle vertical divider
-        for y in range(5, self.height - 5):
-            if y % 3 == 0:  # Dotted line
-                draw.point((80, y), fill=self.accent_color)
-
-        # Draw a subtle bottom indicator showing this is dashboard mode
-        draw.text((self.width // 2 - 20, self.height - 12), "[ALL]", 
-                  font=self.font_sm, fill=self.accent_color)
+        # Subtle grid dividers
+        mid_x = self.width // 2
+        mid_y = self.height // 2
+        # Vertical divider
+        for y in range(8, self.height - 8):
+            if y % 4 == 0:
+                draw.point((mid_x - 2, y), fill=self.accent_color)
+        # Horizontal divider  
+        for x in range(8, self.width - 8):
+            if x % 4 == 0:
+                draw.point((x, mid_y), fill=self.accent_color)
 
         self.display.display(img)
 
