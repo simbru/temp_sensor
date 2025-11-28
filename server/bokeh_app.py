@@ -312,23 +312,45 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
         gap_threshold = 180 if connect_points else 60
         expected_interval_s = 2  # Fallback typical interval
 
-    # Insert gap markers for all sensor arrays
-    time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums,
-                                                  gap_threshold_s=gap_threshold,
-                                                  expected_interval_s=expected_interval_s)
+    # Build list of all arrays to process together (ensures same gap markers for all)
+    arrays_to_process = [temps, hums]
+    if has_pressure and pressures is not None:
+        # Ensure pressure array matches length of temps/hums
+        if len(pressures) == len(temps):
+            arrays_to_process.append(pressures)
+        else:
+            has_pressure = False
+    if has_light and lights is not None:
+        if len(lights) == len(temps):
+            arrays_to_process.append(lights)
+        else:
+            has_light = False
+    if has_noise and noises is not None:
+        if len(noises) == len(temps):
+            arrays_to_process.append(noises)
+        else:
+            has_noise = False
 
+    # Insert gap markers for ALL sensor arrays in a single pass
+    # This ensures all arrays get the same gap markers at the same positions
+    result_arrays = _insert_gap_markers_multi(time_vals, arrays_to_process,
+                                               gap_threshold_s=gap_threshold,
+                                               expected_interval_s=expected_interval_s)
+
+    # Unpack results
+    time_vals = result_arrays[0]
+    temps = result_arrays[1]
+    hums = result_arrays[2]
+    array_idx = 3
     if has_pressure:
-        time_vals, pressures, _ = _insert_gap_markers(time_vals, pressures, hums,
-                                                      gap_threshold_s=gap_threshold,
-                                                      expected_interval_s=expected_interval_s)
+        pressures = result_arrays[array_idx]
+        array_idx += 1
     if has_light:
-        time_vals, lights, _ = _insert_gap_markers(time_vals, lights, hums,
-                                                   gap_threshold_s=gap_threshold,
-                                                   expected_interval_s=expected_interval_s)
+        lights = result_arrays[array_idx]
+        array_idx += 1
     if has_noise:
-        time_vals, noises, _ = _insert_gap_markers(time_vals, noises, hums,
-                                                   gap_threshold_s=gap_threshold,
-                                                   expected_interval_s=expected_interval_s)
+        noises = result_arrays[array_idx]
+        array_idx += 1
 
     window = max(int(window_size), 1)
 
@@ -347,16 +369,30 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
         "hum_ma": hum_ma,
     }
 
-    # Add extended sensors with moving averages if present
-    if has_pressure:
+    # ALWAYS include extended sensor columns for ColumnDataSource consistency
+    # Use actual data if available, otherwise empty arrays of matching length
+    n_points = len(time_vals)
+    
+    if has_pressure and pressures is not None and len(pressures) == n_points:
         result["pressure"] = pressures
         result["pressure_ma"] = pd.Series(pressures).rolling(window=window, min_periods=1).mean().to_numpy()
-    if has_light:
+    else:
+        result["pressure"] = np.full(n_points, np.nan)
+        result["pressure_ma"] = np.full(n_points, np.nan)
+    
+    if has_light and lights is not None and len(lights) == n_points:
         result["light"] = lights
         result["light_ma"] = pd.Series(lights).rolling(window=window, min_periods=1).mean().to_numpy()
-    if has_noise:
+    else:
+        result["light"] = np.full(n_points, np.nan)
+        result["light_ma"] = np.full(n_points, np.nan)
+    
+    if has_noise and noises is not None and len(noises) == n_points:
         result["noise"] = noises
         result["noise_ma"] = pd.Series(noises).rolling(window=window, min_periods=1).mean().to_numpy()
+    else:
+        result["noise"] = np.full(n_points, np.nan)
+        result["noise_ma"] = np.full(n_points, np.nan)
 
     return result
 
@@ -506,6 +542,112 @@ def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_int
     return (result_times[:write_idx],
             result_temps[:write_idx],
             result_hums[:write_idx])
+
+
+def _insert_gap_markers_multi(time_vals, data_arrays, gap_threshold_s=60, expected_interval_s=2):
+    """
+    Insert NaN at time gaps for multiple data arrays simultaneously.
+    
+    This ensures all arrays get gap markers at exactly the same positions,
+    preventing shape mismatches when sensors have extended data (pressure, light, noise).
+
+    Args:
+        time_vals: Millisecond timestamps (float)
+        data_arrays: List of data arrays to process (all must have same length as time_vals)
+        gap_threshold_s: Fallback gap threshold if auto-detection fails
+        expected_interval_s: Fallback interval if auto-detection fails
+
+    Returns:
+        List of arrays: [time_vals, array1, array2, ...] with NaN inserted at gaps
+    """
+    if len(time_vals) < 2:
+        return [time_vals] + list(data_arrays)
+
+    # Calculate time gaps directly from milliseconds
+    time_diffs_ms = np.diff(time_vals)
+    time_diffs_s = time_diffs_ms / 1000.0
+
+    # ADAPTIVE GAP DETECTION
+    median_interval = np.median(time_diffs_s)
+    reasonable_diffs = time_diffs_s[time_diffs_s < median_interval * 10]
+
+    if len(reasonable_diffs) > 0:
+        baseline_interval = np.percentile(reasonable_diffs, 95)
+    else:
+        baseline_interval = expected_interval_s
+
+    # Detect gaps using adaptive threshold
+    adaptive_gap_threshold = max(baseline_interval * 3, gap_threshold_s)
+    gap_mask = time_diffs_s > adaptive_gap_threshold
+    gap_indices = np.where(gap_mask)[0] + 1
+
+    if len(gap_indices) == 0:
+        return [time_vals] + list(data_arrays)
+
+    # Calculate exact size needed
+    total_nan_markers = 0
+    gap_info = []  # Store (gap_idx, num_nan_markers, nan_times) for each gap
+
+    for gap_idx in gap_indices:
+        gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
+        gap_size_seconds = gap_size_ms / 1000.0
+
+        # Local adaptive interval
+        local_window_start = max(0, gap_idx - 50)
+        local_window_end = min(len(time_diffs_s), gap_idx + 50)
+        local_diffs = time_diffs_s[local_window_start:local_window_end]
+        local_reasonable = local_diffs[local_diffs < adaptive_gap_threshold]
+
+        if len(local_reasonable) > 5:
+            local_interval = np.median(local_reasonable)
+        else:
+            local_interval = baseline_interval
+
+        effective_interval = max(baseline_interval, local_interval)
+        num_missing = int(gap_size_seconds / effective_interval)
+        num_nan_markers = max(min(num_missing, 100), 5)
+
+        # Pre-calculate NaN timestamps
+        gap_start_ms = time_vals[gap_idx - 1]
+        gap_end_ms = time_vals[gap_idx]
+        nan_times = np.linspace(gap_start_ms, gap_end_ms, num_nan_markers + 2)[1:-1]
+
+        gap_info.append((gap_idx, num_nan_markers, nan_times))
+        total_nan_markers += num_nan_markers
+
+    # Preallocate result arrays
+    result_size = len(time_vals) + total_nan_markers
+    result_times = np.empty(result_size, dtype=float)
+    result_arrays = [np.empty(result_size, dtype=float) for _ in data_arrays]
+
+    write_idx = 0
+    prev_idx = 0
+
+    for gap_idx, num_nan_markers, nan_times in gap_info:
+        # Copy data up to gap
+        chunk_size = gap_idx - prev_idx
+        result_times[write_idx:write_idx+chunk_size] = time_vals[prev_idx:gap_idx]
+        for i, arr in enumerate(data_arrays):
+            result_arrays[i][write_idx:write_idx+chunk_size] = arr[prev_idx:gap_idx]
+        write_idx += chunk_size
+
+        # Insert NaN markers
+        result_times[write_idx:write_idx+num_nan_markers] = nan_times
+        for result_arr in result_arrays:
+            result_arr[write_idx:write_idx+num_nan_markers] = np.nan
+        write_idx += num_nan_markers
+
+        prev_idx = gap_idx
+
+    # Copy remaining data
+    remaining = len(time_vals) - prev_idx
+    result_times[write_idx:write_idx+remaining] = time_vals[prev_idx:]
+    for i, arr in enumerate(data_arrays):
+        result_arrays[i][write_idx:write_idx+remaining] = arr[prev_idx:]
+    write_idx += remaining
+
+    # Trim to actual size and return
+    return [result_times[:write_idx]] + [arr[:write_idx] for arr in result_arrays]
 
 
 # Fetch initial data for first sensor
