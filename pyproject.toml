@@ -58,14 +58,8 @@ pi-hardware = [
 # Install with: uv sync --group client --extra enviroplus
 # The client group provides fastapi and uvicorn for the API server
 enviroplus = [
-    "pimoroni-bme280; sys_platform == 'linux'",
-    "smbus2; sys_platform == 'linux'",
-    "ltr559; sys_platform == 'linux'",
-    "st7735; sys_platform == 'linux'",
+    # Use the official Pimoroni enviroplus package which bundles all dependencies
+    "enviroplus @ git+https://github.com/pimoroni/enviroplus-python; sys_platform == 'linux'",
     "pillow; sys_platform == 'linux'",  # Required for LCD display
-    "gpiod; sys_platform == 'linux'",   # Required for st7735 GPIO access
-    "fonts; sys_platform == 'linux'",
-    "font-roboto; sys_platform == 'linux'",
-    "paho-mqtt; sys_platform == 'linux'",
 ]
 
