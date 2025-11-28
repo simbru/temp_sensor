@@ -253,9 +253,10 @@ def _compute_window_bounds(center: float, width: float, *, minimum: float | None
 def prepare_source_data(raw_data, window_size, max_points=None, connect_points=False, log_interval_s=None):
     """
     Return CDS-compatible dict with moving-average columns added.
+    Supports extended sensor data (pressure, light, noise) when available.
 
     Args:
-        raw_data: Raw sensor data dict
+        raw_data: Raw sensor data dict (may include pressure, light, noise)
         window_size: Moving average window size
         max_points: Not used (reserved for future LTTB implementation)
         connect_points: If True, only show breaks for large gaps (3+ missed readings)
@@ -269,9 +270,28 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
     temps = np.asarray(raw_data.get("temperature", []), dtype=float)
     hums = np.asarray(raw_data.get("humidity", []), dtype=float)
 
+    # Check for extended sensor data
+    has_pressure = "pressure" in raw_data and len(raw_data["pressure"]) > 0
+    has_light = "light" in raw_data and len(raw_data["light"]) > 0
+    has_noise = "noise" in raw_data and len(raw_data["noise"]) > 0
+
+    pressures = np.asarray(raw_data.get("pressure", []), dtype=float) if has_pressure else None
+    lights = np.asarray(raw_data.get("light", []), dtype=float) if has_light else None
+    noises = np.asarray(raw_data.get("noise", []), dtype=float) if has_noise else None
+
     if len(temps) == 0:
-        return {"time": time_vals, "temperature": temps, "humidity": hums,
+        result = {"time": time_vals, "temperature": temps, "humidity": hums,
                 "temp_ma": temps, "hum_ma": hums}
+        if has_pressure:
+            result["pressure"] = pressures
+            result["pressure_ma"] = pressures
+        if has_light:
+            result["light"] = lights
+            result["light_ma"] = lights
+        if has_noise:
+            result["noise"] = noises
+            result["noise_ma"] = noises
+        return result
 
     # Note: Removed simple downsampling as it caused "snaking" artifacts
     # Smart windowing now limits data at fetch time instead
@@ -292,9 +312,23 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
         gap_threshold = 180 if connect_points else 60
         expected_interval_s = 2  # Fallback typical interval
 
+    # Insert gap markers for all sensor arrays
     time_vals, temps, hums = _insert_gap_markers(time_vals, temps, hums,
                                                   gap_threshold_s=gap_threshold,
                                                   expected_interval_s=expected_interval_s)
+
+    if has_pressure:
+        time_vals, pressures, _ = _insert_gap_markers(time_vals, pressures, hums,
+                                                      gap_threshold_s=gap_threshold,
+                                                      expected_interval_s=expected_interval_s)
+    if has_light:
+        time_vals, lights, _ = _insert_gap_markers(time_vals, lights, hums,
+                                                   gap_threshold_s=gap_threshold,
+                                                   expected_interval_s=expected_interval_s)
+    if has_noise:
+        time_vals, noises, _ = _insert_gap_markers(time_vals, noises, hums,
+                                                   gap_threshold_s=gap_threshold,
+                                                   expected_interval_s=expected_interval_s)
 
     window = max(int(window_size), 1)
 
@@ -305,13 +339,26 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
     temp_ma = pd.Series(temps).rolling(window=window, min_periods=1).mean().to_numpy()
     hum_ma = pd.Series(hums).rolling(window=window, min_periods=1).mean().to_numpy()
 
-    return {
+    result = {
         "time": time_vals,
         "temperature": temps,
         "humidity": hums,
         "temp_ma": temp_ma,
         "hum_ma": hum_ma,
     }
+
+    # Add extended sensors with moving averages if present
+    if has_pressure:
+        result["pressure"] = pressures
+        result["pressure_ma"] = pd.Series(pressures).rolling(window=window, min_periods=1).mean().to_numpy()
+    if has_light:
+        result["light"] = lights
+        result["light_ma"] = pd.Series(lights).rolling(window=window, min_periods=1).mean().to_numpy()
+    if has_noise:
+        result["noise"] = noises
+        result["noise_ma"] = pd.Series(noises).rolling(window=window, min_periods=1).mean().to_numpy()
+
+    return result
 
 
 def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_interval_s=2):
@@ -603,6 +650,84 @@ humidity_plot.xaxis.ticker.num_minor_ticks = 5
 
 # Store day boundary spans for dynamic updates
 day_boundary_spans_hum = []
+
+# Create pressure plot (shown only if sensor provides pressure data)
+pressure_plot = figure(
+    title=f"Pressure - {current_sensor_state['name']}",
+    x_axis_label="Time",
+    y_axis_label="Pressure (hPa)",
+    x_axis_type="datetime",
+    height=200,
+    sizing_mode="scale_width",
+    max_width=1000,
+    tools="pan,wheel_zoom,box_zoom,reset,save",
+    active_drag=None,
+    active_scroll=None,
+    x_range=temp_plot.x_range,
+    output_backend="webgl",
+    visible=False  # Hidden by default, shown when pressure data available
+)
+pressure_raw_renderer = pressure_plot.line('time', 'pressure', source=source, line_width=2,
+                                          color='#90EE90', alpha=0.6)
+pressure_ma_renderer = pressure_plot.line('time', 'pressure_ma', source=source, line_width=3,
+                                         color='green', alpha=0.9)
+pressure_plot.xgrid.grid_line_color = "gray"
+pressure_plot.xgrid.grid_line_alpha = 0.3
+pressure_plot.xgrid.minor_grid_line_alpha = 0.15
+pressure_plot.xaxis.ticker.num_minor_ticks = 5
+day_boundary_spans_pressure = []
+
+# Create light plot (shown only if sensor provides light data)
+light_plot = figure(
+    title=f"Light - {current_sensor_state['name']}",
+    x_axis_label="Time",
+    y_axis_label="Light (lux)",
+    x_axis_type="datetime",
+    height=200,
+    sizing_mode="scale_width",
+    max_width=1000,
+    tools="pan,wheel_zoom,box_zoom,reset,save",
+    active_drag=None,
+    active_scroll=None,
+    x_range=temp_plot.x_range,
+    output_backend="webgl",
+    visible=False  # Hidden by default, shown when light data available
+)
+light_raw_renderer = light_plot.line('time', 'light', source=source, line_width=2,
+                                    color='#FFD700', alpha=0.6)
+light_ma_renderer = light_plot.line('time', 'light_ma', source=source, line_width=3,
+                                   color='orange', alpha=0.9)
+light_plot.xgrid.grid_line_color = "gray"
+light_plot.xgrid.grid_line_alpha = 0.3
+light_plot.xgrid.minor_grid_line_alpha = 0.15
+light_plot.xaxis.ticker.num_minor_ticks = 5
+day_boundary_spans_light = []
+
+# Create noise plot (shown only if sensor provides noise data)
+noise_plot = figure(
+    title=f"Noise - {current_sensor_state['name']}",
+    x_axis_label="Time",
+    y_axis_label="Noise (dBA)",
+    x_axis_type="datetime",
+    height=200,
+    sizing_mode="scale_width",
+    max_width=1000,
+    tools="pan,wheel_zoom,box_zoom,reset,save",
+    active_drag=None,
+    active_scroll=None,
+    x_range=temp_plot.x_range,
+    output_backend="webgl",
+    visible=False  # Hidden by default, shown when noise data available
+)
+noise_raw_renderer = noise_plot.line('time', 'noise', source=source, line_width=2,
+                                    color='#DDA0DD', alpha=0.6)
+noise_ma_renderer = noise_plot.line('time', 'noise_ma', source=source, line_width=3,
+                                   color='purple', alpha=0.9)
+noise_plot.xgrid.grid_line_color = "gray"
+noise_plot.xgrid.grid_line_alpha = 0.3
+noise_plot.xgrid.minor_grid_line_alpha = 0.15
+noise_plot.xaxis.ticker.num_minor_ticks = 5
+day_boundary_spans_noise = []
 
 
 def _update_day_boundaries(data_times):
@@ -1322,10 +1447,24 @@ def fetch_incremental_data(sensor_name):
         if len(new_records["time"]) > 0:
             logger.debug(f"Fetched {len(new_records['time'])} new records for {sensor_name}")
 
-            # Convert to lists for extension
+            # Convert to lists for extension (handle both basic and extended sensors)
             data_cache["raw_data"]["time"] = list(data_cache["raw_data"]["time"]) + list(new_records["time"])
             data_cache["raw_data"]["temperature"] = list(data_cache["raw_data"]["temperature"]) + list(new_records["temperature"])
             data_cache["raw_data"]["humidity"] = list(data_cache["raw_data"]["humidity"]) + list(new_records["humidity"])
+
+            # Handle extended sensor data if present
+            if "pressure" in new_records:
+                if "pressure" not in data_cache["raw_data"]:
+                    data_cache["raw_data"]["pressure"] = []
+                data_cache["raw_data"]["pressure"] = list(data_cache["raw_data"]["pressure"]) + list(new_records["pressure"])
+            if "light" in new_records:
+                if "light" not in data_cache["raw_data"]:
+                    data_cache["raw_data"]["light"] = []
+                data_cache["raw_data"]["light"] = list(data_cache["raw_data"]["light"]) + list(new_records["light"])
+            if "noise" in new_records:
+                if "noise" not in data_cache["raw_data"]:
+                    data_cache["raw_data"]["noise"] = []
+                data_cache["raw_data"]["noise"] = list(data_cache["raw_data"]["noise"]) + list(new_records["noise"])
 
             # Trim old data to prevent endless accumulation (only for windowed mode)
             window_minutes = current_window.get("minutes")
@@ -1344,10 +1483,16 @@ def fetch_incremental_data(sensor_name):
                 first_keep_idx = np.argmax(keep_indices)
 
                 if first_keep_idx > 0:
-                    # Trim old data
+                    # Trim old data (including extended fields if present)
                     data_cache["raw_data"]["time"] = data_cache["raw_data"]["time"][first_keep_idx:]
                     data_cache["raw_data"]["temperature"] = data_cache["raw_data"]["temperature"][first_keep_idx:]
                     data_cache["raw_data"]["humidity"] = data_cache["raw_data"]["humidity"][first_keep_idx:]
+                    if "pressure" in data_cache["raw_data"]:
+                        data_cache["raw_data"]["pressure"] = data_cache["raw_data"]["pressure"][first_keep_idx:]
+                    if "light" in data_cache["raw_data"]:
+                        data_cache["raw_data"]["light"] = data_cache["raw_data"]["light"][first_keep_idx:]
+                    if "noise" in data_cache["raw_data"]:
+                        data_cache["raw_data"]["noise"] = data_cache["raw_data"]["noise"][first_keep_idx:]
                     logger.debug(f"Trimmed {first_keep_idx} old points from cache")
 
             # Update last timestamp
@@ -1415,6 +1560,11 @@ def update_view():
 
         # Replace dataset
         source.data = prepared
+
+        # Show/hide extended sensor plots based on available data
+        pressure_plot.visible = "pressure" in prepared and len(prepared.get("pressure", [])) > 0
+        light_plot.visible = "light" in prepared and len(prepared.get("light", [])) > 0
+        noise_plot.visible = "noise" in prepared and len(prepared.get("noise", [])) > 0
 
         # Update day boundary markers
         _update_day_boundaries(prepared["time"])
@@ -1722,6 +1872,9 @@ layout = column(
     Div(text="<br>", sizing_mode="stretch_width", height=10),
     temp_plot,
     humidity_plot,
+    pressure_plot,  # Dynamically shown/hidden based on sensor data
+    light_plot,     # Dynamically shown/hidden based on sensor data
+    noise_plot,     # Dynamically shown/hidden based on sensor data
     sizing_mode="scale_width"
 )
 
