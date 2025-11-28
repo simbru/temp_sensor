@@ -76,13 +76,10 @@ class MockST7735:
         
         if save_frames:
             self.frame_dir.mkdir(exist_ok=True)
-            # Clear old frames on startup
-            for f in self.frame_dir.glob("frame_*.png"):
-                f.unlink()
         
         print(f"[MockST7735] Initialized {self._width}x{self._height} display (rotation={rotation})")
         if save_frames:
-            print(f"[MockST7735] Saving frames to: {self.frame_dir}")
+            print(f"[MockST7735] Saving frames to: {self.frame_dir}/latest.png")
     
     def begin(self):
         """Initialize display (no-op for mock)."""
@@ -106,16 +103,12 @@ class MockST7735:
         self.last_image = image.copy()
         self.frame_count += 1
         
-        # Save frame as PNG
+        # Save frame as PNG (just latest.png, overwritten each time)
         if self.save_frames:
-            # Save current frame
-            frame_path = self.frame_dir / f"frame_{self.frame_count:06d}.png"
-            
             # Scale up for easier viewing (4x)
             scaled = image.resize((self._width * 4, self._height * 4), Image.NEAREST)
-            scaled.save(frame_path)
             
-            # Also save as 'latest.png' for easy viewing
+            # Save as 'latest.png' - overwrites each time
             latest_path = self.frame_dir / "latest.png"
             scaled.save(latest_path)
         
