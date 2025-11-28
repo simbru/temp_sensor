@@ -63,6 +63,7 @@ enviroplus = [
     "ltr559; sys_platform == 'linux'",
     "st7735; sys_platform == 'linux'",
     "pillow; sys_platform == 'linux'",  # Required for LCD display
+    "gpiod; sys_platform == 'linux'",   # Required for st7735 GPIO access
     "fonts; sys_platform == 'linux'",
     "font-roboto; sys_platform == 'linux'",
     "paho-mqtt; sys_platform == 'linux'",
