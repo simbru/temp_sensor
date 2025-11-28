@@ -93,6 +93,11 @@ last_valid_reading: dict[str, float | None] = {"temperature": None, "humidity": 
 # Track consecutive None readings for hardware failure detection
 HARDWARE_FAILURE_THRESHOLD = 5  # Consider hardware failed after 5 consecutive None readings
 
+# Track number of successful readings for spike detection warmup
+# (Enviro+ BME280 needs 5 samples for CPU compensation to stabilize)
+_successful_reading_count = 0
+SPIKE_DETECTION_WARMUP_SAMPLES = 5  # Skip spike detection for first N readings
+
 def _get_consecutive_failures():
     """Get consecutive failure count from file (shared across processes)."""
     try:
@@ -247,7 +252,7 @@ def write_data(timestamp, temperature, humidity, filename=None, pressure=None, l
         conn.commit()
 
 def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
-    global last_valid_reading
+    global last_valid_reading, _successful_reading_count
     # Generate INTEGER timestamp (milliseconds since epoch)
     timestamp = int(datetime.datetime.now().timestamp() * 1000)
 
@@ -311,20 +316,25 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
 
     # Spike filtering: reject readings with unrealistic deltas from previous reading
     # (DHT22 sensors sometimes produce spurious readings that pass checksum but are physically impossible)
+    # Skip spike detection during warmup period (first N readings) to allow sensor stabilization
     if temperature is not None and humidity is not None:
         max_temp_delta = float(CONFIG["DEFAULT"]["max_temp_delta_c"])
         max_humidity_delta = float(CONFIG["DEFAULT"]["max_humidity_delta_pct"])
 
-        # Check if we have a previous valid reading to compare against
-        if last_valid_reading["temperature"] is not None and last_valid_reading["humidity"] is not None:
-            temp_delta = abs(temperature - last_valid_reading["temperature"])
-            humidity_delta = abs(humidity - last_valid_reading["humidity"])
+        # Only apply spike detection after warmup period
+        if _successful_reading_count >= SPIKE_DETECTION_WARMUP_SAMPLES:
+            # Check if we have a previous valid reading to compare against
+            if last_valid_reading["temperature"] is not None and last_valid_reading["humidity"] is not None:
+                temp_delta = abs(temperature - last_valid_reading["temperature"])
+                humidity_delta = abs(humidity - last_valid_reading["humidity"])
 
-            if temp_delta > max_temp_delta or humidity_delta > max_humidity_delta:
-                print(f"[{format_timestamp(timestamp)}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading")
-                # Skip this reading entirely - don't write to database
-                temperature, humidity = None, None
-                pressure, light, noise = None, None, None
+                if temp_delta > max_temp_delta or humidity_delta > max_humidity_delta:
+                    print(f"[{format_timestamp(timestamp)}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading")
+                    # Skip this reading entirely - don't write to database
+                    temperature, humidity = None, None
+                    pressure, light, noise = None, None, None
+        else:
+            print(f"[{format_timestamp(timestamp)}] Warmup reading {_successful_reading_count + 1}/{SPIKE_DETECTION_WARMUP_SAMPLES} - spike detection disabled")
 
     # Skip writing failed reads or spike-filtered reads to save storage
     # Server-side dashboard will insert NaN for visualization where gaps exist
@@ -334,6 +344,8 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
         # Update last valid reading after successful write
         last_valid_reading["temperature"] = temperature
         last_valid_reading["humidity"] = humidity
+        # Increment successful reading counter for warmup tracking
+        _successful_reading_count += 1
 
     # Schedule the next run
     schedule.enter(LOGINTERVAL, 0, log_data)
