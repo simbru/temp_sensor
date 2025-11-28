@@ -59,9 +59,9 @@ class EnviroLCDDisplay:
         self.height = self.display.height
 
         # Load fonts - try RobotoMedium first (Pimoroni's preferred font), then DejaVu, then default
-        self.font = self._load_font(20)
-        self.font_sm = self._load_font(12)
-        self.font_lg = self._load_font(14)
+        self.font = self._load_font(30)
+        self.font_sm = self._load_font(22)
+        self.font_lg = self._load_font(24)
 
         # Position for the top text bar (below which the graph is drawn)
         self.top_bar_height = 25
@@ -353,6 +353,7 @@ class EnviroLCDDisplay:
             # Sun rays
             draw.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], outline=color)
             for angle in range(0, 360, 45):
+                import math
                 rad = math.radians(angle)
                 x1 = cx + int(5 * math.cos(rad))
                 y1 = cy + int(5 * math.sin(rad))
