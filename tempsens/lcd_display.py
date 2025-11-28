@@ -59,9 +59,10 @@ class EnviroLCDDisplay:
         self.height = self.display.height
 
         # Load fonts - try RobotoMedium first (Pimoroni's preferred font), then DejaVu, then default
-        self.font = self._load_font(30)
-        self.font_sm = self._load_font(22)
-        self.font_lg = self._load_font(24)
+        self.font = self._load_font(20)
+        self.font_sm = self._load_font(12)
+        self.font_lg = self._load_font(14)
+        self.font_dashboard = self._load_font(40)  # Extra large for dashboard screen
 
         # Position for the top text bar (below which the graph is drawn)
         self.top_bar_height = 25
@@ -97,33 +98,31 @@ class EnviroLCDDisplay:
 
     def _load_font(self, size: int) -> ImageFont.ImageFont:
         """Load the best available font at the specified size."""
-        font_paths = [
-            # Pimoroni's preferred font
-            "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Medium.ttf",
-            # fonts.ttf package location
-            None,  # Will try fonts.ttf import
-            # DejaVu fallback
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        ]
-
-        # Try to import from fonts.ttf package (Pimoroni's approach)
+        # Try Pimoroni's fonts.ttf package first (this is what their examples use)
         try:
             from fonts.ttf import RobotoMedium as UserFont
-            return ImageFont.truetype(UserFont, size)
-        except ImportError:
+            font = ImageFont.truetype(UserFont, size)
+            return font
+        except (ImportError, OSError) as e:
             pass
 
-        # Try each font path
+        # Try common system font paths
+        font_paths = [
+            "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Medium.ttf",
+            "/usr/share/fonts/truetype/roboto/Roboto-Medium.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        ]
+
         for font_path in font_paths:
-            if font_path is None:
-                continue
             try:
                 return ImageFont.truetype(font_path, size)
-            except Exception:
+            except (OSError, IOError):
                 continue
 
-        # Fallback to default
+        # Last resort - PIL's default (this is tiny and ignores size!)
+        print(f"WARNING: Could not load any TrueType font, using default bitmap font (size {size} will be ignored)")
         return ImageFont.load_default()
 
     def check_mode_switch(self) -> bool:

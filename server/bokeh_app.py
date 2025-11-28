@@ -1469,6 +1469,9 @@ def on_sensor_change(attr, old, new):
     current_sensor_state["name"] = new
     temp_plot.title.text = f"Temperature - {new}"
     humidity_plot.title.text = f"Humidity - {new}"
+    pressure_plot.title.text = f"Pressure - {new}"
+    light_plot.title.text = f"Light - {new}"
+    noise_plot.title.text = f"Noise - {new}"
     current_window["force_update"] = True
 
     # Sensor changed - need to fetch all historical data for new sensor

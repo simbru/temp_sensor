@@ -3,6 +3,9 @@ templog.h5
 templog_test*.h5
 dev/templog_test*.h5
 
+# LCD simulator frames (generated during testing)
+dev/lcd_frames/
+
 # SQLite database (server-side and test files)
 sensor_data.db
 *.db
