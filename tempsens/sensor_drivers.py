@@ -559,13 +559,13 @@ def detect_sensor(**kwargs) -> SensorInterface:
     Returns:
         Initialized sensor object implementing SensorInterface
     """
-    print("Auto-detecting sensors...")
+    print("Auto-detecting sensors...", flush=True)
 
     for sensor_name, sensor_class in SENSOR_REGISTRY:
-        print(f"  Checking for {sensor_name}...", end=" ")
+        print(f"  Checking for {sensor_name}...", end=" ", flush=True)
         try:
             if sensor_class.detect():
-                print("Found!")
+                print("Found!", flush=True)
                 # Pass kwargs to sensors that support them (like EnviroPlusSensor)
                 if sensor_name == "ENVIROPLUS":
                     sensor = sensor_class(**kwargs)
@@ -574,9 +574,9 @@ def detect_sensor(**kwargs) -> SensorInterface:
                 return sensor
         except Exception as e:
             pass
-        print("Not found")
+        print("Not found", flush=True)
 
-    print("  No hardware sensors detected, using simulated sensor")
+    print("  No hardware sensors detected, using simulated sensor", flush=True)
     return SimulatedSensor()
 
 

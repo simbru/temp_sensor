@@ -6,9 +6,14 @@ Runs both the sensor logging process and FastAPI server concurrently.
 import logging
 import logging.handlers
 import multiprocessing
+import os
 import pathlib
 import sys
 import time
+
+# Force unbuffered stdout/stderr for systemd compatibility
+# This ensures print() output appears immediately in journalctl
+os.environ["PYTHONUNBUFFERED"] = "1"
 
 from tempsens import io_funcs, sensor
 
@@ -72,12 +77,12 @@ logger.info(f"Client starting...")
 def run_sensor_logger():
     """Run the sensor logging process."""
     try:
-        print("Starting sensor logger...")
+        print("Starting sensor logger...", flush=True)
         sensor.run_tempsensor_test()
     except Exception as e:
         import traceback
-        print(f"❌ FATAL ERROR in sensor logger: {e}")
-        print(traceback.format_exc())
+        print(f"❌ FATAL ERROR in sensor logger: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
         raise
 
 

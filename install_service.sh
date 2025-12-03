@@ -50,6 +50,7 @@ Type=simple
 User=$CURRENT_USER
 WorkingDirectory=$REPO_DIR
 Environment="PATH=$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
 
 # Use uv to run the client with proper virtual environment
 # --frozen: Skip updating git dependencies on every start (faster startup)

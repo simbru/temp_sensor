@@ -8,6 +8,7 @@ Type=simple
 User=YOUR_USERNAME
 WorkingDirectory=/home/YOUR_USERNAME/temp_sensor
 Environment="PATH=/home/YOUR_USERNAME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
 
 # Use uv to run the client with proper virtual environment
 # --frozen: Skip updating git dependencies on every start (faster startup)
