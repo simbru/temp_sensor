@@ -95,10 +95,12 @@ last_valid_reading: dict[str, float | None] = {"temperature": None, "humidity": 
 # Track consecutive None readings for hardware failure detection
 HARDWARE_FAILURE_THRESHOLD = 5  # Consider hardware failed after 5 consecutive None readings
 
-# Track number of successful readings for spike detection warmup
-# (Enviro+ BME280 needs 5 samples for CPU compensation to stabilize)
-_successful_reading_count = 0
-SPIKE_DETECTION_WARMUP_SAMPLES = 5  # Skip spike detection for first N readings
+# Warmup tracking for sensors that need stabilization (e.g., Enviro+ CPU compensation)
+# Time-based warmup: collect readings within WARMUP_WINDOW_SECONDS, require WARMUP_MIN_READINGS
+_warmup_start_time: float | None = None  # Timestamp when warmup started
+_warmup_reading_count = 0
+WARMUP_WINDOW_SECONDS = 10.0  # Warmup window duration
+WARMUP_MIN_READINGS = 5  # Minimum readings required during warmup
 
 def _get_consecutive_failures():
     """Get consecutive failure count from file (shared across processes)."""
@@ -286,7 +288,7 @@ def write_data(timestamp, temperature, humidity, filename=None, pressure=None, l
         conn.commit()
 
 def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
-    global last_valid_reading, _successful_reading_count
+    global last_valid_reading, _warmup_start_time, _warmup_reading_count
     # Generate INTEGER timestamp (milliseconds since epoch)
     timestamp = int(datetime.datetime.now().timestamp() * 1000)
 
@@ -350,28 +352,37 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
 
     # Spike filtering: reject readings with unrealistic deltas from previous reading
     # (DHT22 sensors sometimes produce spurious readings that pass checksum but are physically impossible)
-    # Skip spike detection during warmup period (first N readings) to allow sensor stabilization
     if temperature is not None and humidity is not None:
         max_temp_delta = float(CONFIG["DEFAULT"]["max_temp_delta_c"])
         max_humidity_delta = float(CONFIG["DEFAULT"]["max_humidity_delta_pct"])
 
-        # During warmup period, increment counter but DON'T write to database
-        # This prevents unstable initial readings from polluting the data
-        if _successful_reading_count < SPIKE_DETECTION_WARMUP_SAMPLES:
-            _successful_reading_count += 1
-            print(f"[{format_timestamp(timestamp)}] Warmup reading {_successful_reading_count}/{SPIKE_DETECTION_WARMUP_SAMPLES} - skipping write to database")
-            # Schedule next run and return early - don't write warmup readings
-            schedule.enter(LOGINTERVAL, 0, log_data)
-            return None
+        # Warmup period for sensors that need stabilization (Enviro+ with CPU compensation)
+        # Only applies to extended sensors; simple sensors like DHT22 don't need warmup
+        if has_extended_data:
+            current_time = time.time()
+            
+            # Initialize warmup start time on first reading
+            if _warmup_start_time is None:
+                _warmup_start_time = current_time
+            
+            # Check if we're still in warmup period
+            warmup_elapsed = current_time - _warmup_start_time
+            if warmup_elapsed < WARMUP_WINDOW_SECONDS or _warmup_reading_count < WARMUP_MIN_READINGS:
+                _warmup_reading_count += 1
+                remaining = max(0, WARMUP_WINDOW_SECONDS - warmup_elapsed)
+                print(f"[{format_timestamp(timestamp)}] Warmup reading {_warmup_reading_count}/{WARMUP_MIN_READINGS} ({remaining:.1f}s remaining) - skipping write to database", flush=True)
+                # Schedule next run quickly during warmup (1 second intervals)
+                schedule.enter(1.0, 0, log_data)
+                return None
 
-        # After warmup: apply spike detection
+        # After warmup (or for sensors that don't need it): apply spike detection
         # Check if we have a previous valid reading to compare against
         if last_valid_reading["temperature"] is not None and last_valid_reading["humidity"] is not None:
             temp_delta = abs(temperature - last_valid_reading["temperature"])
             humidity_delta = abs(humidity - last_valid_reading["humidity"])
 
             if temp_delta > max_temp_delta or humidity_delta > max_humidity_delta:
-                print(f"[{format_timestamp(timestamp)}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading")
+                print(f"[{format_timestamp(timestamp)}] SPIKE DETECTED: temp delta={temp_delta:.1f}°C, humidity delta={humidity_delta:.1f}% - rejecting reading", flush=True)
                 # Skip this reading entirely - don't write to database
                 temperature, humidity = None, None
                 pressure, light, noise = None, None, None
