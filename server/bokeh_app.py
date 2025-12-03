@@ -115,27 +115,43 @@ except Exception as e:
     logger.error(f"Failed to load server configuration: {e}")
     raise
 
-# Initialize multi-sensor client and data aggregator
-multi_client = MultiSensorClient(sensor_configs)
-aggregator = DataAggregator(
-    multi_client,
-    sensor_configs=sensor_configs,
-    db_path=db_path,
-    poll_interval=poll_interval,
-    min_gap_threshold=min_gap_threshold
-)
+# Initialize multi-sensor client and data aggregator as GLOBAL SINGLETON
+# This prevents creating duplicate polling threads for each Bokeh session
+_aggregator_instance = None
+_aggregator_lock = __import__('threading').Lock()
 
-# Do initial poll to populate database
-logger.info("Performing initial data poll...")
-try:
-    aggregator.poll_once()
-    logger.info("Initial poll completed successfully")
-except Exception as e:
-    logger.error(f"Initial poll failed: {e}", exc_info=True)
+def get_aggregator():
+    """Get or create the global aggregator instance (thread-safe singleton)."""
+    global _aggregator_instance
+    if _aggregator_instance is None:
+        with _aggregator_lock:
+            # Double-check pattern: ensure only one thread creates the instance
+            if _aggregator_instance is None:
+                logger.info("Creating global data aggregator instance...")
+                multi_client = MultiSensorClient(sensor_configs)
+                _aggregator_instance = DataAggregator(
+                    multi_client,
+                    sensor_configs=sensor_configs,
+                    db_path=db_path,
+                    poll_interval=poll_interval,
+                    min_gap_threshold=min_gap_threshold
+                )
 
-# Start background polling
-aggregator.start_polling()
-logger.info("Started background polling thread")
+                # Do initial poll to populate database
+                logger.info("Performing initial data poll...")
+                try:
+                    _aggregator_instance.poll_once()
+                    logger.info("Initial poll completed successfully")
+                except Exception as e:
+                    logger.error(f"Initial poll failed: {e}", exc_info=True)
+
+                # Start background polling (only happens once!)
+                _aggregator_instance.start_polling()
+                logger.info("Started background polling threads")
+    return _aggregator_instance
+
+# Get the singleton aggregator instance
+aggregator = get_aggregator()
 
 # Constants (adapted from original dashboard)
 TOLERANCE_MS = 500

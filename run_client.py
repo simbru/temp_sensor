@@ -71,21 +71,33 @@ logger.info(f"Client starting...")
 
 def run_sensor_logger():
     """Run the sensor logging process."""
-    print("Starting sensor logger...")
-    sensor.run_tempsensor_test()
+    try:
+        print("Starting sensor logger...")
+        sensor.run_tempsensor_test()
+    except Exception as e:
+        import traceback
+        print(f"❌ FATAL ERROR in sensor logger: {e}")
+        print(traceback.format_exc())
+        raise
 
 
 def run_api_server():
     """Run the FastAPI server."""
-    import uvicorn
-    from tempsens.api_server import app
+    try:
+        import uvicorn
+        from tempsens.api_server import app
 
-    config = io_funcs.fetch_config()
-    api_port = int(config["DEFAULT"].get("api_port", 5000))
-    device_name = config["DEFAULT"].get("device_name", "Temperature Sensor")
+        config = io_funcs.fetch_config()
+        api_port = int(config["DEFAULT"].get("api_port", 5000))
+        device_name = config["DEFAULT"].get("device_name", "Temperature Sensor")
 
-    print(f"Starting API server for '{device_name}' on port {api_port}")
-    uvicorn.run(app, host="0.0.0.0", port=api_port)
+        print(f"Starting API server for '{device_name}' on port {api_port}")
+        uvicorn.run(app, host="0.0.0.0", port=api_port)
+    except Exception as e:
+        import traceback
+        print(f"❌ FATAL ERROR in API server: {e}")
+        print(traceback.format_exc())
+        raise
 
 
 def run_lcd_display():

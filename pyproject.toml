@@ -61,6 +61,7 @@ enviroplus = [
     # Use the official Pimoroni enviroplus package which bundles all dependencies
     "enviroplus @ git+https://github.com/pimoroni/enviroplus-python; sys_platform == 'linux'",
     "pillow; sys_platform == 'linux'",  # Required for LCD display
+    "setuptools",  # Required by fonts package (uses pkg_resources)
     "fonts",  # Font management
     "font-roboto",  # Roboto font (RobotoMedium used by Pimoroni examples)
 ]

@@ -632,9 +632,16 @@ class DataAggregator:
 
     def start_polling(self):
         """Start background polling threads (one per sensor)."""
+        # Check if any threads are already running (prevents duplicate thread spawning)
         if self._polling_threads:
-            logger.warning("Polling threads already running")
-            return
+            # Verify threads are actually alive, not just stale references
+            alive_threads = {name: t for name, t in self._polling_threads.items() if t.is_alive()}
+            if alive_threads:
+                logger.warning(f"Polling threads already running for {len(alive_threads)} sensors: {list(alive_threads.keys())}")
+                return
+            else:
+                logger.info("Clearing stale thread references")
+                self._polling_threads.clear()
 
         self._stop_polling.clear()
         sensor_names = self.client.get_all_sensor_names()
