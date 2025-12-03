@@ -217,6 +217,22 @@ def init_database(filename=None, use_wal=None):
             )
         """)
 
+        # Migrate existing databases: add new columns if they don't exist
+        # This handles upgrades from older schema versions
+        cursor.execute("PRAGMA table_info(sensor_data)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        
+        new_columns = [
+            ("pressure", "REAL"),
+            ("light", "REAL"),
+            ("noise", "REAL"),
+        ]
+        
+        for col_name, col_type in new_columns:
+            if col_name not in existing_columns:
+                print(f"Migrating database: adding '{col_name}' column...")
+                cursor.execute(f"ALTER TABLE sensor_data ADD COLUMN {col_name} {col_type}")
+
         # Create index on timestamp for fast queries
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_timestamp

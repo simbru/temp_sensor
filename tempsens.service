@@ -10,7 +10,8 @@ WorkingDirectory=/home/YOUR_USERNAME/temp_sensor
 Environment="PATH=/home/YOUR_USERNAME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 # Use uv to run the client with proper virtual environment
-ExecStart=/home/YOUR_USERNAME/.local/bin/uv run python run_client.py
+# --frozen: Skip updating git dependencies on every start (faster startup)
+ExecStart=/home/YOUR_USERNAME/.local/bin/uv run --frozen python run_client.py
 
 # Restart on failure (sensor read errors, network issues, etc.)
 Restart=on-failure

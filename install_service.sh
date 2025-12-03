@@ -52,7 +52,8 @@ WorkingDirectory=$REPO_DIR
 Environment="PATH=$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 # Use uv to run the client with proper virtual environment
-ExecStart=$UV_PATH run python run_client.py
+# --frozen: Skip updating git dependencies on every start (faster startup)
+ExecStart=$UV_PATH run --frozen python run_client.py
 
 # Restart on failure (sensor read errors, network issues, etc.)
 Restart=on-failure
