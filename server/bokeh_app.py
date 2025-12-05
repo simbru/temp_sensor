@@ -117,38 +117,56 @@ except Exception as e:
 
 # Initialize multi-sensor client and data aggregator as GLOBAL SINGLETON
 # This prevents creating duplicate polling threads for each Bokeh session
-_aggregator_instance = None
+#
+# IMPORTANT: We use sys.modules to store the singleton to survive Bokeh module reloads.
+# When Bokeh --dev mode or session refreshes cause module reimport, normal module-level
+# globals get reset, but the old daemon polling threads keep running. This causes
+# exponential growth in HTTP requests as each reload spawns new threads.
+# By storing in sys.modules (which persists across reloads), we ensure only ONE
+# aggregator instance and one set of polling threads ever exists.
+
+_SINGLETON_KEY = '_temp_sensor_aggregator_singleton'
 _aggregator_lock = __import__('threading').Lock()
 
 def get_aggregator():
-    """Get or create the global aggregator instance (thread-safe singleton)."""
-    global _aggregator_instance
-    if _aggregator_instance is None:
-        with _aggregator_lock:
-            # Double-check pattern: ensure only one thread creates the instance
-            if _aggregator_instance is None:
-                logger.info("Creating global data aggregator instance...")
-                multi_client = MultiSensorClient(sensor_configs)
-                _aggregator_instance = DataAggregator(
-                    multi_client,
-                    sensor_configs=sensor_configs,
-                    db_path=db_path,
-                    poll_interval=poll_interval,
-                    min_gap_threshold=min_gap_threshold
-                )
+    """Get or create the global aggregator instance (thread-safe singleton that survives module reloads)."""
+    # Check if singleton already exists (survives module reloads)
+    existing = getattr(sys.modules[__name__], _SINGLETON_KEY, None)
+    if existing is not None:
+        logger.debug("Reusing existing aggregator instance (module was reloaded)")
+        return existing
 
-                # Do initial poll to populate database
-                logger.info("Performing initial data poll...")
-                try:
-                    _aggregator_instance.poll_once()
-                    logger.info("Initial poll completed successfully")
-                except Exception as e:
-                    logger.error(f"Initial poll failed: {e}", exc_info=True)
+    with _aggregator_lock:
+        # Double-check after acquiring lock
+        existing = getattr(sys.modules[__name__], _SINGLETON_KEY, None)
+        if existing is not None:
+            return existing
 
-                # Start background polling (only happens once!)
-                _aggregator_instance.start_polling()
-                logger.info("Started background polling threads")
-    return _aggregator_instance
+        logger.info("Creating global data aggregator instance...")
+        multi_client = MultiSensorClient(sensor_configs)
+        instance = DataAggregator(
+            multi_client,
+            sensor_configs=sensor_configs,
+            db_path=db_path,
+            poll_interval=poll_interval,
+            min_gap_threshold=min_gap_threshold
+        )
+
+        # Do initial poll to populate database
+        logger.info("Performing initial data poll...")
+        try:
+            instance.poll_once()
+            logger.info("Initial poll completed successfully")
+        except Exception as e:
+            logger.error(f"Initial poll failed: {e}", exc_info=True)
+
+        # Start background polling (only happens once!)
+        instance.start_polling()
+        logger.info("Started background polling threads")
+
+        # Store in a way that survives module reloads
+        setattr(sys.modules[__name__], _SINGLETON_KEY, instance)
+        return instance
 
 # Get the singleton aggregator instance
 aggregator = get_aggregator()
