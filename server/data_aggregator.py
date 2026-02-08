@@ -222,6 +222,7 @@ class DataAggregator:
             try:
                 op = self._write_queue.get()
                 if op is None:
+                    self._write_queue.task_done()
                     break  # Shutdown signal
 
                 op_type = op[0]
@@ -296,8 +297,16 @@ class DataAggregator:
                             logger.error(f"DB write failed after {max_retries} retries: {e}")
                             break
 
+                # Mark task as done
+                self._write_queue.task_done()
+
             except Exception as e:
                 logger.error(f"Error in writer thread: {e}", exc_info=True)
+                # Still mark as done to avoid blocking join()
+                try:
+                    self._write_queue.task_done()
+                except ValueError:
+                    pass  # task_done() called too many times
 
         conn.close()
 
@@ -921,6 +930,63 @@ class DataAggregator:
 
         self._polling_threads.clear()
         logger.info("Stopped all background polling threads")
+
+    def stop(self):
+        """
+        Stop the aggregator and cleanly shut down all resources.
+        
+        This method:
+        1. Stops all polling threads
+        2. Flushes any pending writes in the queue
+        3. Signals the writer thread to shut down
+        4. Waits for the writer thread to finish
+        5. Closes any thread-local read connections
+        """
+        logger.info("Stopping DataAggregator...")
+        
+        # Stop polling threads first
+        self.stop_polling()
+        
+        # Wait for write queue to drain using join()
+        # This blocks until all tasks marked with task_done() are processed
+        # The writer thread processes tasks quickly, so this should be fast
+        logger.info("Waiting for write queue to drain...")
+        try:
+            self._write_queue.join()
+            logger.info("Write queue drained successfully")
+        except Exception as e:
+            logger.error(f"Error waiting for write queue: {e}")
+        
+        # Send shutdown sentinel to writer thread
+        self._write_queue.put(None)
+        logger.info("Sent shutdown signal to writer thread")
+        
+        # Wait for writer thread to finish (with timeout as safety net)
+        if self._writer_thread and self._writer_thread.is_alive():
+            self._writer_thread.join(timeout=10.0)
+            if self._writer_thread.is_alive():
+                logger.warning("Writer thread did not exit cleanly within timeout")
+            else:
+                logger.info("Writer thread stopped successfully")
+        
+        # Close thread-local read connections
+        self._close_read_connections()
+        
+        logger.info("DataAggregator stopped")
+    
+    def _close_read_connections(self):
+        """Close any thread-local read connections."""
+        # Close the connection in the current thread if it exists
+        if hasattr(self._local, 'conn') and self._local.conn is not None:
+            try:
+                self._local.conn.close()
+                self._local.conn = None
+                logger.debug("Closed read connection in main thread")
+            except Exception as e:
+                logger.warning(f"Error closing read connection: {e}")
+        
+        # Note: Other thread-local connections will be garbage collected
+        # when their threads exit, since they're stored in thread-local storage
 
     def _poll_sensor_loop(self, sensor_name: str, poll_interval: int):
         """
