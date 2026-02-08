@@ -222,6 +222,7 @@ class DataAggregator:
             try:
                 op = self._write_queue.get()
                 if op is None:
+                    self._write_queue.task_done()
                     break  # Shutdown signal
 
                 op_type = op[0]
@@ -296,8 +297,16 @@ class DataAggregator:
                             logger.error(f"DB write failed after {max_retries} retries: {e}")
                             break
 
+                # Mark task as done
+                self._write_queue.task_done()
+
             except Exception as e:
                 logger.error(f"Error in writer thread: {e}", exc_info=True)
+                # Still mark as done to avoid blocking join()
+                try:
+                    self._write_queue.task_done()
+                except ValueError:
+                    pass  # task_done() called too many times
 
         conn.close()
 
@@ -940,17 +949,26 @@ class DataAggregator:
         # Stop polling threads first
         self.stop_polling()
         
-        # Wait for write queue to drain (with timeout to avoid hanging)
-        queue_timeout = 10.0
-        start_time = time.time()
-        while not self._write_queue.empty() and (time.time() - start_time) < queue_timeout:
-            time.sleep(0.1)
-        
-        if not self._write_queue.empty():
-            pending = self._write_queue.qsize()
-            logger.warning(f"Write queue still has {pending} pending operations after {queue_timeout}s timeout")
-        else:
-            logger.info("Write queue drained successfully")
+        # Wait for write queue to drain using join() for reliable synchronization
+        # This blocks until all tasks marked with task_done() are processed
+        logger.info("Waiting for write queue to drain...")
+        try:
+            # Use a thread to implement timeout for join()
+            join_complete = threading.Event()
+            def wait_for_join():
+                self._write_queue.join()
+                join_complete.set()
+            
+            join_thread = threading.Thread(target=wait_for_join, daemon=True)
+            join_thread.start()
+            
+            # Wait with timeout (10 seconds)
+            if join_complete.wait(timeout=10.0):
+                logger.info("Write queue drained successfully")
+            else:
+                logger.warning("Write queue did not drain within 10s timeout")
+        except Exception as e:
+            logger.error(f"Error waiting for write queue: {e}")
         
         # Send shutdown sentinel to writer thread
         self._write_queue.put(None)
