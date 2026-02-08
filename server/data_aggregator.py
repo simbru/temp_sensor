@@ -187,17 +187,16 @@ class DataAggregator:
                         cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} REAL")
                         logger.info(f"Added column {col_name} to {table_name}")
 
+            # Initialize record counts from database while connection is open
+            for sensor_name in self.client.get_all_sensor_names():
+                table_name = self._get_table_name(sensor_name)
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                    self._record_counts[sensor_name] = cursor.fetchone()[0]
+                except Exception:
+                    self._record_counts[sensor_name] = 0
+
             conn.commit()
-
-        # Initialize record counts from database
-        for sensor_name in self.client.get_all_sensor_names():
-            table_name = self._get_table_name(sensor_name)
-            try:
-                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-                self._record_counts[sensor_name] = cursor.fetchone()[0]
-            except Exception:
-                self._record_counts[sensor_name] = 0
-
     def _start_writer_thread(self):
         """Start the single-writer background thread for all DB writes."""
         self._writer_thread = threading.Thread(
