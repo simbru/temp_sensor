@@ -924,6 +924,65 @@ class DataAggregator:
         self._polling_threads.clear()
         logger.info("Stopped all background polling threads")
 
+    def stop(self):
+        """
+        Stop the aggregator and cleanly shut down all resources.
+        
+        This method:
+        1. Stops all polling threads
+        2. Flushes any pending writes in the queue
+        3. Signals the writer thread to shut down
+        4. Waits for the writer thread to finish
+        5. Closes any thread-local read connections
+        """
+        logger.info("Stopping DataAggregator...")
+        
+        # Stop polling threads first
+        self.stop_polling()
+        
+        # Wait for write queue to drain (with timeout to avoid hanging)
+        queue_timeout = 10.0
+        start_time = time.time()
+        while not self._write_queue.empty() and (time.time() - start_time) < queue_timeout:
+            time.sleep(0.1)
+        
+        if not self._write_queue.empty():
+            pending = self._write_queue.qsize()
+            logger.warning(f"Write queue still has {pending} pending operations after {queue_timeout}s timeout")
+        else:
+            logger.info("Write queue drained successfully")
+        
+        # Send shutdown sentinel to writer thread
+        self._write_queue.put(None)
+        logger.info("Sent shutdown signal to writer thread")
+        
+        # Wait for writer thread to finish
+        if self._writer_thread and self._writer_thread.is_alive():
+            self._writer_thread.join(timeout=5.0)
+            if self._writer_thread.is_alive():
+                logger.warning("Writer thread did not exit cleanly within timeout")
+            else:
+                logger.info("Writer thread stopped successfully")
+        
+        # Close thread-local read connections
+        self._close_read_connections()
+        
+        logger.info("DataAggregator stopped")
+    
+    def _close_read_connections(self):
+        """Close any thread-local read connections."""
+        # Close the connection in the current thread if it exists
+        if hasattr(self._local, 'conn') and self._local.conn is not None:
+            try:
+                self._local.conn.close()
+                self._local.conn = None
+                logger.debug("Closed read connection in main thread")
+            except Exception as e:
+                logger.warning(f"Error closing read connection: {e}")
+        
+        # Note: Other thread-local connections will be garbage collected
+        # when their threads exit, since they're stored in thread-local storage
+
     def _poll_sensor_loop(self, sensor_name: str, poll_interval: int):
         """
         Background polling loop for a single sensor with exponential backoff on errors.
