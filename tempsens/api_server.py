@@ -2,6 +2,7 @@
 FastAPI server for Raspberry Pi temperature sensor clients.
 Exposes data from local SQLite database via REST API for remote dashboard access.
 """
+import logging
 import math
 import socket
 import time
@@ -14,6 +15,8 @@ from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 
 from . import io_funcs
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Temperature Sensor API",
@@ -221,9 +224,10 @@ async def poll(
             }
         }
     except Exception as e:
+        logger.error(f"Poll endpoint error: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to poll: {str(e)}"}
+            content={"error": "Internal server error"}
         )
 
 
@@ -323,9 +327,10 @@ async def get_latest_data(
             }
         }
     except Exception as e:
+        logger.error(f"Latest data endpoint error: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to fetch data: {str(e)}"}
+            content={"error": "Internal server error"}
         )
 
 
@@ -380,9 +385,10 @@ async def get_data_range(
             }
         }
     except Exception as e:
+        logger.error(f"Data range endpoint error: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to fetch data: {str(e)}"}
+            content={"error": "Internal server error"}
         )
 
 
@@ -425,9 +431,10 @@ async def get_metrics():
         metrics = get_system_metrics()
         return metrics
     except Exception as e:
+        logger.error(f"Metrics endpoint error: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to fetch metrics: {str(e)}"}
+            content={"error": "Internal server error"}
         )
 
 
