@@ -257,6 +257,7 @@ class DataAggregator:
             try:
                 op = self._write_queue.get()
                 if op is None:
+                    self._write_queue.task_done()
                     break  # Shutdown signal
 
                 op_type = op[0]
@@ -373,8 +374,16 @@ class DataAggregator:
                             logger.error(f"DB write failed after {max_retries} retries: {e}")
                             break
 
+                # Mark task as done
+                self._write_queue.task_done()
+
             except Exception as e:
                 logger.error(f"Error in writer thread: {e}", exc_info=True)
+                # Still mark as done to avoid blocking join()
+                try:
+                    self._write_queue.task_done()
+                except ValueError:
+                    pass  # task_done() called too many times
 
         conn.close()
 
