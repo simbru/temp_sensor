@@ -203,7 +203,7 @@ def _pick_initial_sensor():
                     best_time = ts
                     best_sensor = name
         except Exception:
-            pass
+            logger.debug("Failed to read metadata for sensor '%s' when selecting default sensor.", name, exc_info=True)
     logger.info(f"Default sensor: {best_sensor}")
     return best_sensor
 
