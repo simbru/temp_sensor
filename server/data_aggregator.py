@@ -519,7 +519,7 @@ class DataAggregator:
 
         device_ip = "unknown"
         status_value = "idle"
-        new_records: List[Tuple[int, float, float]] = []
+        new_records: List[Tuple[int, float, float, float, float, float]] = []
 
         # Fetch data (single request instead of peek + fetch)
         data = self.client.get_sensor_data(sensor_name, limit=limit)
