@@ -193,8 +193,10 @@ class SensorAPIClient:
             self._api_version = 2
             return result
 
-        except requests.exceptions.HTTPError:
+        except requests.exceptions.HTTPError as e:
             # Non-404 HTTP error — don't change api_version, just fail this attempt
+            logger.debug(f"HTTP error during poll for {self.base_url}: {e}")
+            self._last_error = str(e)
             return None
         except Exception as e:
             logger.debug(f"Poll failed for {self.base_url}: {e}")
