@@ -949,24 +949,13 @@ class DataAggregator:
         # Stop polling threads first
         self.stop_polling()
         
-        # Wait for write queue to drain using join() for reliable synchronization
+        # Wait for write queue to drain using join()
         # This blocks until all tasks marked with task_done() are processed
+        # The writer thread processes tasks quickly, so this should be fast
         logger.info("Waiting for write queue to drain...")
         try:
-            # Use a thread to implement timeout for join()
-            join_complete = threading.Event()
-            def wait_for_join():
-                self._write_queue.join()
-                join_complete.set()
-            
-            join_thread = threading.Thread(target=wait_for_join, daemon=True)
-            join_thread.start()
-            
-            # Wait with timeout (10 seconds)
-            if join_complete.wait(timeout=10.0):
-                logger.info("Write queue drained successfully")
-            else:
-                logger.warning("Write queue did not drain within 10s timeout")
+            self._write_queue.join()
+            logger.info("Write queue drained successfully")
         except Exception as e:
             logger.error(f"Error waiting for write queue: {e}")
         
@@ -974,9 +963,9 @@ class DataAggregator:
         self._write_queue.put(None)
         logger.info("Sent shutdown signal to writer thread")
         
-        # Wait for writer thread to finish
+        # Wait for writer thread to finish (with timeout as safety net)
         if self._writer_thread and self._writer_thread.is_alive():
-            self._writer_thread.join(timeout=5.0)
+            self._writer_thread.join(timeout=10.0)
             if self._writer_thread.is_alive():
                 logger.warning("Writer thread did not exit cleanly within timeout")
             else:
