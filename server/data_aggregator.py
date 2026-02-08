@@ -517,7 +517,6 @@ class DataAggregator:
         """
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        device_ip = "unknown"
         status_value = "idle"
         new_records: List[Tuple[int, float, float, float, float, float]] = []
 
