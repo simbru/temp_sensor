@@ -281,9 +281,10 @@ class DataAggregator:
                                 records
                             )
                             conn.commit()
-                            if sensor_name:
+                            inserted = cursor.rowcount
+                            if sensor_name and inserted > 0:
                                 self._record_counts[sensor_name] = \
-                                    self._record_counts.get(sensor_name, 0) + len(records)
+                                    self._record_counts.get(sensor_name, 0) + inserted
 
                         break  # Success — exit retry loop
 
