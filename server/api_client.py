@@ -12,17 +12,20 @@ logger = logging.getLogger(__name__)
 class SensorAPIClient:
     """Client for interacting with a single sensor's API."""
 
-    def __init__(self, base_url: str, timeout: int = 10):
+    def __init__(self, base_url: str, timeout: tuple = (3, 8)):
         """
         Initialize API client.
 
         Args:
             base_url: Base URL of sensor API (e.g., "http://100.64.0.5:5000")
-            timeout: Request timeout in seconds
+            timeout: Request timeout as (connect_seconds, read_seconds).
+                     3s connect = fast fail for offline sensors.
+                     8s read = enough time for large data responses.
         """
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._last_error = None
+        self._api_version = None  # None = unknown, 2 = v2 /poll, 1 = v1 legacy
         # Use a session for connection pooling and reuse
         self._session = requests.Session()
         # Configure connection pooling
@@ -38,7 +41,7 @@ class SensorAPIClient:
     def is_available(self) -> bool:
         """Check if sensor is currently reachable."""
         try:
-            response = self._session.get(f"{self.base_url}/", timeout=5)
+            response = self._session.get(f"{self.base_url}/", timeout=(3, 5))
             return response.status_code == 200
         except Exception as e:
             self._last_error = str(e)
@@ -155,6 +158,53 @@ class SensorAPIClient:
             logger.error(f"Failed to get metrics from {self.base_url}: {e}")
             self._last_error = str(e)
             return None
+
+    def poll(self, since: Optional[int] = None, limit: int = 10) -> Optional[Dict]:
+        """
+        Consolidated v2 poll endpoint — fetches data + metrics + status + config in one HTTP request.
+        Falls back to None if the sensor doesn't support v2 (404), allowing the caller to
+        use legacy v1 endpoints instead.
+
+        Args:
+            since: Fetch data newer than this timestamp (ms since epoch). If None, fetches latest `limit` records.
+            limit: Number of recent readings if `since` is not provided.
+
+        Returns:
+            Full poll response dict, or None if the endpoint is unavailable or the request fails.
+        """
+        params = {"limit": limit}
+        if since is not None:
+            params["since"] = since
+
+        try:
+            response = self._session.get(
+                f"{self.base_url}/poll",
+                params=params,
+                timeout=self.timeout
+            )
+
+            if response.status_code == 404:
+                # Sensor doesn't have v2 endpoint — mark as v1
+                self._api_version = 1
+                return None
+
+            response.raise_for_status()
+            result = response.json()
+            self._api_version = 2
+            return result
+
+        except requests.exceptions.HTTPError:
+            # Non-404 HTTP error — don't change api_version, just fail this attempt
+            return None
+        except Exception as e:
+            logger.debug(f"Poll failed for {self.base_url}: {e}")
+            self._last_error = str(e)
+            return None
+
+    @property
+    def api_version(self) -> Optional[int]:
+        """Detected API version: 2 = v2 /poll, 1 = v1 legacy, None = unknown."""
+        return self._api_version
 
     @property
     def last_error(self) -> Optional[str]:
@@ -278,6 +328,36 @@ class MultiSensorClient:
 
         client = self.sensors[sensor_name]
         return client.get_config()
+
+    def poll_sensor(
+        self,
+        sensor_name: str,
+        since: Optional[int] = None,
+        limit: int = 10
+    ) -> Optional[Dict]:
+        """
+        Consolidated v2 poll for a single sensor.
+
+        Args:
+            sensor_name: Name of sensor to poll
+            since: Fetch data newer than this timestamp (ms since epoch)
+            limit: Number of recent readings if since is not provided
+
+        Returns:
+            Full poll response dict, or None if sensor not found or v2 not supported
+        """
+        if sensor_name not in self.sensors:
+            logger.error(f"Sensor '{sensor_name}' not found")
+            return None
+
+        client = self.sensors[sensor_name]
+        return client.poll(since=since, limit=limit)
+
+    def get_sensor_api_version(self, sensor_name: str) -> Optional[int]:
+        """Get detected API version for a sensor (1, 2, or None if unknown)."""
+        if sensor_name not in self.sensors:
+            return None
+        return self.sensors[sensor_name].api_version
 
     def get_sensor_url(self, sensor_name: str) -> Optional[str]:
         """

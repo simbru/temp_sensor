@@ -152,15 +152,11 @@ def get_aggregator():
             min_gap_threshold=min_gap_threshold
         )
 
-        # Do initial poll to populate database
-        logger.info("Performing initial data poll...")
-        try:
-            instance.poll_once()
-            logger.info("Initial poll completed successfully")
-        except Exception as e:
-            logger.error(f"Initial poll failed: {e}", exc_info=True)
-
-        # Start background polling (only happens once!)
+        # Start background polling (non-blocking — threads populate data asynchronously)
+        # NOTE: We intentionally do NOT call poll_once() here. That was blocking
+        # startup for 20-40s when sensors were offline (10s timeout × 4 HTTP requests
+        # × N offline sensors). The polling threads started below will populate data
+        # in the background. The dashboard handles "no data yet" gracefully.
         instance.start_polling()
         logger.info("Started background polling threads")
 
@@ -188,9 +184,32 @@ UPDATE_INTERVAL = dashboard_update_ms
 SAMPLE_INTERVAL_SECONDS = poll_interval  # Approximate
 SAMPLE_RATE_TEXT = f"~{poll_interval}s/sample"
 
+def _pick_initial_sensor():
+    """Pick the sensor with the most recent data as the default selection.
+    Falls back to the first configured sensor if no metadata exists (fresh DB)."""
+    if not sensor_configs:
+        return "No sensors"
+    best_sensor = sensor_configs[0]["name"]
+    best_time = 0
+    for cfg in sensor_configs:
+        name = cfg["name"]
+        try:
+            meta = aggregator.get_sensor_metadata(name)
+            if meta and meta.get("last_update"):
+                from datetime import datetime as _dt
+                last_update = _dt.fromisoformat(meta["last_update"])
+                ts = last_update.timestamp()
+                if ts > best_time and meta.get("status") != "error":
+                    best_time = ts
+                    best_sensor = name
+        except Exception:
+            pass
+    logger.info(f"Default sensor: {best_sensor}")
+    return best_sensor
+
 # State for current sensor selection
 current_sensor_state = {
-    "name": sensor_configs[0]["name"] if sensor_configs else "No sensors",
+    "name": _pick_initial_sensor(),
     "data": None
 }
 
@@ -218,6 +237,7 @@ STATUS_DISPLAY = {
     "hardware_failure": {"icon": "⛓️‍💥", "label": "Sensor hardware failure"},
     "error": {"icon": "🔴", "label": "Offline or unreachable"},
     "unknown": {"icon": "🔴", "label": "Status unavailable"},
+    "waiting": {"icon": "⏳", "label": "Waiting for first data"},
 }
 
 DEFAULT_STATUS_DISPLAY = STATUS_DISPLAY["unknown"]
@@ -1560,6 +1580,13 @@ def fetch_initial_data(sensor_name):
 
             new_data = aggregator.get_sensor_data(sensor_name, start_time=start_ms, end_time=end_ms)
             fetch_type = "windowed"
+
+            # Historical fallback: if time window returns nothing (sensor dead/stale),
+            # fall back to showing the most recent data regardless of age
+            if not new_data or len(new_data.get("time", [])) == 0:
+                logger.info(f"No data in time window for {sensor_name}, falling back to latest historical records")
+                new_data = aggregator.get_sensor_data(sensor_name, limit=1000)
+                fetch_type = "historical_fallback"
         except Exception as e:
             logger.error(f"Error fetching windowed data: {e}")
             return None
@@ -1693,10 +1720,10 @@ def update_view():
         sensor_name = current_sensor_state["name"]
 
         if data_cache["raw_data"] is None or data_cache["sensor_name"] != sensor_name:
-            logger.warning("No cached data available, triggering initial fetch")
+            logger.debug("No cached data available, triggering initial fetch")
             fetch_initial_data(sensor_name)
             if data_cache["raw_data"] is None:
-                current_readings.text = f"<h3>⚠️ No data available for {sensor_name}</h3>"
+                current_readings.text = f"<h3>⏳ Waiting for data from {sensor_name}...</h3>"
                 return
 
         # Use cached data
@@ -1930,8 +1957,11 @@ def _update_status_display(sensor_name, prepared, latest_time_ms):
         time_ago_part = f"{int(time_ago_s)}s"
     elif time_ago_s < 3600:
         time_ago_part = f"{int(time_ago_s / 60)}m"
-    else:
+    elif time_ago_s < 86400:
         time_ago_part = f"{int(time_ago_s / 3600)}h"
+    else:
+        days = int(time_ago_s / 86400)
+        time_ago_part = f"{days}d"
 
     # Format with log interval if available: "60s | 7s ago"
     log_interval_s = metadata_safe.get('log_interval_s')
