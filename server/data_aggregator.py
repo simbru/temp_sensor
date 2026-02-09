@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -77,6 +78,7 @@ class DataAggregator:
 
         # Per-sensor poll locks — prevents overlapping polls for the same sensor
         self._poll_locks = {}  # sensor_name -> threading.Lock()
+        self._backfill_in_progress = set()  # sensor names currently backfilling
 
         # Metadata fetch throttling — only fetch metrics/status/config every Nth poll
         self._poll_counts = {}  # sensor_name -> int
@@ -418,9 +420,7 @@ class DataAggregator:
             True if successful, False otherwise
         """
         table_name = self._get_table_name(sensor_name)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] Starting full historical backfill for {sensor_name}...")
-        logger.info(f"Backfilling all historical data for {sensor_name}")
+        logger.info(f"Starting full historical backfill for {sensor_name}...")
 
         try:
             # Fetch all data from client (no limit)
@@ -454,10 +454,9 @@ class DataAggregator:
                 self._submit_write(("insert_batch", table_name, batch, sensor_name))
                 inserted_count += len(batch)
                 if (i + batch_size) % 50000 == 0:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Backfilled {inserted_count:,} / {total_records:,} records...")
+                    logger.info(f"Backfilled {inserted_count:,} / {total_records:,} records for {sensor_name}...")
 
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Backfill complete: {total_records:,} records synced for {sensor_name}")
-            logger.info(f"Successfully backfilled {total_records} records for {sensor_name}")
+            logger.info(f"Backfill complete: {total_records:,} records synced for {sensor_name}")
             return True
 
         except Exception as e:
@@ -479,8 +478,15 @@ class DataAggregator:
             limit: Number of recent readings to fetch (default 10)
         """
         table_name = self._get_table_name(sensor_name)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        logger.debug(f"[{timestamp}] Fetching data from sensor: {sensor_name}")
+        logger.debug(f"Fetching data from sensor: {sensor_name}")
+
+        # Resolve device IP from configured URL — always available even if sensor is offline
+        sensor_url = self.client.get_sensor_url(sensor_name)
+        if sensor_url:
+            parsed = urlparse(sensor_url)
+            device_ip = parsed.hostname or "unknown"
+        else:
+            device_ip = "unknown"
 
         try:
             last_timestamp = self._fetch_last_timestamp(table_name)
@@ -488,13 +494,19 @@ class DataAggregator:
 
             # If this is the first sync (no data in server DB), do full historical backfill
             if last_timestamp is None:
-                logger.info(f"First sync detected for {sensor_name}, initiating full historical backfill")
-                print(f"[{timestamp}] First sync - backfilling all historical data for {sensor_name}...")
-                success = self._backfill_all_historical_data(sensor_name)
-                if not success:
-                    self._update_metadata(sensor_name, status="error", error="Failed to backfill historical data")
+                if sensor_name in self._backfill_in_progress:
+                    logger.debug(f"Backfill already in progress for {sensor_name}, skipping")
                     return
-                last_timestamp = self._fetch_last_timestamp(table_name)
+                self._backfill_in_progress.add(sensor_name)
+                try:
+                    logger.info(f"First sync detected for {sensor_name}, initiating full historical backfill")
+                    success = self._backfill_all_historical_data(sensor_name)
+                    if not success:
+                        self._update_metadata(sensor_name, device_ip=device_ip, status="error", error="Failed to backfill historical data")
+                        return
+                    last_timestamp = self._fetch_last_timestamp(table_name)
+                finally:
+                    self._backfill_in_progress.discard(sensor_name)
 
             # Try v2 consolidated poll first (1 HTTP request instead of 1-4)
             api_version = self.client.get_sensor_api_version(sensor_name)
@@ -505,42 +517,32 @@ class DataAggregator:
                     limit=limit
                 )
                 if poll_result is not None:
-                    self._process_v2_poll(sensor_name, table_name, poll_result, last_timestamp)
+                    self._process_v2_poll(sensor_name, table_name, poll_result, last_timestamp, device_ip)
                     return
 
             # Fallback: v1 legacy path (separate HTTP requests)
-            self._update_sensor_data_v1(sensor_name, table_name, last_timestamp, limit)
+            self._update_sensor_data_v1(sensor_name, table_name, last_timestamp, limit, device_ip)
 
         except Exception as e:
             logger.error(f"Error updating data for {sensor_name}: {e}")
-            self._update_metadata(sensor_name, status="error", error=str(e))
+            self._update_metadata(sensor_name, device_ip=device_ip, status="error", error=str(e))
 
     def _process_v2_poll(
         self,
         sensor_name: str,
         table_name: str,
         poll_result: Dict,
-        last_timestamp: Optional[int]
+        last_timestamp: Optional[int],
+        device_ip: str = "unknown"
     ):
         """
         Process a v2 /poll response: extract data, metrics, status from one response.
         This is the fast path — one HTTP request replaces 1-4 legacy requests.
         """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         sensor_data = poll_result.get("data", {})
         metrics = poll_result.get("metrics", {})
         config = poll_result.get("config", {})
         hardware_status = poll_result.get("hardware_status", "ok")
-
-        # Use the IP from our config (Headscale/actual connection IP)
-        from urllib.parse import urlparse
-        sensor_url = self.client.get_sensor_url(sensor_name)
-        if sensor_url:
-            parsed = urlparse(sensor_url)
-            device_ip = parsed.hostname or "unknown"
-        else:
-            device_ip = "unknown"
 
         # Cache metadata from the v2 response (always fresh — no throttling needed)
         self._cached_metadata[sensor_name] = {
@@ -557,8 +559,7 @@ class DataAggregator:
         needs_resync = self._check_gap_in_data(sensor_data, last_timestamp)
 
         if needs_resync:
-            logger.warning(f"Gap detected for {sensor_name}; initiating ranged resync")
-            print(f"[{timestamp}] Gap detected, streaming backlog for {sensor_name}...")
+            logger.warning(f"Gap detected for {sensor_name}; streaming backlog...")
             new_records, device_ip = self._resync_sensor(sensor_name, last_timestamp)
             status_value = "syncing" if new_records else "idle"
         else:
@@ -595,14 +596,13 @@ class DataAggregator:
         sensor_name: str,
         table_name: str,
         last_timestamp: Optional[int],
-        limit: int
+        limit: int,
+        device_ip: str = "unknown"
     ):
         """
         Legacy v1 polling path: separate HTTP requests for data, metrics, status, config.
         Used as fallback when a sensor doesn't support the v2 /poll endpoint.
         """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         new_records: List[Tuple[int, float, float, float, float, float]] = []
 
         # Fetch data (single request instead of peek + fetch)
@@ -613,15 +613,6 @@ class DataAggregator:
             return
 
         sensor_data = data.get("data", {})
-
-        # Use the IP from our config (Headscale/actual connection IP)
-        from urllib.parse import urlparse
-        sensor_url = self.client.get_sensor_url(sensor_name)
-        if sensor_url:
-            parsed = urlparse(sensor_url)
-            device_ip = parsed.hostname or "unknown"
-        else:
-            device_ip = "unknown"
 
         # Throttle metadata HTTP requests: only fetch metrics/status/config every Nth poll
         # This cuts HTTP requests from 4 to 1 per normal poll cycle
@@ -651,8 +642,7 @@ class DataAggregator:
         needs_resync = self._check_gap_in_data(sensor_data, last_timestamp)
 
         if needs_resync:
-            logger.warning(f"Gap detected for {sensor_name}; initiating ranged resync")
-            print(f"[{timestamp}] Gap detected, streaming backlog for {sensor_name}...")
+            logger.warning(f"Gap detected for {sensor_name}; streaming backlog...")
             new_records, device_ip = self._resync_sensor(sensor_name, last_timestamp)
             status_value = "syncing" if new_records else "idle"
         else:
@@ -850,6 +840,8 @@ class DataAggregator:
         """
         Query across cold → warm → hot tiers and merge into a single result.
         Older data comes from aggregation tables; recent data from raw table.
+        Falls back to raw table for any time range where aggregation tables
+        have no data (e.g. before retention has run for the first time).
         """
         warm_table = f"{table_name}_1min"
         cold_table = f"{table_name}_15min"
@@ -857,6 +849,9 @@ class DataAggregator:
 
         effective_start = start_time or 0
         effective_end = end_time or int(datetime.now().timestamp() * 1000)
+
+        # Track whether aggregation tiers had data (for fallback logic)
+        agg_had_data = False
 
         # Cold tier: data older than warm cutoff
         if effective_start < warm_cutoff_ms:
@@ -869,9 +864,14 @@ class DataAggregator:
                     WHERE bucket_start >= ? AND bucket_start < ?
                     ORDER BY bucket_start
                 """, (effective_start, cold_end))
-                all_rows.extend(cursor.fetchall())
-            except Exception:
-                pass  # Table may not exist yet or be empty
+                cold_rows = cursor.fetchall()
+                if cold_rows:
+                    all_rows.extend(cold_rows)
+                    agg_had_data = True
+            except sqlite3.OperationalError:
+                pass  # Table doesn't exist yet
+            except Exception as e:
+                logger.warning(f"Unexpected error querying cold tier for {sensor_name}: {e}")
 
         # Warm tier: data between warm and hot cutoffs
         if effective_start < hot_cutoff_ms and effective_end >= warm_cutoff_ms:
@@ -885,9 +885,27 @@ class DataAggregator:
                     WHERE bucket_start >= ? AND bucket_start < ?
                     ORDER BY bucket_start
                 """, (warm_start, warm_end))
-                all_rows.extend(cursor.fetchall())
-            except Exception:
-                pass
+                warm_rows = cursor.fetchall()
+                if warm_rows:
+                    all_rows.extend(warm_rows)
+                    agg_had_data = True
+            except sqlite3.OperationalError:
+                pass  # Table doesn't exist yet
+            except Exception as e:
+                logger.warning(f"Unexpected error querying warm tier for {sensor_name}: {e}")
+
+        # Fallback: if aggregation tiers had no data, query raw table for
+        # the full range. This happens before retention first runs (all data
+        # is still in the raw table) or if aggregation tables are empty.
+        if not agg_had_data and effective_start < hot_cutoff_ms:
+            raw_fallback_end = min(hot_cutoff_ms, effective_end)
+            cursor.execute(f"""
+                SELECT timestamp, temperature, humidity, pressure, light, noise
+                FROM {table_name}
+                WHERE timestamp >= ? AND timestamp < ?
+                ORDER BY timestamp
+            """, (effective_start, raw_fallback_end))
+            all_rows.extend(cursor.fetchall())
 
         # Hot tier: recent raw data
         if effective_end >= hot_cutoff_ms:
@@ -1003,31 +1021,32 @@ class DataAggregator:
 
     def _initial_connectivity_check(self, sensor_names):
         """Check connectivity and fetch initial data from all sensors on startup."""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] Checking connectivity to all sensors...")
+        logger.info("Checking connectivity to all sensors...")
 
         for sensor_name in sensor_names:
             try:
                 # Quick connectivity check with short timeout (3s instead of default 10s)
                 import requests
                 sensor_url = self.client.get_sensor_url(sensor_name)
+                parsed = urlparse(sensor_url) if sensor_url else None
+                device_ip = parsed.hostname if parsed else "unknown"
                 response = requests.get(f"{sensor_url}/status", timeout=3)
                 status = response.json() if response.status_code == 200 else None
 
                 if status:
-                    print(f"  ✓ {sensor_name}: Connected")
+                    logger.info(f"  {sensor_name}: Connected")
                     # Do an immediate data fetch to populate dashboard
                     poll_interval = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
                     limit = max(10, int(poll_interval * 3))
                     self.update_sensor_data(sensor_name, limit=limit)
                 else:
-                    print(f"  ✗ {sensor_name}: Unreachable")
-                    self._update_metadata(sensor_name, status="error", error="Unreachable on startup")
+                    logger.warning(f"  {sensor_name}: Unreachable")
+                    self._update_metadata(sensor_name, device_ip=device_ip, status="error", error="Unreachable on startup")
             except Exception as e:
-                print(f"  ✗ {sensor_name}: Error - {e}")
-                self._update_metadata(sensor_name, status="error", error=str(e))
+                logger.warning(f"  {sensor_name}: Error - {e}")
+                self._update_metadata(sensor_name, device_ip=device_ip, status="error", error=str(e))
 
-        print(f"[{timestamp}] Connectivity check complete\n")
+        logger.info("Connectivity check complete")
 
     def start_polling(self):
         """Start background polling threads (one per sensor)."""
@@ -1045,16 +1064,10 @@ class DataAggregator:
         self._stop_polling.clear()
         sensor_names = self.client.get_all_sensor_names()
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n{'='*60}")
-        print(f"[{timestamp}] Data Aggregator Started")
-        print(f"Monitoring {len(sensor_names)} sensor(s):")
-
+        logger.info(f"Data Aggregator Started — monitoring {len(sensor_names)} sensor(s)")
         for sensor_name in sensor_names:
             poll_interval = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
-            print(f"  - {sensor_name}: polling every {poll_interval}s")
-
-        print(f"{'='*60}\n")
+            logger.info(f"  {sensor_name}: polling every {poll_interval}s")
 
         # NOTE: We no longer call _initial_connectivity_check() here.
         # It was blocking startup for 3-10s per sensor (sequential HTTP requests).
@@ -1090,6 +1103,27 @@ class DataAggregator:
 
         self._polling_threads.clear()
         logger.info("Stopped all background polling threads")
+
+    def stop(self):
+        """Gracefully stop all background threads and close resources."""
+        self.stop_polling()
+
+        # Stop retention thread (uses same _stop_polling event)
+        if self._retention_thread and self._retention_thread.is_alive():
+            self._retention_thread.join(timeout=10)
+            logger.info("Stopped retention thread")
+
+        # Send shutdown sentinel to writer thread
+        try:
+            self._write_queue.put(None, timeout=5)
+        except queue.Full:
+            logger.warning("Write queue full during shutdown — writer may be stuck")
+
+        if self._writer_thread and self._writer_thread.is_alive():
+            self._writer_thread.join(timeout=10)
+            logger.info("Stopped writer thread")
+
+        logger.info("DataAggregator stopped")
 
     # ── Data Retention (tiered storage) ─────────────────────────────────
 
@@ -1206,9 +1240,13 @@ class DataAggregator:
             SELECT
                 (bucket_start / {cold_bucket_ms}) * {cold_bucket_ms} AS bucket,
                 SUM(count),
-                AVG(temperature_avg), MIN(temperature_min), MAX(temperature_max),
-                AVG(humidity_avg), MIN(humidity_min), MAX(humidity_max),
-                AVG(pressure_avg), AVG(light_avg), AVG(noise_avg)
+                SUM(temperature_avg * count) / SUM(count),
+                MIN(temperature_min), MAX(temperature_max),
+                SUM(humidity_avg * count) / SUM(count),
+                MIN(humidity_min), MAX(humidity_max),
+                SUM(pressure_avg * count) / SUM(count),
+                SUM(light_avg * count) / SUM(count),
+                SUM(noise_avg * count) / SUM(count)
             FROM {warm_table}
             WHERE bucket_start < ? AND bucket_start > ?
             GROUP BY bucket
@@ -1286,8 +1324,7 @@ class DataAggregator:
 
                 # Log recovery if there were previous errors
                 if consecutive_errors > 0:
-                    print(f"[{timestamp}] ✓ {sensor_name}: Reconnected (after {consecutive_errors} failures)")
-                    logger.info(f"{sensor_name} recovered after {consecutive_errors} failures")
+                    logger.info(f"{sensor_name}: Reconnected (after {consecutive_errors} failures)")
 
                 # Reset error counter on success
                 consecutive_errors = 0
@@ -1297,18 +1334,15 @@ class DataAggregator:
 
             except Exception as e:
                 consecutive_errors += 1
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 # Calculate exponential backoff delay
                 backoff_delay = min(poll_interval * (2 ** (consecutive_errors - 1)), max_backoff)
 
                 # Log first error immediately, then every 10th to avoid flooding
                 if consecutive_errors == 1:
-                    print(f"[{timestamp}] ⚠ {sensor_name}: Connection failed, retrying with backoff...")
-                    logger.warning(f"[{thread_id}] Polling failed for {sensor_name}: {e}")
+                    logger.warning(f"Polling failed for {sensor_name}: {e}")
                 elif consecutive_errors % 10 == 0:
-                    print(f"[{timestamp}] ⚠ {sensor_name}: Still offline ({consecutive_errors} failures, backoff: {backoff_delay:.0f}s)")
-                    logger.warning(f"[{thread_id}] {sensor_name} still offline ({consecutive_errors} failures, backoff: {backoff_delay:.0f}s)")
+                    logger.warning(f"{sensor_name} still offline ({consecutive_errors} failures, backoff: {backoff_delay:.0f}s)")
 
                 # Wait with backoff before retrying (release lock first!)
                 poll_lock.release()
@@ -1368,9 +1402,7 @@ class DataAggregator:
         
         while not self._stop_polling.is_set():
             try:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{timestamp}] Polling all sensors in parallel (max {max_workers} concurrent)...")
-                logger.info("Polling all sensors in parallel...")
+                logger.info(f"Polling all sensors in parallel (max {max_workers} concurrent)...")
                 
                 sensor_names = self.client.get_all_sensor_names()
                 
@@ -1389,13 +1421,10 @@ class DataAggregator:
                             future.result()
                         except Exception as e:
                             logger.error(f"Error polling {sensor_name}: {e}")
-                            print(f"[{timestamp}] ERROR polling {sensor_name}: {e}")
 
-                print(f"[{timestamp}] Polling complete. Next poll in {self.poll_interval} seconds.")
                 logger.info(f"Polling complete. Next poll in {self.poll_interval} seconds.")
 
             except Exception as e:
-                print(f"[{timestamp}] ERROR in polling loop: {e}")
                 logger.error(f"Error in polling loop: {e}")
 
             # Wait for next poll cycle (or until stop signal)
