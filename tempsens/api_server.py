@@ -2,6 +2,7 @@
 FastAPI server for Raspberry Pi temperature sensor clients.
 Exposes data from local SQLite database via REST API for remote dashboard access.
 """
+import logging
 import math
 import socket
 import time
@@ -14,6 +15,8 @@ from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 
 from . import io_funcs
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Temperature Sensor API",
@@ -150,9 +153,82 @@ async def root():
     """Root endpoint with API information."""
     return {
         "message": "Temperature Sensor API",
-        "version": "1.0.0",
-        "endpoints": ["/status", "/data/latest", "/data/range", "/config", "/metrics"]
+        "version": "2.0.0",
+        "endpoints": ["/poll", "/status", "/data/latest", "/data/range", "/config", "/metrics"]
     }
+
+
+@app.get("/poll")
+async def poll(
+    since: Optional[int] = Query(default=None, description="Fetch data newer than this timestamp (ms since epoch)"),
+    limit: int = Query(default=100, ge=1, le=50000, description="Number of most recent readings (used if 'since' not provided)")
+):
+    """
+    Consolidated polling endpoint (v2 API).
+    Returns data + metrics + status + config in a single response.
+    This replaces the need for separate /data/latest, /metrics, /status, /config calls.
+    """
+    try:
+        device_info = get_device_info()
+
+        # Get data: either since a timestamp or latest N records
+        if since is not None:
+            data = io_funcs.fetch_log_data_range(start_time=since)
+        else:
+            data = io_funcs.fetch_log_data_range(limit=limit)
+
+        # Build response data arrays
+        response_data = {
+            "time": data["time"],
+            "temperature": [safe_float(t) for t in data["temperature"]],
+            "humidity": [safe_float(h) for h in data["humidity"]]
+        }
+
+        # Add extended sensor data if present
+        if any(p is not None for p in data["pressure"]):
+            response_data["pressure"] = [safe_float(p) for p in data["pressure"]]
+        if any(light_val is not None for light_val in data["light"]):
+            response_data["light"] = [safe_float(light_val) for light_val in data["light"]]
+        if any(n is not None for n in data["noise"]):
+            response_data["noise"] = [safe_float(n) for n in data["noise"]]
+
+        # Get system metrics (cached, low overhead)
+        metrics = get_system_metrics()
+
+        # Check hardware status
+        consecutive_failures = io_funcs._get_consecutive_failures()
+        hardware_status = "ok"
+        if consecutive_failures >= io_funcs.HARDWARE_FAILURE_THRESHOLD:
+            hardware_status = "hardware_failure"
+        elif consecutive_failures > 0:
+            hardware_status = f"degraded ({consecutive_failures} failed reads)"
+
+        return {
+            "device_name": device_info["device_name"],
+            "device_ip": device_info["ip_address"],
+            "data": response_data,
+            "metrics": {
+                "cpu_percent": metrics["cpu_percent"],
+                "memory_percent": metrics["memory_percent"],
+                "database_size_mb": metrics["database_size_mb"],
+                "total_records": metrics["total_records"],
+            },
+            "hardware_status": hardware_status,
+            "config": {
+                "log_interval_s": float(io_funcs.CONFIG["DEFAULT"]["loginterval_s"]),
+                "sensor_type": device_info["sensor_type"],
+            },
+            "metadata": {
+                "count": len(data["time"]),
+                "api_version": 2,
+            }
+        }
+    except Exception as e:
+        logger.error(f"Poll endpoint error: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error"}
+        )
 
 
 @app.get("/status")
@@ -251,9 +327,10 @@ async def get_latest_data(
             }
         }
     except Exception as e:
+        logger.error(f"Latest data endpoint error: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to fetch data: {str(e)}"}
+            content={"error": "Internal server error"}
         )
 
 
@@ -308,9 +385,10 @@ async def get_data_range(
             }
         }
     except Exception as e:
+        logger.error(f"Data range endpoint error: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to fetch data: {str(e)}"}
+            content={"error": "Internal server error"}
         )
 
 
@@ -353,9 +431,10 @@ async def get_metrics():
         metrics = get_system_metrics()
         return metrics
     except Exception as e:
+        logger.error(f"Metrics endpoint error: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to fetch metrics: {str(e)}"}
+            content={"error": "Internal server error"}
         )
 
 

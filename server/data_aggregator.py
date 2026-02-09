@@ -3,8 +3,10 @@ Data aggregator that polls multiple sensors and maintains a local cache.
 Uses SQLite for persistent storage of sensor data.
 """
 import logging
+import queue
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,7 +28,8 @@ class DataAggregator:
         sensor_configs: List[Dict] = None,
         db_path: str = "sensor_data.db",
         poll_interval: int = 30,
-        min_gap_threshold: int = 60
+        min_gap_threshold: int = 60,
+        retention_config: Optional[Dict] = None
     ):
         """
         Initialize data aggregator.
@@ -37,10 +40,19 @@ class DataAggregator:
             db_path: Path to SQLite database file
             poll_interval: Default seconds between polling cycles (fallback)
             min_gap_threshold: Minimum seconds before marking sensor as offline (default 60)
+            retention_config: Data retention settings (hot/warm/cold tiers)
         """
         self.client = multi_sensor_client
         self.db_path = Path(db_path)
         self.poll_interval = poll_interval  # Keep for backward compatibility
+
+        # Data retention config
+        rc = retention_config or {}
+        self._hot_retention_days = rc.get("hot_retention_days", 7)
+        self._warm_retention_days = rc.get("warm_retention_days", 90)
+        self._warm_resolution_s = rc.get("warm_resolution_s", 60)      # 1-min averages
+        self._cold_resolution_s = rc.get("cold_resolution_s", 900)     # 15-min averages
+        self._retention_thread = None
         self._resync_batch_limit = 5000
         self._resync_timeout = max(15, poll_interval * 2)
         self._min_gap_threshold = min_gap_threshold
@@ -63,7 +75,27 @@ class DataAggregator:
             if sensor_name not in self._sensor_poll_intervals:
                 self._sensor_poll_intervals[sensor_name] = poll_interval
 
+        # Per-sensor poll locks — prevents overlapping polls for the same sensor
+        self._poll_locks = {}  # sensor_name -> threading.Lock()
+
+        # Metadata fetch throttling — only fetch metrics/status/config every Nth poll
+        self._poll_counts = {}  # sensor_name -> int
+        self._metadata_fetch_interval = 10  # Fetch client metrics every 10th poll
+        self._cached_metadata = {}  # sensor_name -> last fetched metadata dict
+
+        # Single-writer DB pattern: all writes go through a queue processed by one thread.
+        # This eliminates "database is locked" errors from concurrent sqlite3 access.
+        self._write_queue = queue.Queue()
+        self._writer_thread = None
+
+        # Thread-local storage for read connections (each thread gets its own)
+        self._local = threading.local()
+
+        # In-memory record count cache (updated on each insert, avoids extra DB queries)
+        self._record_counts = {}  # sensor_name -> int
+
         self._init_database()
+        self._start_writer_thread()
 
     def _init_database(self):
         """Initialize SQLite database with tables for each sensor."""
@@ -165,7 +197,207 @@ class DataAggregator:
                         cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} REAL")
                         logger.info(f"Added column {col_name} to {table_name}")
 
+                # Create aggregation tables for warm/cold tiers
+                for suffix, res_label in [("1min", "warm"), ("15min", "cold")]:
+                    agg_table = f"{table_name}_{suffix}"
+                    cursor.execute(f"""
+                        CREATE TABLE IF NOT EXISTS {agg_table} (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            bucket_start INTEGER NOT NULL,
+                            count INTEGER NOT NULL,
+                            temperature_avg REAL,
+                            temperature_min REAL,
+                            temperature_max REAL,
+                            humidity_avg REAL,
+                            humidity_min REAL,
+                            humidity_max REAL,
+                            pressure_avg REAL,
+                            light_avg REAL,
+                            noise_avg REAL,
+                            UNIQUE(bucket_start)
+                        )
+                    """)
+                    cursor.execute(f"""
+                        CREATE INDEX IF NOT EXISTS idx_{agg_table}_bucket
+                        ON {agg_table}(bucket_start DESC)
+                    """)
+
+            # Initialize record counts from database while connection is open
+            for sensor_name in self.client.get_all_sensor_names():
+                table_name = self._get_table_name(sensor_name)
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                    self._record_counts[sensor_name] = cursor.fetchone()[0]
+                except Exception:
+                    self._record_counts[sensor_name] = 0
+
             conn.commit()
+    def _start_writer_thread(self):
+        """Start the single-writer background thread for all DB writes."""
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop,
+            daemon=True,
+            name="DB-Writer"
+        )
+        self._writer_thread.start()
+        logger.info("Started DB writer thread")
+
+    def _writer_loop(self):
+        """
+        Single-writer thread that processes all DB write operations from the queue.
+        Only ONE connection is ever used for writing, eliminating lock contention.
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-64000")
+        conn.execute("PRAGMA temp_store=MEMORY")
+
+        while True:
+            try:
+                op = self._write_queue.get()
+                if op is None:
+                    self._write_queue.task_done()
+                    break  # Shutdown signal
+
+                op_type = op[0]
+                max_retries = 3
+
+                for attempt in range(max_retries):
+                    try:
+                        if op_type == "insert_data":
+                            _, table_name, records, sensor_name = op
+                            cursor = conn.cursor()
+                            cursor.executemany(
+                                f"INSERT OR IGNORE INTO {table_name} "
+                                f"(timestamp, temperature, humidity, pressure, light, noise) "
+                                f"VALUES (?, ?, ?, ?, ?, ?)",
+                                records
+                            )
+                            conn.commit()
+                            inserted = cursor.rowcount
+                            if sensor_name and inserted > 0:
+                                self._record_counts[sensor_name] = \
+                                    self._record_counts.get(sensor_name, 0) + inserted
+
+                        elif op_type == "update_metadata":
+                            _, sensor_name, metadata_dict = op
+                            total_records = self._record_counts.get(sensor_name, 0)
+                            cursor = conn.cursor()
+                            cursor.execute("""
+                                INSERT OR REPLACE INTO sensor_metadata
+                                (sensor_name, device_ip, last_update, last_error, status,
+                                 cpu_percent, memory_percent, client_db_size_mb, sensor_type,
+                                 total_records, client_total_records, log_interval_s)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                sensor_name,
+                                metadata_dict.get("device_ip"),
+                                datetime.now().isoformat(),
+                                metadata_dict.get("error"),
+                                metadata_dict.get("status", "unknown"),
+                                metadata_dict.get("cpu_percent"),
+                                metadata_dict.get("memory_percent"),
+                                metadata_dict.get("client_db_size_mb"),
+                                metadata_dict.get("sensor_type"),
+                                total_records,
+                                metadata_dict.get("client_total_records"),
+                                metadata_dict.get("log_interval_s"),
+                            ))
+                            conn.commit()
+
+                        elif op_type == "insert_batch":
+                            # Used by backfill — large batch insert
+                            _, table_name, records, sensor_name = op
+                            cursor = conn.cursor()
+                            cursor.executemany(
+                                f"INSERT OR IGNORE INTO {table_name} "
+                                f"(timestamp, temperature, humidity, pressure, light, noise) "
+                                f"VALUES (?, ?, ?, ?, ?, ?)",
+                                records
+                            )
+                            conn.commit()
+                            inserted = cursor.rowcount
+                            if sensor_name and inserted > 0:
+                                self._record_counts[sensor_name] = \
+                                    self._record_counts.get(sensor_name, 0) + inserted
+
+                        elif op_type == "insert_warm":
+                            # Retention: insert 1-min aggregated rows
+                            _, agg_table, rows = op
+                            cursor = conn.cursor()
+                            cursor.executemany(
+                                f"INSERT OR IGNORE INTO {agg_table} "
+                                f"(bucket_start, count, "
+                                f"temperature_avg, temperature_min, temperature_max, "
+                                f"humidity_avg, humidity_min, humidity_max, "
+                                f"pressure_avg, light_avg, noise_avg) "
+                                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                rows
+                            )
+                            conn.commit()
+
+                        elif op_type == "insert_cold":
+                            # Retention: insert 15-min aggregated rows
+                            _, agg_table, rows = op
+                            cursor = conn.cursor()
+                            cursor.executemany(
+                                f"INSERT OR IGNORE INTO {agg_table} "
+                                f"(bucket_start, count, "
+                                f"temperature_avg, temperature_min, temperature_max, "
+                                f"humidity_avg, humidity_min, humidity_max, "
+                                f"pressure_avg, light_avg, noise_avg) "
+                                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                rows
+                            )
+                            conn.commit()
+
+                        elif op_type == "delete_old":
+                            # Retention: delete rows older than cutoff
+                            _, table_name, cutoff_ms, ts_column = op
+                            ts_col = ts_column or "timestamp"
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                f"DELETE FROM {table_name} WHERE {ts_col} < ?",
+                                (cutoff_ms,)
+                            )
+                            conn.commit()
+                            logger.info(f"Retention: deleted {cursor.rowcount} rows from {table_name}")
+
+                        break  # Success — exit retry loop
+
+                    except sqlite3.OperationalError as e:
+                        if "database is locked" in str(e) and attempt < max_retries - 1:
+                            logger.warning(f"DB write retry {attempt + 1}/{max_retries}: {e}")
+                            time.sleep(0.1 * (attempt + 1))
+                        else:
+                            logger.error(f"DB write failed after {max_retries} retries: {e}")
+                            break
+
+                # Mark task as done
+                self._write_queue.task_done()
+
+            except Exception as e:
+                logger.error(f"Error in writer thread: {e}", exc_info=True)
+                # Still mark as done to avoid blocking join()
+                try:
+                    self._write_queue.task_done()
+                except ValueError:
+                    pass  # task_done() called too many times
+
+        conn.close()
+
+    def _submit_write(self, op_tuple):
+        """Submit a write operation to the writer queue."""
+        self._write_queue.put(op_tuple)
+
+    def _get_read_conn(self):
+        """Get a thread-local read-only DB connection."""
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            self._local.conn = sqlite3.connect(self.db_path)
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn.execute("PRAGMA query_only=ON")
+        return self._local.conn
 
     @staticmethod
     def _get_table_name(sensor_name: str) -> str:
@@ -213,22 +445,16 @@ class DataAggregator:
             records = list(zip(times, temperatures, humidities, pressures, lights, noises))
             total_records = len(records)
 
-            # Insert in batches to avoid memory issues
+            # Insert in batches via the write queue
             batch_size = 10000
             inserted_count = 0
 
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                for i in range(0, total_records, batch_size):
-                    batch = records[i:i + batch_size]
-                    cursor.executemany(
-                        f"INSERT OR IGNORE INTO {table_name} (timestamp, temperature, humidity, pressure, light, noise) VALUES (?, ?, ?, ?, ?, ?)",
-                        batch
-                    )
-                    inserted_count += len(batch)
-                    if (i + batch_size) % 50000 == 0:
-                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Backfilled {inserted_count:,} / {total_records:,} records...")
-                conn.commit()
+            for i in range(0, total_records, batch_size):
+                batch = records[i:i + batch_size]
+                self._submit_write(("insert_batch", table_name, batch, sensor_name))
+                inserted_count += len(batch)
+                if (i + batch_size) % 50000 == 0:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Backfilled {inserted_count:,} / {total_records:,} records...")
 
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Backfill complete: {total_records:,} records synced for {sensor_name}")
             logger.info(f"Successfully backfilled {total_records} records for {sensor_name}")
@@ -242,16 +468,18 @@ class DataAggregator:
         """
         Fetch latest data from a sensor and update local database.
 
+        Tries the v2 /poll endpoint first (single HTTP request for everything).
+        Falls back to v1 legacy endpoints if the sensor doesn't support v2.
+
         On first sync, performs full historical backfill of all client data.
         Subsequent syncs fetch only recent data for efficiency.
 
         Args:
             sensor_name: Name of sensor to update
-            limit: Number of recent readings to fetch (default 1000)
+            limit: Number of recent readings to fetch (default 10)
         """
         table_name = self._get_table_name(sensor_name)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # Reduce log spam - only log at debug level for normal polling
         logger.debug(f"[{timestamp}] Fetching data from sensor: {sensor_name}")
 
         try:
@@ -266,113 +494,194 @@ class DataAggregator:
                 if not success:
                     self._update_metadata(sensor_name, status="error", error="Failed to backfill historical data")
                     return
-                # After backfill, update last_timestamp
                 last_timestamp = self._fetch_last_timestamp(table_name)
 
-            device_ip = "unknown"
-            status_value = "idle"
-            new_records: List[Tuple[int, float, float]] = []
+            # Try v2 consolidated poll first (1 HTTP request instead of 1-4)
+            api_version = self.client.get_sensor_api_version(sensor_name)
+            if api_version != 1:  # Unknown or v2 — try v2
+                poll_result = self.client.poll_sensor(
+                    sensor_name,
+                    since=last_timestamp,
+                    limit=limit
+                )
+                if poll_result is not None:
+                    self._process_v2_poll(sensor_name, table_name, poll_result, last_timestamp)
+                    return
 
-            # Fetch data first (single request instead of peek + fetch)
-            data = self.client.get_sensor_data(sensor_name, limit=limit)
-            if data is None:
-                logger.warning(f"Failed to fetch data from {sensor_name}")
-                self._handle_fetch_failure(sensor_name, last_timestamp, "Failed to fetch data")
-                return
-
-            sensor_data = data.get("data", {})
-
-            # Use the IP from our config (Headscale/actual connection IP) instead of client's self-reported IP
-            from urllib.parse import urlparse
-            sensor_url = self.client.get_sensor_url(sensor_name)
-            if sensor_url:
-                parsed = urlparse(sensor_url)
-                device_ip = parsed.hostname or "unknown"
-            else:
-                device_ip = "unknown"
-
-            # Fetch system metrics from client
-            metrics = self.client.get_sensor_metrics(sensor_name)
-            cpu_percent = metrics.get("cpu_percent") if metrics else None
-            memory_percent = metrics.get("memory_percent") if metrics else None
-            client_db_size_mb = metrics.get("database_size_mb") if metrics else None
-            sensor_type = metrics.get("sensor_type") if metrics else None
-            client_total_records = metrics.get("total_records") if metrics else None
-
-            # Check for hardware failure from status endpoint
-            status_info = self.client.sensors[sensor_name].get_status() if sensor_name in self.client.sensors else None
-            hardware_status = status_info.get("hardware_status") if status_info else "ok"
-            
-            # Fetch log interval from client configuration
-            config = self.client.get_sensor_config(sensor_name)
-            log_interval_s = config.get("log_interval_s") if config else None
-
-            # Check if resync needed based on fetched data
-            needs_resync = self._check_gap_in_data(sensor_data, last_timestamp)
-
-            if needs_resync:
-                logger.warning(f"Gap detected for {sensor_name}; initiating ranged resync")
-                print(f"[{timestamp}] Gap detected, streaming backlog for {sensor_name}...")
-                new_records, device_ip = self._resync_sensor(sensor_name, last_timestamp)
-                status_value = "syncing" if new_records else "idle"
-            else:
-                new_records = self._extract_new_records(sensor_data, last_timestamp)
-
-                # Determine status based on data recency, not just new records
-                # This prevents flickering when polling faster than logging
-                if new_records:
-                    status_value = "active"
-                elif last_timestamp is not None:
-                    # Check if last data is still fresh
-                    now_ms = int(datetime.now().timestamp() * 1000)
-                    time_since_last_ms = now_ms - last_timestamp
-
-                    # Use min_gap_threshold (default 60s) as the freshness window
-                    # This accounts for sensors that log slower than we poll
-                    poll_interval_s = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
-                    fresh_threshold_ms = max(poll_interval_s * 2, self._min_gap_threshold) * 1000
-
-                    if time_since_last_ms <= fresh_threshold_ms:
-                        status_value = "active"  # Recent data, sensor is healthy
-                    else:
-                        status_value = "idle"  # Data is getting stale
-                else:
-                    status_value = "idle"  # No data at all
-
-            if new_records:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.executemany(
-                        f"INSERT OR IGNORE INTO {table_name} (timestamp, temperature, humidity, pressure, light, noise) VALUES (?, ?, ?, ?, ?, ?)",
-                        new_records
-                    )
-                    conn.commit()
-
-                logger.info(f"Added {len(new_records)} new records for {sensor_name}")
-
-            # Override status if hardware failure detected
-            if hardware_status == "hardware_failure":
-                status_value = "hardware_failure"
-                error_msg = "Sensor hardware failure: returning None values"
-            else:
-                error_msg = None
-
-            self._update_metadata(
-                sensor_name,
-                device_ip=device_ip,
-                status=status_value,
-                error=error_msg,
-                cpu_percent=cpu_percent,
-                memory_percent=memory_percent,
-                client_db_size_mb=client_db_size_mb,
-                sensor_type=sensor_type,
-                client_total_records=client_total_records,
-                log_interval_s=log_interval_s
-            )
+            # Fallback: v1 legacy path (separate HTTP requests)
+            self._update_sensor_data_v1(sensor_name, table_name, last_timestamp, limit)
 
         except Exception as e:
             logger.error(f"Error updating data for {sensor_name}: {e}")
             self._update_metadata(sensor_name, status="error", error=str(e))
+
+    def _process_v2_poll(
+        self,
+        sensor_name: str,
+        table_name: str,
+        poll_result: Dict,
+        last_timestamp: Optional[int]
+    ):
+        """
+        Process a v2 /poll response: extract data, metrics, status from one response.
+        This is the fast path — one HTTP request replaces 1-4 legacy requests.
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        sensor_data = poll_result.get("data", {})
+        metrics = poll_result.get("metrics", {})
+        config = poll_result.get("config", {})
+        hardware_status = poll_result.get("hardware_status", "ok")
+
+        # Use the IP from our config (Headscale/actual connection IP)
+        from urllib.parse import urlparse
+        sensor_url = self.client.get_sensor_url(sensor_name)
+        if sensor_url:
+            parsed = urlparse(sensor_url)
+            device_ip = parsed.hostname or "unknown"
+        else:
+            device_ip = "unknown"
+
+        # Cache metadata from the v2 response (always fresh — no throttling needed)
+        self._cached_metadata[sensor_name] = {
+            "cpu_percent": metrics.get("cpu_percent"),
+            "memory_percent": metrics.get("memory_percent"),
+            "client_db_size_mb": metrics.get("database_size_mb"),
+            "sensor_type": config.get("sensor_type"),
+            "client_total_records": metrics.get("total_records"),
+            "hardware_status": hardware_status,
+            "log_interval_s": config.get("log_interval_s"),
+        }
+
+        # Check if resync needed based on fetched data
+        needs_resync = self._check_gap_in_data(sensor_data, last_timestamp)
+
+        if needs_resync:
+            logger.warning(f"Gap detected for {sensor_name}; initiating ranged resync")
+            print(f"[{timestamp}] Gap detected, streaming backlog for {sensor_name}...")
+            new_records, device_ip = self._resync_sensor(sensor_name, last_timestamp)
+            status_value = "syncing" if new_records else "idle"
+        else:
+            new_records = self._extract_new_records(sensor_data, last_timestamp)
+            status_value = self._determine_status(sensor_name, new_records, last_timestamp)
+
+        if new_records:
+            self._submit_write(("insert_data", table_name, new_records, sensor_name))
+            logger.info(f"Added {len(new_records)} new records for {sensor_name} (v2)")
+
+        # Override status if hardware failure detected
+        if hardware_status == "hardware_failure":
+            status_value = "hardware_failure"
+            error_msg = "Sensor hardware failure: returning None values"
+        else:
+            error_msg = None
+
+        cached = self._cached_metadata.get(sensor_name, {})
+        self._update_metadata(
+            sensor_name,
+            device_ip=device_ip,
+            status=status_value,
+            error=error_msg,
+            cpu_percent=cached.get("cpu_percent"),
+            memory_percent=cached.get("memory_percent"),
+            client_db_size_mb=cached.get("client_db_size_mb"),
+            sensor_type=cached.get("sensor_type"),
+            client_total_records=cached.get("client_total_records"),
+            log_interval_s=cached.get("log_interval_s"),
+        )
+
+    def _update_sensor_data_v1(
+        self,
+        sensor_name: str,
+        table_name: str,
+        last_timestamp: Optional[int],
+        limit: int
+    ):
+        """
+        Legacy v1 polling path: separate HTTP requests for data, metrics, status, config.
+        Used as fallback when a sensor doesn't support the v2 /poll endpoint.
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        new_records: List[Tuple[int, float, float, float, float, float]] = []
+
+        # Fetch data (single request instead of peek + fetch)
+        data = self.client.get_sensor_data(sensor_name, limit=limit)
+        if data is None:
+            logger.warning(f"Failed to fetch data from {sensor_name}")
+            self._handle_fetch_failure(sensor_name, last_timestamp, "Failed to fetch data")
+            return
+
+        sensor_data = data.get("data", {})
+
+        # Use the IP from our config (Headscale/actual connection IP)
+        from urllib.parse import urlparse
+        sensor_url = self.client.get_sensor_url(sensor_name)
+        if sensor_url:
+            parsed = urlparse(sensor_url)
+            device_ip = parsed.hostname or "unknown"
+        else:
+            device_ip = "unknown"
+
+        # Throttle metadata HTTP requests: only fetch metrics/status/config every Nth poll
+        # This cuts HTTP requests from 4 to 1 per normal poll cycle
+        self._poll_counts[sensor_name] = self._poll_counts.get(sensor_name, 0) + 1
+        fetch_metadata = (self._poll_counts[sensor_name] % self._metadata_fetch_interval == 1)
+
+        if fetch_metadata:
+            metrics = self.client.get_sensor_metrics(sensor_name)
+            status_info = self.client.sensors[sensor_name].get_status() if sensor_name in self.client.sensors else None
+            config = self.client.get_sensor_config(sensor_name)
+
+            # Cache the metadata for use on non-metadata polls
+            self._cached_metadata[sensor_name] = {
+                "cpu_percent": metrics.get("cpu_percent") if metrics else None,
+                "memory_percent": metrics.get("memory_percent") if metrics else None,
+                "client_db_size_mb": metrics.get("database_size_mb") if metrics else None,
+                "sensor_type": metrics.get("sensor_type") if metrics else None,
+                "client_total_records": metrics.get("total_records") if metrics else None,
+                "hardware_status": status_info.get("hardware_status") if status_info else "ok",
+                "log_interval_s": config.get("log_interval_s") if config else None,
+            }
+
+        cached = self._cached_metadata.get(sensor_name, {})
+        hardware_status = cached.get("hardware_status", "ok")
+
+        # Check if resync needed based on fetched data
+        needs_resync = self._check_gap_in_data(sensor_data, last_timestamp)
+
+        if needs_resync:
+            logger.warning(f"Gap detected for {sensor_name}; initiating ranged resync")
+            print(f"[{timestamp}] Gap detected, streaming backlog for {sensor_name}...")
+            new_records, device_ip = self._resync_sensor(sensor_name, last_timestamp)
+            status_value = "syncing" if new_records else "idle"
+        else:
+            new_records = self._extract_new_records(sensor_data, last_timestamp)
+            status_value = self._determine_status(sensor_name, new_records, last_timestamp)
+
+        if new_records:
+            self._submit_write(("insert_data", table_name, new_records, sensor_name))
+            logger.info(f"Added {len(new_records)} new records for {sensor_name} (v1)")
+
+        # Override status if hardware failure detected
+        if hardware_status == "hardware_failure":
+            status_value = "hardware_failure"
+            error_msg = "Sensor hardware failure: returning None values"
+        else:
+            error_msg = None
+
+        self._update_metadata(
+            sensor_name,
+            device_ip=device_ip,
+            status=status_value,
+            error=error_msg,
+            cpu_percent=cached.get("cpu_percent"),
+            memory_percent=cached.get("memory_percent"),
+            client_db_size_mb=cached.get("client_db_size_mb"),
+            sensor_type=cached.get("sensor_type"),
+            client_total_records=cached.get("client_total_records"),
+            log_interval_s=cached.get("log_interval_s"),
+        )
 
     def _handle_fetch_failure(
         self,
@@ -404,6 +713,28 @@ class DataAggregator:
 
         self._update_metadata(sensor_name, status="error", error=error_message)
 
+    def _determine_status(
+        self,
+        sensor_name: str,
+        new_records: list,
+        last_timestamp: Optional[int]
+    ) -> str:
+        """
+        Determine sensor status based on data recency, not just new records.
+        Prevents status flickering when polling faster than logging.
+        """
+        if new_records:
+            return "active"
+        if last_timestamp is not None:
+            now_ms = int(datetime.now().timestamp() * 1000)
+            time_since_last_ms = now_ms - last_timestamp
+            poll_interval_s = self._sensor_poll_intervals.get(sensor_name, self.poll_interval)
+            fresh_threshold_ms = max(poll_interval_s * 2, self._min_gap_threshold) * 1000
+            if time_since_last_ms <= fresh_threshold_ms:
+                return "active"  # Recent data, sensor is healthy
+            return "idle"  # Data is getting stale
+        return "idle"  # No data at all
+
     def _update_metadata(
         self,
         sensor_name: str,
@@ -417,24 +748,22 @@ class DataAggregator:
         client_total_records: Optional[int] = None,
         log_interval_s: Optional[float] = None
     ):
-        """Update sensor metadata in database."""
+        """Update sensor metadata via the write queue."""
         # Check for hardware failure pattern: error message contains "None values"
         if error and "None values" in error:
             status = "hardware_failure"
-        
-        # Get total records count (server-side)
-        total_records = self.get_total_records(sensor_name)
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO sensor_metadata
-                (sensor_name, device_ip, last_update, last_error, status,
-                 cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records, client_total_records, log_interval_s)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (sensor_name, device_ip, datetime.now().isoformat(), error, status,
-                  cpu_percent, memory_percent, client_db_size_mb, sensor_type, total_records, client_total_records, log_interval_s))
-            conn.commit()
+        self._submit_write(("update_metadata", sensor_name, {
+            "device_ip": device_ip,
+            "status": status,
+            "error": error,
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory_percent,
+            "client_db_size_mb": client_db_size_mb,
+            "sensor_type": sensor_type,
+            "client_total_records": client_total_records,
+            "log_interval_s": log_interval_s,
+        }))
 
     def get_sensor_data(
         self,
@@ -444,7 +773,11 @@ class DataAggregator:
         end_time: Optional[int] = None
     ) -> Dict:
         """
-        Get sensor data from local database.
+        Get sensor data from local database with transparent tiered storage.
+
+        For recent data (within hot tier): returns full-resolution raw data.
+        For older data: returns aggregated data from warm/cold tiers,
+        seamlessly merged with raw data so the caller sees a single result.
 
         Args:
             sensor_name: Name of sensor
@@ -457,44 +790,121 @@ class DataAggregator:
             'pressure', 'light', 'noise' (as milliseconds for Bokeh compatibility)
         """
         table_name = self._get_table_name(sensor_name)
+        conn = self._get_read_conn()
+        cursor = conn.cursor()
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        # Determine hot-tier cutoff
+        now_ms = int(datetime.now().timestamp() * 1000)
+        hot_cutoff_ms = now_ms - (self._hot_retention_days * 86400 * 1000)
+        warm_cutoff_ms = now_ms - (self._warm_retention_days * 86400 * 1000)
 
-            # Build query based on parameters
-            if limit is not None:
-                # Get last N readings in descending order, then reverse to chronological
-                query = f"""
+        # For limit queries or recent-only queries, just use the raw table
+        needs_tiered = False
+        if limit is None and start_time is not None and start_time < hot_cutoff_ms:
+            needs_tiered = True
+        elif limit is None and start_time is None and end_time is None:
+            # "All data" — check if aggregation tables have data
+            needs_tiered = True
+
+        if needs_tiered:
+            return self._get_tiered_sensor_data(
+                sensor_name, table_name, cursor,
+                start_time, end_time,
+                hot_cutoff_ms, warm_cutoff_ms
+            )
+
+        # Standard query from raw table (hot tier only)
+        if limit is not None:
+            query = f"""
+                SELECT timestamp, temperature, humidity, pressure, light, noise
+                FROM (
                     SELECT timestamp, temperature, humidity, pressure, light, noise
-                    FROM (
-                        SELECT timestamp, temperature, humidity, pressure, light, noise
-                        FROM {table_name}
-                        ORDER BY timestamp DESC
-                        LIMIT ?
-                    )
-                    ORDER BY timestamp ASC
-                """
-                cursor.execute(query, (limit,))
-            elif start_time or end_time:
-                conditions = []
-                params = []
+                    FROM {table_name}
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                )
+                ORDER BY timestamp ASC
+            """
+            cursor.execute(query, (limit,))
+        elif start_time or end_time:
+            conditions = []
+            params = []
+            if start_time:
+                conditions.append("timestamp >= ?")
+                params.append(start_time)
+            if end_time:
+                conditions.append("timestamp <= ?")
+                params.append(end_time)
+            where_clause = " AND ".join(conditions)
+            query = f"SELECT timestamp, temperature, humidity, pressure, light, noise FROM {table_name} WHERE {where_clause} ORDER BY timestamp"
+            cursor.execute(query, params)
+        else:
+            query = f"SELECT timestamp, temperature, humidity, pressure, light, noise FROM {table_name} ORDER BY timestamp"
+            cursor.execute(query)
 
-                if start_time:
-                    conditions.append("timestamp >= ?")
-                    params.append(start_time)
-                if end_time:
-                    conditions.append("timestamp <= ?")
-                    params.append(end_time)
+        return self._rows_to_result(cursor.fetchall())
 
-                where_clause = " AND ".join(conditions)
-                query = f"SELECT timestamp, temperature, humidity, pressure, light, noise FROM {table_name} WHERE {where_clause} ORDER BY timestamp"
-                cursor.execute(query, params)
-            else:
-                query = f"SELECT timestamp, temperature, humidity, pressure, light, noise FROM {table_name} ORDER BY timestamp"
-                cursor.execute(query)
+    def _get_tiered_sensor_data(self, sensor_name, table_name, cursor,
+                                 start_time, end_time,
+                                 hot_cutoff_ms, warm_cutoff_ms):
+        """
+        Query across cold → warm → hot tiers and merge into a single result.
+        Older data comes from aggregation tables; recent data from raw table.
+        """
+        warm_table = f"{table_name}_1min"
+        cold_table = f"{table_name}_15min"
+        all_rows = []
 
-            rows = cursor.fetchall()
+        effective_start = start_time or 0
+        effective_end = end_time or int(datetime.now().timestamp() * 1000)
 
+        # Cold tier: data older than warm cutoff
+        if effective_start < warm_cutoff_ms:
+            cold_end = min(warm_cutoff_ms, effective_end)
+            try:
+                cursor.execute(f"""
+                    SELECT bucket_start, temperature_avg, humidity_avg,
+                           pressure_avg, light_avg, noise_avg
+                    FROM {cold_table}
+                    WHERE bucket_start >= ? AND bucket_start < ?
+                    ORDER BY bucket_start
+                """, (effective_start, cold_end))
+                all_rows.extend(cursor.fetchall())
+            except Exception:
+                pass  # Table may not exist yet or be empty
+
+        # Warm tier: data between warm and hot cutoffs
+        if effective_start < hot_cutoff_ms and effective_end >= warm_cutoff_ms:
+            warm_start = max(effective_start, warm_cutoff_ms)
+            warm_end = min(hot_cutoff_ms, effective_end)
+            try:
+                cursor.execute(f"""
+                    SELECT bucket_start, temperature_avg, humidity_avg,
+                           pressure_avg, light_avg, noise_avg
+                    FROM {warm_table}
+                    WHERE bucket_start >= ? AND bucket_start < ?
+                    ORDER BY bucket_start
+                """, (warm_start, warm_end))
+                all_rows.extend(cursor.fetchall())
+            except Exception:
+                pass
+
+        # Hot tier: recent raw data
+        if effective_end >= hot_cutoff_ms:
+            raw_start = max(effective_start, hot_cutoff_ms)
+            cursor.execute(f"""
+                SELECT timestamp, temperature, humidity, pressure, light, noise
+                FROM {table_name}
+                WHERE timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp
+            """, (raw_start, effective_end))
+            all_rows.extend(cursor.fetchall())
+
+        return self._rows_to_result(all_rows)
+
+    @staticmethod
+    def _rows_to_result(rows) -> Dict:
+        """Convert database rows to the standard result dict format."""
         if not rows:
             return {
                 "time": np.array([]),
@@ -505,7 +915,6 @@ class DataAggregator:
                 "noise": np.array([])
             }
 
-        # Convert to arrays (timestamps are already INTEGER milliseconds from database)
         times_ms = np.array([row[0] for row in rows], dtype=np.float64)
         temperatures = np.array([row[1] for row in rows], dtype=np.float32)
         humidities = np.array([row[2] for row in rows], dtype=np.float32)
@@ -519,7 +928,6 @@ class DataAggregator:
             "humidity": humidities
         }
 
-        # Only include extended sensor arrays if they contain actual data (not all NaN)
         if not np.all(np.isnan(pressures)):
             result["pressure"] = pressures
         if not np.all(np.isnan(lights)):
@@ -531,16 +939,16 @@ class DataAggregator:
 
     def get_sensor_metadata(self, sensor_name: str) -> Optional[Dict]:
         """Get metadata for a specific sensor."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """SELECT device_ip, last_update, last_error, status,
-                          cpu_percent, memory_percent, client_db_size_mb,
-                          sensor_type, total_records, client_total_records, log_interval_s
-                   FROM sensor_metadata WHERE sensor_name = ?""",
-                (sensor_name,)
-            )
-            row = cursor.fetchone()
+        conn = self._get_read_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT device_ip, last_update, last_error, status,
+                      cpu_percent, memory_percent, client_db_size_mb,
+                      sensor_type, total_records, client_total_records, log_interval_s
+               FROM sensor_metadata WHERE sensor_name = ?""",
+            (sensor_name,)
+        )
+        row = cursor.fetchone()
 
         if row is None:
             return None
@@ -564,13 +972,8 @@ class DataAggregator:
         return datetime.now() - self._start_time
 
     def get_total_records(self, sensor_name: str) -> int:
-        """Get total number of records for a specific sensor."""
-        table_name = self._get_table_name(sensor_name)
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-            count = cursor.fetchone()[0]
-        return count
+        """Get total number of records for a specific sensor (from in-memory cache)."""
+        return self._record_counts.get(sensor_name, 0)
 
     def get_last_timestamp(self, sensor_name: str) -> Optional[int]:
         """Get the most recent timestamp for a sensor (milliseconds since epoch)."""
@@ -587,16 +990,12 @@ class DataAggregator:
             db_size_mb = 0.0
 
         # Count active sensors
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM sensor_metadata WHERE status = 'active'")
-            active_sensors = cursor.fetchone()[0]
+        conn = self._get_read_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM sensor_metadata WHERE status = 'active'")
+        active_sensors = cursor.fetchone()[0]
 
-            # Get total records across all sensors
-            cursor.execute("SELECT sensor_name FROM sensor_metadata")
-            all_sensors = [row[0] for row in cursor.fetchall()]
-
-        total_records = sum(self.get_total_records(sensor) for sensor in all_sensors)
+        total_records = sum(self._record_counts.values())
         total_sensors = len(self.client.get_all_sensor_names())
 
         return {
@@ -662,8 +1061,9 @@ class DataAggregator:
 
         print(f"{'='*60}\n")
 
-        # Do immediate connectivity check and initial data fetch
-        self._initial_connectivity_check(sensor_names)
+        # NOTE: We no longer call _initial_connectivity_check() here.
+        # It was blocking startup for 3-10s per sensor (sequential HTTP requests).
+        # The polling threads below discover connectivity naturally on their first cycle.
 
         # Create one polling thread per sensor
         for sensor_name in sensor_names:
@@ -680,6 +1080,9 @@ class DataAggregator:
 
         logger.info(f"Started {len(self._polling_threads)} polling threads")
 
+        # Start retention thread (hourly aggregation + purge)
+        self._start_retention_thread()
+
     def stop_polling(self):
         """Stop all background polling threads."""
         self._stop_polling.set()
@@ -693,6 +1096,162 @@ class DataAggregator:
         self._polling_threads.clear()
         logger.info("Stopped all background polling threads")
 
+    # ── Data Retention (tiered storage) ─────────────────────────────────
+
+    def _start_retention_thread(self):
+        """Start the background retention thread (runs hourly)."""
+        self._retention_thread = threading.Thread(
+            target=self._retention_loop,
+            daemon=True,
+            name="Retention"
+        )
+        self._retention_thread.start()
+        logger.info("Started data retention thread")
+
+    def _retention_loop(self):
+        """Hourly loop that aggregates old data and purges raw rows."""
+        # Wait 60s after startup before first run (let data settle)
+        self._stop_polling.wait(60)
+
+        while not self._stop_polling.is_set():
+            try:
+                self._run_retention()
+            except Exception as e:
+                logger.error(f"Retention task failed: {e}", exc_info=True)
+
+            # Sleep 1 hour (or until stop signal)
+            self._stop_polling.wait(3600)
+
+    def _run_retention(self):
+        """
+        Aggregate and purge data according to retention tiers.
+
+        Tiers:
+          Hot  (0 – hot_days):    Full resolution in main table
+          Warm (hot – warm_days): 1-minute aggregates in _1min table
+          Cold (warm+):           15-minute aggregates in _15min table
+
+        Process for each sensor:
+          1. Aggregate hot→warm: bucket raw data older than hot_days into 1-min averages
+          2. Aggregate warm→cold: bucket 1-min data older than warm_days into 15-min averages
+          3. Delete raw rows older than hot_days
+          4. Delete 1-min rows older than warm_days
+        """
+        now_ms = int(datetime.now().timestamp() * 1000)
+        hot_cutoff_ms = now_ms - (self._hot_retention_days * 86400 * 1000)
+        warm_cutoff_ms = now_ms - (self._warm_retention_days * 86400 * 1000)
+
+        sensor_names = self.client.get_all_sensor_names()
+        total_aggregated = 0
+        total_deleted = 0
+
+        for sensor_name in sensor_names:
+            table_name = self._get_table_name(sensor_name)
+            warm_table = f"{table_name}_1min"
+            cold_table = f"{table_name}_15min"
+
+            try:
+                agg, deleted = self._retain_sensor(
+                    table_name, warm_table, cold_table,
+                    hot_cutoff_ms, warm_cutoff_ms
+                )
+                total_aggregated += agg
+                total_deleted += deleted
+            except Exception as e:
+                logger.error(f"Retention failed for {sensor_name}: {e}")
+
+        if total_aggregated > 0 or total_deleted > 0:
+            logger.info(
+                f"Retention complete: aggregated {total_aggregated:,} buckets, "
+                f"deleted {total_deleted:,} raw rows"
+            )
+
+    def _retain_sensor(self, table_name, warm_table, cold_table,
+                       hot_cutoff_ms, warm_cutoff_ms):
+        """Run retention for a single sensor. Returns (aggregated_count, deleted_count)."""
+        conn = self._get_read_conn()
+        cursor = conn.cursor()
+        aggregated = 0
+        deleted = 0
+
+        # ── Step 1: Aggregate raw → warm (1-min buckets) ──────────────
+        # Find the latest bucket already aggregated so we don't redo work
+        cursor.execute(f"SELECT MAX(bucket_start) FROM {warm_table}")
+        row = cursor.fetchone()
+        warm_start_ms = row[0] if row and row[0] is not None else 0
+
+        # Only aggregate data that is older than hot_cutoff AND newer than last warm bucket
+        bucket_ms = self._warm_resolution_s * 1000
+        cursor.execute(f"""
+            SELECT
+                (timestamp / {bucket_ms}) * {bucket_ms} AS bucket,
+                COUNT(*) AS cnt,
+                AVG(temperature), MIN(temperature), MAX(temperature),
+                AVG(humidity), MIN(humidity), MAX(humidity),
+                AVG(pressure), AVG(light), AVG(noise)
+            FROM {table_name}
+            WHERE timestamp < ? AND timestamp > ?
+            GROUP BY bucket
+            ORDER BY bucket
+        """, (hot_cutoff_ms, warm_start_ms))
+
+        warm_rows = cursor.fetchall()
+        if warm_rows:
+            # Submit aggregated rows via write queue
+            self._submit_write(("insert_warm", warm_table, warm_rows))
+            aggregated += len(warm_rows)
+
+        # ── Step 2: Aggregate warm → cold (15-min buckets) ────────────
+        cursor.execute(f"SELECT MAX(bucket_start) FROM {cold_table}")
+        row = cursor.fetchone()
+        cold_start_ms = row[0] if row and row[0] is not None else 0
+
+        cold_bucket_ms = self._cold_resolution_s * 1000
+        cursor.execute(f"""
+            SELECT
+                (bucket_start / {cold_bucket_ms}) * {cold_bucket_ms} AS bucket,
+                SUM(count),
+                AVG(temperature_avg), MIN(temperature_min), MAX(temperature_max),
+                AVG(humidity_avg), MIN(humidity_min), MAX(humidity_max),
+                AVG(pressure_avg), AVG(light_avg), AVG(noise_avg)
+            FROM {warm_table}
+            WHERE bucket_start < ? AND bucket_start > ?
+            GROUP BY bucket
+            ORDER BY bucket
+        """, (warm_cutoff_ms, cold_start_ms))
+
+        cold_rows = cursor.fetchall()
+        if cold_rows:
+            self._submit_write(("insert_cold", cold_table, cold_rows))
+            aggregated += len(cold_rows)
+
+        # ── Step 3: Delete raw rows older than hot tier ───────────────
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE timestamp < ?",
+                       (hot_cutoff_ms,))
+        delete_count = cursor.fetchone()[0]
+        if delete_count > 0:
+            self._submit_write(("delete_old", table_name, hot_cutoff_ms, None))
+            deleted += delete_count
+            # Update in-memory record count
+            sensor_name_key = None
+            for sn in self._record_counts:
+                if self._get_table_name(sn) == table_name:
+                    sensor_name_key = sn
+                    break
+            if sensor_name_key:
+                self._record_counts[sensor_name_key] = max(
+                    0, self._record_counts.get(sensor_name_key, 0) - delete_count
+                )
+
+        # ── Step 4: Delete warm rows older than warm tier ─────────────
+        cursor.execute(f"SELECT COUNT(*) FROM {warm_table} WHERE bucket_start < ?",
+                       (warm_cutoff_ms,))
+        warm_delete = cursor.fetchone()[0]
+        if warm_delete > 0:
+            self._submit_write(("delete_old", warm_table, warm_cutoff_ms, "bucket_start"))
+
+        return aggregated, deleted
+
     def _poll_sensor_loop(self, sensor_name: str, poll_interval: int):
         """
         Background polling loop for a single sensor with exponential backoff on errors.
@@ -703,15 +1262,22 @@ class DataAggregator:
             poll_interval: Seconds between polls for this sensor
         """
         logger.info(f"Started polling loop for {sensor_name} (interval: {poll_interval}s)")
-        
-        import threading
+
         thread_id = threading.current_thread().name
         consecutive_errors = 0
         max_backoff = min(poll_interval * 8, 300)  # Cap at 5 minutes or 8x poll interval
         loop_count = 0
+        poll_lock = self._poll_locks.setdefault(sensor_name, threading.Lock())
 
         while not self._stop_polling.is_set():
             loop_count += 1
+
+            # Prevent overlapping polls: if previous poll still running, skip this cycle
+            if not poll_lock.acquire(blocking=False):
+                logger.debug(f"[{thread_id}] Skipping poll for {sensor_name} - previous poll still running")
+                self._stop_polling.wait(poll_interval)
+                continue
+
             try:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 logger.debug(f"[{thread_id}] [{timestamp}] Loop #{loop_count} - Polling {sensor_name}...")
@@ -730,7 +1296,7 @@ class DataAggregator:
 
                 # Reset error counter on success
                 consecutive_errors = 0
-                
+
                 # Update last poll time for health monitoring
                 self._last_poll_time[sensor_name] = datetime.now()
 
@@ -741,17 +1307,23 @@ class DataAggregator:
                 # Calculate exponential backoff delay
                 backoff_delay = min(poll_interval * (2 ** (consecutive_errors - 1)), max_backoff)
 
-                # Log first error immediately, then every 5 errors to avoid flooding
+                # Log first error immediately, then every 10th to avoid flooding
                 if consecutive_errors == 1:
                     print(f"[{timestamp}] ⚠ {sensor_name}: Connection failed, retrying with backoff...")
-                    logger.warning(f"[{thread_id}] Polling failed for {sensor_name}: {e}", exc_info=True)
-                elif consecutive_errors % 5 == 0:
+                    logger.warning(f"[{thread_id}] Polling failed for {sensor_name}: {e}")
+                elif consecutive_errors % 10 == 0:
                     print(f"[{timestamp}] ⚠ {sensor_name}: Still offline ({consecutive_errors} failures, backoff: {backoff_delay:.0f}s)")
-                    logger.error(f"[{thread_id}] Error polling {sensor_name} ({consecutive_errors} failures): {e} - backing off {backoff_delay:.1f}s", exc_info=True)
+                    logger.warning(f"[{thread_id}] {sensor_name} still offline ({consecutive_errors} failures, backoff: {backoff_delay:.0f}s)")
 
-                # Wait with backoff before retrying
+                # Wait with backoff before retrying (release lock first!)
+                poll_lock.release()
                 self._stop_polling.wait(backoff_delay)
                 continue
+
+            finally:
+                # Always release the poll lock (unless already released in error path)
+                if poll_lock.locked():
+                    poll_lock.release()
 
             # Wait for next poll cycle (or until stop signal)
             logger.debug(f"[{thread_id}] Waiting {poll_interval}s until next poll of {sensor_name}")
@@ -854,10 +1426,10 @@ class DataAggregator:
 
     def _fetch_last_timestamp(self, table_name: str) -> Optional[int]:
         """Fetch the most recent timestamp (INTEGER milliseconds) from table."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f"SELECT MAX(timestamp) FROM {table_name}")
-            return cursor.fetchone()[0]
+        conn = self._get_read_conn()
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT MAX(timestamp) FROM {table_name}")
+        return cursor.fetchone()[0]
 
     def _check_gap_in_data(self, sensor_data: Dict, last_timestamp: Optional[int]) -> bool:
         """

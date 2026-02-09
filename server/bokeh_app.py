@@ -25,6 +25,7 @@ from bokeh.models.widgets import Div
 
 from server.api_client import MultiSensorClient
 from server.data_aggregator import DataAggregator
+from server.lttb import lttb_downsample
 
 # Configure logging to both file and console
 log_dir = _project_root / "logs"
@@ -38,7 +39,20 @@ formatter = logging.Formatter(
 )
 
 # File handler with rotation (10MB max, keep 5 old files)
-file_handler = logging.handlers.RotatingFileHandler(
+# On Windows, RotatingFileHandler fails to rename open log files when multiple
+# threads are logging simultaneously (WinError 32). Use a safe wrapper that
+# catches rotation errors and continues logging to the current file.
+class _SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """RotatingFileHandler that silently skips rotation on Windows file lock errors."""
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except PermissionError:
+            # Another thread has the file open — skip rotation this time.
+            # The file will be rotated on the next successful attempt.
+            pass
+
+file_handler = _SafeRotatingFileHandler(
     log_file,
     maxBytes=10 * 1024 * 1024,  # 10MB
     backupCount=5,
@@ -105,12 +119,21 @@ def load_server_config():
     update_ms = int(config.get("SERVER", "dashboard_update_ms", fallback="10000"))
     max_plot_points = int(config.get("SERVER", "max_plot_points", fallback="50000"))
 
-    return sensor_configs, poll_interval, min_gap_threshold, db_path, update_ms, max_plot_points
+    # Data retention config (optional section — sensible defaults if missing)
+    retention_config = {
+        "hot_retention_days": int(config.get("RETENTION", "hot_retention_days", fallback="7")),
+        "warm_retention_days": int(config.get("RETENTION", "warm_retention_days", fallback="90")),
+        "warm_resolution_s": int(config.get("RETENTION", "warm_resolution_s", fallback="60")),
+        "cold_resolution_s": int(config.get("RETENTION", "cold_resolution_s", fallback="900")),
+    }
+
+    return sensor_configs, poll_interval, min_gap_threshold, db_path, update_ms, max_plot_points, retention_config
 
 try:
-    sensor_configs, poll_interval, min_gap_threshold, db_path, dashboard_update_ms, max_plot_points = load_server_config()
+    sensor_configs, poll_interval, min_gap_threshold, db_path, dashboard_update_ms, max_plot_points, retention_config = load_server_config()
     logger.info(f"Loaded {len(sensor_configs)} sensor configurations")
     logger.info(f"Max plot points: {max_plot_points:,}")
+    logger.info(f"Retention: hot={retention_config['hot_retention_days']}d, warm={retention_config['warm_retention_days']}d")
 except Exception as e:
     logger.error(f"Failed to load server configuration: {e}")
     raise
@@ -149,18 +172,15 @@ def get_aggregator():
             sensor_configs=sensor_configs,
             db_path=db_path,
             poll_interval=poll_interval,
-            min_gap_threshold=min_gap_threshold
+            min_gap_threshold=min_gap_threshold,
+            retention_config=retention_config
         )
 
-        # Do initial poll to populate database
-        logger.info("Performing initial data poll...")
-        try:
-            instance.poll_once()
-            logger.info("Initial poll completed successfully")
-        except Exception as e:
-            logger.error(f"Initial poll failed: {e}", exc_info=True)
-
-        # Start background polling (only happens once!)
+        # Start background polling (non-blocking — threads populate data asynchronously)
+        # NOTE: We intentionally do NOT call poll_once() here. That was blocking
+        # startup for 20-40s when sensors were offline (10s timeout × 4 HTTP requests
+        # × N offline sensors). The polling threads started below will populate data
+        # in the background. The dashboard handles "no data yet" gracefully.
         instance.start_polling()
         logger.info("Started background polling threads")
 
@@ -188,9 +208,32 @@ UPDATE_INTERVAL = dashboard_update_ms
 SAMPLE_INTERVAL_SECONDS = poll_interval  # Approximate
 SAMPLE_RATE_TEXT = f"~{poll_interval}s/sample"
 
+def _pick_initial_sensor():
+    """Pick the sensor with the most recent data as the default selection.
+    Falls back to the first configured sensor if no metadata exists (fresh DB)."""
+    if not sensor_configs:
+        return "No sensors"
+    best_sensor = sensor_configs[0]["name"]
+    best_time = 0
+    for cfg in sensor_configs:
+        name = cfg["name"]
+        try:
+            meta = aggregator.get_sensor_metadata(name)
+            if meta and meta.get("last_update"):
+                from datetime import datetime as _dt
+                last_update = _dt.fromisoformat(meta["last_update"])
+                ts = last_update.timestamp()
+                if ts > best_time and meta.get("status") != "error":
+                    best_time = ts
+                    best_sensor = name
+        except Exception:
+            logger.debug("Failed to read metadata for sensor '%s' when selecting default sensor.", name, exc_info=True)
+    logger.info(f"Default sensor: {best_sensor}")
+    return best_sensor
+
 # State for current sensor selection
 current_sensor_state = {
-    "name": sensor_configs[0]["name"] if sensor_configs else "No sensors",
+    "name": _pick_initial_sensor(),
     "data": None
 }
 
@@ -218,6 +261,7 @@ STATUS_DISPLAY = {
     "hardware_failure": {"icon": "⛓️‍💥", "label": "Sensor hardware failure"},
     "error": {"icon": "🔴", "label": "Offline or unreachable"},
     "unknown": {"icon": "🔴", "label": "Status unavailable"},
+    "waiting": {"icon": "⏳", "label": "Waiting for first data"},
 }
 
 DEFAULT_STATUS_DISPLAY = STATUS_DISPLAY["unknown"]
@@ -289,10 +333,12 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
     Return CDS-compatible dict with moving-average columns added.
     Supports extended sensor data (pressure, light, noise) when available.
 
+    Pipeline: raw → gap markers → moving averages → LTTB downsample (if needed)
+
     Args:
         raw_data: Raw sensor data dict (may include pressure, light, noise)
         window_size: Moving average window size
-        max_points: Not used (reserved for future LTTB implementation)
+        max_points: Maximum points to send to browser (enforced via LTTB)
         connect_points: If True, only show breaks for large gaps (3+ missed readings)
                        If False, show breaks for all gaps (1.5+ missed readings)
         log_interval_s: Sensor's log interval in seconds (for smart gap detection)
@@ -427,6 +473,14 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
     else:
         result["noise"] = np.full(n_points, np.nan)
         result["noise_ma"] = np.full(n_points, np.nan)
+
+    # LTTB downsampling: cap points sent to browser while preserving visual shape
+    if max_points is not None and max_points > 0 and len(result["time"]) > max_points:
+        logger.info(f"LTTB downsampling: {len(result['time']):,} → {max_points:,} points")
+        # Separate time from data arrays for lttb_downsample
+        data_arrays = {k: v for k, v in result.items() if k != "time"}
+        result["time"], data_arrays = lttb_downsample(result["time"], data_arrays, max_points)
+        result.update(data_arrays)
 
     return result
 
@@ -1276,9 +1330,19 @@ def update_time_window(minutes, sync_inputs=True):
         set_time_inputs_from_minutes(minutes)
 
     if needs_refetch:
-        # Refetch data with new window
+        # Refetch data with new window — show loading indicator
         sensor_name = current_sensor_state["name"]
-        fetch_initial_data(sensor_name)
+        _show_loading("Loading time range...")
+
+        def _do_refetch():
+            try:
+                fetch_initial_data(sensor_name)
+                update_view()
+            finally:
+                _hide_loading()
+
+        curdoc().add_next_tick_callback(_do_refetch)
+        return  # update_view will be called in the callback
 
     update_view()  # Update view with (possibly new) data
 
@@ -1512,11 +1576,18 @@ def on_sensor_change(attr, old, new):
     noise_plot.title.text = f"Noise - {new}"
     current_window["force_update"] = True
 
-    # Sensor changed - need to fetch all historical data for new sensor
-    fetch_initial_data(new)
-    update_view()
+    # Show loading indicator, then fetch data on next tick so UI updates first
+    _show_loading(f"Loading {new}...")
 
-    logger.info(f"Switched to sensor: {new}")
+    def _do_sensor_load():
+        try:
+            fetch_initial_data(new)
+            update_view()
+            logger.info(f"Switched to sensor: {new}")
+        finally:
+            _hide_loading()
+
+    curdoc().add_next_tick_callback(_do_sensor_load)
 
 
 sensor_selector.on_change("value", on_sensor_change)
@@ -1564,6 +1635,13 @@ def fetch_initial_data(sensor_name):
 
             new_data = aggregator.get_sensor_data(sensor_name, start_time=start_ms, end_time=end_ms)
             fetch_type = "windowed"
+
+            # Historical fallback: if time window returns nothing (sensor dead/stale),
+            # fall back to showing the most recent data regardless of age
+            if not new_data or len(new_data.get("time", [])) == 0:
+                logger.info(f"No data in time window for {sensor_name}, falling back to latest historical records")
+                new_data = aggregator.get_sensor_data(sensor_name, limit=1000)
+                fetch_type = "historical_fallback"
         except Exception as e:
             logger.error(f"Error fetching windowed data: {e}")
             return None
@@ -1633,11 +1711,14 @@ def fetch_incremental_data(sensor_name):
 
         if not new_records or len(new_records.get("time", [])) == 0:
             logger.debug(f"No new data for {sensor_name}")
+            data_cache["new_point_count"] = 0  # No change
             return data_cache["raw_data"]  # Return cached data
 
         # Append new records to cache
-        if len(new_records["time"]) > 0:
-            logger.debug(f"Fetched {len(new_records['time'])} new records for {sensor_name}")
+        new_count = len(new_records["time"])
+        if new_count > 0:
+            logger.debug(f"Fetched {new_count} new records for {sensor_name}")
+            data_cache["new_point_count"] = new_count
 
             # Convert to lists for extension (handle both basic and extended sensors)
             data_cache["raw_data"]["time"] = list(data_cache["raw_data"]["time"]) + list(new_records["time"])
@@ -1697,6 +1778,170 @@ def fetch_incremental_data(sensor_name):
         return data_cache["raw_data"]  # Fall back to cached data
 
 
+def _prepare_stream_update(raw_data, window_size, new_count):
+    """
+    Prepare only the NEW points for source.stream(), including gap markers
+    at the junction and correct moving averages using trailing context.
+
+    Returns a dict suitable for source.stream(), or None if fallback needed.
+    """
+    try:
+        cached = data_cache["prepared_data"]
+        if cached is None or len(cached.get("time", [])) == 0:
+            return None
+
+        # Get the new raw points (tail of raw_data)
+        raw_times = raw_data["time"]
+        raw_temps = raw_data["temperature"]
+        raw_hums = raw_data["humidity"]
+        n_raw = len(raw_times)
+        new_start = n_raw - new_count
+
+        new_times = np.asarray(raw_times[new_start:], dtype=float)
+        new_temps = np.asarray(raw_temps[new_start:], dtype=float)
+        new_hums = np.asarray(raw_hums[new_start:], dtype=float)
+
+        # Check for gap at junction (between last cached point and first new point)
+        last_cached_time = cached["time"][-1]
+        # Find last non-NaN cached time for gap detection
+        cached_times_arr = np.asarray(cached["time"])
+        valid_mask = ~np.isnan(cached_times_arr)
+        if not np.any(valid_mask):
+            return None
+        last_valid_time = cached_times_arr[valid_mask][-1]
+
+        gap_threshold_s = 60  # Default
+        log_interval_s = data_cache.get("log_interval_s")
+        if log_interval_s and log_interval_s > 0:
+            gap_threshold_s = log_interval_s * 1.5
+
+        # Check if there's a gap between last cached data and new data
+        time_diff_s = (new_times[0] - last_valid_time) / 1000.0
+        gap_points = []
+        if time_diff_s > gap_threshold_s:
+            # Insert a single NaN marker at the gap
+            gap_time = (last_valid_time + new_times[0]) / 2.0
+            gap_points = [gap_time]
+
+        # Build the stream arrays
+        n_gap = len(gap_points)
+        n_total = n_gap + len(new_times)
+
+        stream_times = np.empty(n_total, dtype=float)
+        stream_temps = np.empty(n_total, dtype=float)
+        stream_hums = np.empty(n_total, dtype=float)
+
+        if n_gap > 0:
+            stream_times[0] = gap_points[0]
+            stream_temps[0] = np.nan
+            stream_hums[0] = np.nan
+
+        stream_times[n_gap:] = new_times
+        stream_temps[n_gap:] = new_temps
+        stream_hums[n_gap:] = new_hums
+
+        # Compute moving averages for new points using trailing context from cache
+        window = max(int(window_size), 1)
+
+        # Get the last (window-1) valid values from cached data for MA context
+        cached_temps = np.asarray(cached["temperature"])
+        cached_hums = np.asarray(cached["humidity"])
+
+        # Concatenate context + new data, compute MA, then take only the new part
+        context_temps = cached_temps[-(window - 1):] if window > 1 else np.array([])
+        context_hums = cached_hums[-(window - 1):] if window > 1 else np.array([])
+
+        full_temps = np.concatenate([context_temps, stream_temps])
+        full_hums = np.concatenate([context_hums, stream_hums])
+
+        temp_ma_full = pd.Series(full_temps).rolling(window=window, min_periods=1).mean().to_numpy()
+        hum_ma_full = pd.Series(full_hums).rolling(window=window, min_periods=1).mean().to_numpy()
+
+        # Take only the new portion (after the context window)
+        stream_temp_ma = temp_ma_full[len(context_temps):]
+        stream_hum_ma = hum_ma_full[len(context_hums):]
+
+        result = {
+            "time": stream_times,
+            "temperature": stream_temps,
+            "humidity": stream_hums,
+            "temp_ma": stream_temp_ma,
+            "hum_ma": stream_hum_ma,
+        }
+
+        # Handle extended sensor data
+        for field in ("pressure", "light", "noise"):
+            if field in raw_data and len(raw_data[field]) >= n_raw:
+                new_vals = np.asarray(raw_data[field][new_start:], dtype=float)
+                if len(new_vals) != new_count:
+                    # Length mismatch — fill with NaN instead of risking array misalignment
+                    result[field] = np.full(n_total, np.nan)
+                    result[f"{field}_ma"] = np.full(n_total, np.nan)
+                    continue
+                stream_vals = np.empty(n_total, dtype=float)
+                if n_gap > 0:
+                    stream_vals[0] = np.nan
+                stream_vals[n_gap:] = new_vals
+
+                context_vals = np.asarray(cached.get(field, []))
+                context_slice = context_vals[-(window - 1):] if window > 1 and len(context_vals) > 0 else np.array([])
+                full_vals = np.concatenate([context_slice, stream_vals])
+                ma_full = pd.Series(full_vals).rolling(window=window, min_periods=1).mean().to_numpy()
+
+                result[field] = stream_vals
+                result[f"{field}_ma"] = ma_full[len(context_slice):]
+            else:
+                result[field] = np.full(n_total, np.nan)
+                result[f"{field}_ma"] = np.full(n_total, np.nan)
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"Stream update preparation failed, falling back to full update: {e}")
+        return None
+
+
+def _extend_prepared_cache(stream_dict):
+    """
+    Extend the cached prepared_data with streamed points so that
+    y-axis calculations and status display use up-to-date data.
+    """
+    cached = data_cache.get("prepared_data")
+    if cached is None:
+        return
+
+    # Verify stream_dict has consistent lengths before extending
+    stream_len = len(stream_dict.get("time", []))
+    if stream_len == 0:
+        return
+
+    for key in list(cached.keys()):
+        if key in stream_dict:
+            new_arr = np.asarray(stream_dict[key])
+            if len(new_arr) != stream_len:
+                # Length mismatch in stream — fall back to full refresh next cycle
+                logger.warning(f"Stream length mismatch for '{key}': {len(new_arr)} vs {stream_len}")
+                data_cache["prepared_data"] = None
+                data_cache["prep_raw_hash"] = None
+                return
+            cached_arr = np.asarray(cached[key])
+            cached[key] = np.concatenate([cached_arr, new_arr])
+
+    # Trim to max_plot_points to keep cache bounded (trim all arrays uniformly)
+    n = len(cached.get("time", []))
+    if max_plot_points and n > max_plot_points:
+        trim = n - max_plot_points
+        for key in cached:
+            arr = cached[key]
+            if hasattr(arr, '__len__') and len(arr) == n:
+                cached[key] = arr[trim:]
+
+    # Update the raw hash to match new data state
+    times = cached.get("time", [])
+    if len(times) > 0:
+        data_cache["prep_raw_hash"] = (len(times), times[0], times[-1])
+
+
 def update_view():
     """
     Update plot view and UI elements using cached data.
@@ -1706,7 +1951,7 @@ def update_view():
         sensor_name = current_sensor_state["name"]
 
         if data_cache["raw_data"] is None or data_cache["sensor_name"] != sensor_name:
-            logger.warning("No cached data available, triggering initial fetch")
+            logger.debug("No cached data available, triggering initial fetch")
             fetch_initial_data(sensor_name)
             if data_cache["raw_data"] is None:
                 # Check if there's data outside the current time window
@@ -1741,32 +1986,60 @@ def update_view():
         else:
             raw_hash = None
 
-        # Only recompute if parameters or data changed
-        cache_valid = (
+        # Decide between streaming (fast incremental) vs full replacement
+        new_point_count = data_cache.get("new_point_count", -1)
+
+        # Streaming eligibility: small incremental update, same sensor, same settings
+        can_stream = (
+            new_point_count > 0 and
+            new_point_count <= 100 and
             data_cache["prepared_data"] is not None and
             data_cache["prep_ma_window"] == window and
-            data_cache["prep_max_points"] == max_plot_points and
-            data_cache["prep_raw_hash"] == raw_hash
+            data_cache["prep_max_points"] == max_plot_points
         )
 
-        if cache_valid:
-            # Use cached prepared data - no recomputation needed!
-            logger.debug("Using cached prepared data")
-            prepared = data_cache["prepared_data"]
-        else:
-            # Recompute and cache
-            logger.debug(f"Recomputing prepared data (MA window: {window}, max points: {max_plot_points})")
-            log_interval_s = data_cache.get("log_interval_s")  # Get from cache for smart gap detection
-            prepared = prepare_source_data(raw_data, window, max_plot_points,
-                                          connect_points=False,  # Use sensitive gap detection (1.5x log interval)
-                                          log_interval_s=log_interval_s)
-            data_cache["prepared_data"] = prepared
-            data_cache["prep_ma_window"] = window
-            data_cache["prep_max_points"] = max_plot_points
-            data_cache["prep_raw_hash"] = raw_hash
+        if can_stream:
+            # FAST PATH: Stream only new points instead of replacing entire dataset
+            logger.debug(f"Streaming {new_point_count} new points")
+            prepared = _prepare_stream_update(raw_data, window, new_point_count)
+            if prepared is not None:
+                source.stream(prepared, rollover=max_plot_points if max_plot_points else None)
+                # Update the full prepared cache for y-axis and status calculations
+                # (lightweight: just extend the cached arrays)
+                _extend_prepared_cache(prepared)
+                prepared = data_cache["prepared_data"]
+            else:
+                # Fallback to full replacement if stream prep fails
+                can_stream = False
 
-        # Replace dataset
-        source.data = prepared
+        if not can_stream:
+            # FULL PATH: Recompute everything (sensor change, window change, etc.)
+            cache_valid = (
+                data_cache["prepared_data"] is not None and
+                data_cache["prep_ma_window"] == window and
+                data_cache["prep_max_points"] == max_plot_points and
+                data_cache["prep_raw_hash"] == raw_hash
+            )
+
+            if cache_valid:
+                logger.debug("Using cached prepared data")
+                prepared = data_cache["prepared_data"]
+            else:
+                logger.debug(f"Recomputing prepared data (MA window: {window}, max points: {max_plot_points})")
+                log_interval_s = data_cache.get("log_interval_s")
+                prepared = prepare_source_data(raw_data, window, max_plot_points,
+                                              connect_points=False,
+                                              log_interval_s=log_interval_s)
+                data_cache["prepared_data"] = prepared
+                data_cache["prep_ma_window"] = window
+                data_cache["prep_max_points"] = max_plot_points
+                data_cache["prep_raw_hash"] = raw_hash
+
+            # Replace entire dataset
+            source.data = prepared
+
+        # Reset new_point_count after processing
+        data_cache["new_point_count"] = 0
 
         # Show/hide extended sensor plots based on available data
         pressure_plot.visible = "pressure" in prepared and len(prepared.get("pressure", [])) > 0
@@ -1817,43 +2090,43 @@ def update_view():
                 set_programmatic_range(start_ms, end_ms)
 
             # AUTO Y-AXIS FITTING: After setting X-range, fit Y-axis to visible data
-            # Get the current X-range (time window)
+            # Skip expensive numpy ops if visible window hasn't changed
             x_start = temp_plot.x_range.start
             x_end = temp_plot.x_range.end
+            n_pts = len(prepared["time"])
+            last_ts = prepared["time"][-1] if n_pts > 0 else 0
+            yaxis_key = (n_pts, last_ts, round(x_start, 1), round(x_end, 1))
 
-            # Find indices of data within the visible time window
-            times = np.array(prepared["time"])
-            temps = np.array(prepared["temperature"])
-            hums = np.array(prepared["humidity"])
+            if yaxis_key != data_cache.get("_yaxis_key"):
+                data_cache["_yaxis_key"] = yaxis_key
 
-            visible_mask = (times >= x_start) & (times <= x_end)
-            visible_temps = temps[visible_mask]
-            visible_hums = hums[visible_mask]
+                # Only convert to numpy once for y-axis calculation
+                times = np.asarray(prepared["time"])
+                visible_mask = (times >= x_start) & (times <= x_end)
 
-            # Filter out NaN values
-            valid_temps = visible_temps[~np.isnan(visible_temps)]
-            valid_hums = visible_hums[~np.isnan(visible_hums)]
+                if temp_window_state["auto"]:
+                    visible_temps = np.asarray(prepared["temperature"])[visible_mask]
+                    valid_temps = visible_temps[~np.isnan(visible_temps)]
+                    if len(valid_temps) > 0:
+                        temp_min = np.min(valid_temps)
+                        temp_max = np.max(valid_temps)
+                        temp_range = temp_max - temp_min
+                        temp_padding = max(temp_range * 0.1, 0.5)
+                        temp_plot.y_range.start = temp_min - temp_padding
+                        temp_plot.y_range.end = temp_max + temp_padding
+                        temp_window_state["last_auto_update"] = time.monotonic()
 
-            # Update Y-axis ranges if auto mode is enabled
-            if temp_window_state["auto"] and len(valid_temps) > 0:
-                temp_min = np.min(valid_temps)
-                temp_max = np.max(valid_temps)
-                temp_range = temp_max - temp_min
-                # Add 10% padding on each side
-                temp_padding = max(temp_range * 0.1, 0.5)  # At least 0.5°C padding
-                temp_plot.y_range.start = temp_min - temp_padding
-                temp_plot.y_range.end = temp_max + temp_padding
-                temp_window_state["last_auto_update"] = time.monotonic()
-
-            if hum_window_state["auto"] and len(valid_hums) > 0:
-                hum_min = np.min(valid_hums)
-                hum_max = np.max(valid_hums)
-                hum_range = hum_max - hum_min
-                # Add 10% padding on each side
-                hum_padding = max(hum_range * 0.1, 2.0)  # At least 2% padding
-                humidity_plot.y_range.start = max(0.0, hum_min - hum_padding)
-                humidity_plot.y_range.end = min(100.0, hum_max + hum_padding)
-                hum_window_state["last_auto_update"] = time.monotonic()
+                if hum_window_state["auto"]:
+                    visible_hums = np.asarray(prepared["humidity"])[visible_mask]
+                    valid_hums = visible_hums[~np.isnan(visible_hums)]
+                    if len(valid_hums) > 0:
+                        hum_min = np.min(valid_hums)
+                        hum_max = np.max(valid_hums)
+                        hum_range = hum_max - hum_min
+                        hum_padding = max(hum_range * 0.1, 2.0)
+                        humidity_plot.y_range.start = max(0.0, hum_min - hum_padding)
+                        humidity_plot.y_range.end = min(100.0, hum_max + hum_padding)
+                        hum_window_state["last_auto_update"] = time.monotonic()
 
         # Sync toggle state with auto-range flag
         if not current_window["auto_range"] and auto_scroll_toggle.active:
@@ -1958,8 +2231,11 @@ def _update_status_display(sensor_name, prepared, latest_time_ms):
         time_ago_part = f"{int(time_ago_s)}s"
     elif time_ago_s < 3600:
         time_ago_part = f"{int(time_ago_s / 60)}m"
-    else:
+    elif time_ago_s < 86400:
         time_ago_part = f"{int(time_ago_s / 3600)}h"
+    else:
+        days = int(time_ago_s / 86400)
+        time_ago_part = f"{days}d"
 
     # Format with log interval if available: "60s | 7s ago"
     log_interval_s = metadata_safe.get('log_interval_s')
@@ -2016,13 +2292,26 @@ def _update_status_display(sensor_name, prepared, latest_time_ms):
     """
 
 
+_stream_cycle_count = 0
+_FULL_REFRESH_EVERY = 60  # Force full LTTB refresh every ~60 cycles (~5 min at 5s interval)
+
 def update_data():
     """
     Periodic refresh - fetch new data and update view.
     Called by bokeh periodic callback.
     """
+    global _stream_cycle_count
     try:
         sensor_name = current_sensor_state["name"]
+
+        _stream_cycle_count += 1
+        if _stream_cycle_count >= _FULL_REFRESH_EVERY:
+            # Periodic full refresh to maintain LTTB quality after many streaming updates
+            _stream_cycle_count = 0
+            data_cache["new_point_count"] = -1  # Force full replacement path
+            data_cache["prepared_data"] = None
+            data_cache["prep_raw_hash"] = None
+            logger.debug("Periodic full LTTB refresh triggered")
 
         # Fetch incremental data (only new records since last timestamp)
         fetch_incremental_data(sensor_name)
@@ -2062,10 +2351,32 @@ display_range_row = row(
     sizing_mode="scale_width"
 )
 
+loading_indicator = Div(
+    text="",
+    visible=False,
+    sizing_mode="stretch_width",
+    height=40,
+)
+
+def _show_loading(msg="Loading data..."):
+    """Show loading indicator before blocking work."""
+    loading_indicator.text = (
+        f"<div style='padding:8px 16px;background:#e3f2fd;border-radius:4px;"
+        f"color:#1565c0;font-weight:bold;text-align:center;'>"
+        f"⏳ {msg}</div>"
+    )
+    loading_indicator.visible = True
+
+def _hide_loading():
+    """Hide loading indicator after data is ready."""
+    loading_indicator.visible = False
+    loading_indicator.text = ""
+
 layout = column(
     Div(text="<h1> Multi-sensor temperature monitor</h1>", sizing_mode="stretch_width", height=60),
     Div(text="<h3>Sensor Selection</h3>", sizing_mode="stretch_width", height=25),
     sensor_selection_row,
+    loading_indicator,
     Div(text="<br>", sizing_mode="stretch_width", height=10),
     current_readings,
     Div(text="<h4>Quick set time window:</h4>", sizing_mode="stretch_width", height=25),
