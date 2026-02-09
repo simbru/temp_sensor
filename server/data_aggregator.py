@@ -572,6 +572,11 @@ class DataAggregator:
             count = cursor.fetchone()[0]
         return count
 
+    def get_last_timestamp(self, sensor_name: str) -> Optional[int]:
+        """Get the most recent timestamp for a sensor (milliseconds since epoch)."""
+        table_name = self._get_table_name(sensor_name)
+        return self._fetch_last_timestamp(table_name)
+
     def get_server_metrics(self) -> Dict:
         """Get server-side metrics (database size, active connections, etc)."""
         # Get database size in MB

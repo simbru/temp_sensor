@@ -757,6 +757,10 @@ data_cache = {
     "prep_ma_window": None,
     "prep_max_points": None,
     "prep_raw_hash": None,  # Hash of raw data to detect changes
+    "log_interval_s": None,
+    # Info about data availability outside current window
+    "total_records": 0,
+    "newest_timestamp_ms": None,  # Most recent data timestamp in entire DB
 }
 
 range_update_state = {
@@ -1567,6 +1571,13 @@ def fetch_initial_data(sensor_name):
     try:
         if not new_data or len(new_data.get("time", [])) == 0:
             logger.warning(f"No data available for sensor: {sensor_name}")
+            # Check if there's data outside the current time window
+            total_records = aggregator.get_total_records(sensor_name)
+            newest_ts = aggregator.get_last_timestamp(sensor_name)
+            data_cache["sensor_name"] = sensor_name
+            data_cache["raw_data"] = None
+            data_cache["total_records"] = total_records
+            data_cache["newest_timestamp_ms"] = newest_ts
             return None
 
         record_count = len(new_data.get('time', []))
@@ -1582,6 +1593,8 @@ def fetch_initial_data(sensor_name):
         data_cache["last_timestamp"] = new_data["time"][-1] if len(new_data["time"]) > 0 else None
         data_cache["last_fetch_time"] = time.time() * 1000
         data_cache["log_interval_s"] = log_interval_s  # Store for gap detection
+        data_cache["total_records"] = len(new_data.get("time", []))
+        data_cache["newest_timestamp_ms"] = new_data["time"][-1] if len(new_data["time"]) > 0 else None
 
         # Invalidate prepared data cache to force recalculation
         # This ensures moving averages are recalculated with the new data
@@ -1696,7 +1709,22 @@ def update_view():
             logger.warning("No cached data available, triggering initial fetch")
             fetch_initial_data(sensor_name)
             if data_cache["raw_data"] is None:
-                current_readings.text = f"<h3>⚠️ No data available for {sensor_name}</h3>"
+                # Check if there's data outside the current time window
+                total_records = data_cache.get("total_records", 0)
+                newest_ts = data_cache.get("newest_timestamp_ms")
+
+                if total_records > 0 and newest_ts:
+                    # Data exists but not in current window
+                    from datetime import datetime
+                    last_reading_dt = datetime.fromtimestamp(newest_ts / 1000)
+                    last_reading_str = last_reading_dt.strftime("%b %d, %Y %H:%M")
+                    current_readings.text = (
+                        f"<h3>⚠️ No data in selected time window for {sensor_name}</h3>"
+                        f"<p>Last reading: <b>{last_reading_str}</b> ({total_records:,} total records)</p>"
+                        f"<p>Try selecting 'All data' or expanding the time range.</p>"
+                    )
+                else:
+                    current_readings.text = f"<h3>⚠️ No data available for {sensor_name}</h3>"
                 return
 
         # Use cached data
