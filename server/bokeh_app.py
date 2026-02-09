@@ -1945,7 +1945,7 @@ def update_view():
             logger.debug("No cached data available, triggering initial fetch")
             fetch_initial_data(sensor_name)
             if data_cache["raw_data"] is None:
-                current_readings.text = f"<h3>⏳ Waiting for data from {sensor_name}...</h3>"
+                _update_status_display_no_data(sensor_name)
                 return
 
         # Use cached data
@@ -2117,8 +2117,135 @@ def update_view():
         logger.error(f"Error updating view: {e}")
 
 
+def _build_status_panel_html(
+    sensor_name, status_icon, status_label, sensor_type_str,
+    reading_html, device_ip, cpu_str, mem_str, client_db_str,
+    client_records_str, uptime_str, last_sync_str, server_db_size,
+    records_str, error_html
+):
+    """Build the 4-column status panel HTML. Shared by both data and no-data paths."""
+    return f"""
+    <div style="background-color:#f0f0f0;padding:14px;border-radius:5px;margin-bottom:18px;box-shadow:0 2px 4px rgba(0,0,0,0.1);display:flex;flex-wrap:wrap;gap:2px;align-items:flex-start;max-width:1200px;">
+        <div style="flex:1 1 180px;min-width:180px;">
+            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Status</h3>
+            <p style="font-size:16px;margin:0;">{status_icon} {sensor_name}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">{status_label}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">{sensor_type_str}</p>
+        </div>
+        <div style="flex:1 1 200px;min-width:200px;">
+            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Last reading</h3>
+            {reading_html}
+        </div>
+        <div style="flex:1 1 200px;min-width:200px;">
+            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Client Info</h3>
+            <p style="font-size:16px;margin:0;font-family:monospace;">{device_ip}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">CPU: {cpu_str} | Memory: {mem_str}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {client_db_str} | Records: {client_records_str}</p>
+        </div>
+        <div style="flex:1 1 220px;min-width:220px;">
+            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Server Info</h3>
+            <p style="font-size:16px;margin:0;">Uptime: {uptime_str}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">Last Sync: {last_sync_str}</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {server_db_size:.1f} MB | Records: {records_str}</p>
+            {error_html}
+        </div>
+    </div>
+    """
+
+
+def _get_metadata_display_vars(sensor_name):
+    """Fetch and format metadata + server info for the status panel.
+    Returns a dict of formatted strings ready for the HTML template."""
+    metadata = aggregator.get_sensor_metadata(sensor_name)
+    status_icon, status_label = _resolve_status_display(metadata)
+    metadata_safe = metadata or {}
+    device_ip = metadata_safe.get("device_ip") or "unknown"
+    last_sync_str = _format_metadata_timestamp(metadata_safe.get("last_update"))
+    last_error = metadata_safe.get("last_error")
+    error_html = ""
+    if last_error:
+        error_html = f"<p style='font-size:12px;margin:6px 0 0;color:#c0392b;background-color:#fdecea;padding:4px 8px;border-radius:3px;'>Last error: {last_error}</p>"
+
+    # Server uptime
+    uptime = aggregator.get_uptime()
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if days > 0:
+        uptime_str = f"{days}d {hours}h {minutes}m"
+    elif hours > 0:
+        uptime_str = f"{hours}h {minutes}m {seconds}s"
+    else:
+        uptime_str = f"{minutes}m {seconds}s"
+
+    # Server metrics
+    server_metrics = aggregator.get_server_metrics()
+    server_db_size = server_metrics.get("database_size_mb", 0)
+    total_records = server_metrics.get("total_records", 0)
+    if total_records >= 1000000:
+        records_str = f"{total_records / 1000000:.1f}M"
+    elif total_records >= 1000:
+        records_str = f"{total_records / 1000:.0f}K"
+    else:
+        records_str = str(total_records)
+
+    # Client metrics
+    cpu_str = f"{metadata_safe.get('cpu_percent', 0):.0f}%" if metadata_safe.get('cpu_percent') is not None else "—"
+    mem_str = f"{metadata_safe.get('memory_percent', 0):.0f}%" if metadata_safe.get('memory_percent') is not None else "—"
+    client_db_str = f"{metadata_safe.get('client_db_size_mb', 0):.1f} MB" if metadata_safe.get('client_db_size_mb') is not None else "—"
+    sensor_type_str = metadata_safe.get('sensor_type', 'Unknown')
+
+    # Client record count
+    client_total_records = metadata_safe.get('client_total_records', 0)
+    if client_total_records is not None and client_total_records >= 1000000:
+        client_records_str = f"{client_total_records / 1000000:.1f}M"
+    elif client_total_records is not None and client_total_records >= 1000:
+        client_records_str = f"{client_total_records / 1000:.0f}K"
+    elif client_total_records is not None:
+        client_records_str = str(client_total_records)
+    else:
+        client_records_str = "—"
+
+    return {
+        "metadata_safe": metadata_safe,
+        "status_icon": status_icon,
+        "status_label": status_label,
+        "sensor_type_str": sensor_type_str,
+        "device_ip": device_ip,
+        "last_sync_str": last_sync_str,
+        "error_html": error_html,
+        "uptime_str": uptime_str,
+        "server_db_size": server_db_size,
+        "records_str": records_str,
+        "cpu_str": cpu_str,
+        "mem_str": mem_str,
+        "client_db_str": client_db_str,
+        "client_records_str": client_records_str,
+    }
+
+
+def _update_status_display_no_data(sensor_name):
+    """Show the full status panel even when no sensor data is available.
+    Displays metadata (IP, status, errors) with 'No data yet' for readings."""
+    mv = _get_metadata_display_vars(sensor_name)
+
+    reading_html = """<p style="font-size:16px;margin:0;color:#888;">No data yet</p>
+            <p style="font-size:12px;margin:4px 0 0;color:#999;">Waiting for sensor data...</p>"""
+
+    current_readings.text = _build_status_panel_html(
+        sensor_name=sensor_name, reading_html=reading_html, **{
+            k: mv[k] for k in (
+                "status_icon", "status_label", "sensor_type_str", "device_ip",
+                "cpu_str", "mem_str", "client_db_str", "client_records_str",
+                "uptime_str", "last_sync_str", "server_db_size", "records_str",
+                "error_html"
+            )
+        }
+    )
+
+
 def _update_status_display(sensor_name, prepared, latest_time_ms):
-    """Helper function to update the status display."""
+    """Helper function to update the status display with sensor data."""
     import pandas as pd
 
     # Find last NON-NaN raw data point (not moving average)
@@ -2154,48 +2281,9 @@ def _update_status_display(sensor_name, prepared, latest_time_ms):
 
     logger.debug(f"Latest reading: {curr_time_str}, {curr_temp:.1f}°C, {curr_hum:.1f}%")
 
-    # Get sensor metadata
-    metadata = aggregator.get_sensor_metadata(sensor_name)
-    status_icon, status_label = _resolve_status_display(metadata)
-    metadata_safe = metadata or {}
-    device_ip = metadata_safe.get("device_ip") or "unknown"
-    last_sync_str = _format_metadata_timestamp(metadata_safe.get("last_update"))
-    last_error = metadata_safe.get("last_error")
-    error_html = ""
-    if last_error:
-        error_html = f"<p style='font-size:12px;margin:6px 0 0;color:#c0392b;background-color:#fdecea;padding:4px 8px;border-radius:3px;'>Last error: {last_error}</p>"
-
-    # Get server uptime
-    uptime = aggregator.get_uptime()
-    days = uptime.days
-    hours, remainder = divmod(uptime.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-
-    if days > 0:
-        uptime_str = f"{days}d {hours}h {minutes}m"
-    elif hours > 0:
-        uptime_str = f"{hours}h {minutes}m {seconds}s"
-    else:
-        uptime_str = f"{minutes}m {seconds}s"
-
-    # Get server metrics
-    server_metrics = aggregator.get_server_metrics()
-    server_db_size = server_metrics.get("database_size_mb", 0)
-    total_records = server_metrics.get("total_records", 0)
-
-    # Format records count
-    if total_records >= 1000000:
-        records_str = f"{total_records / 1000000:.1f}M"
-    elif total_records >= 1000:
-        records_str = f"{total_records / 1000:.0f}K"
-    else:
-        records_str = str(total_records)
-
-    # Get client metrics
-    cpu_str = f"{metadata_safe.get('cpu_percent', 0):.0f}%" if metadata_safe.get('cpu_percent') is not None else "—"
-    mem_str = f"{metadata_safe.get('memory_percent', 0):.0f}%" if metadata_safe.get('memory_percent') is not None else "—"
-    client_db_str = f"{metadata_safe.get('client_db_size_mb', 0):.1f} MB" if metadata_safe.get('client_db_size_mb') is not None else "—"
-    sensor_type_str = metadata_safe.get('sensor_type', 'Unknown')
+    # Get shared metadata/server display variables
+    mv = _get_metadata_display_vars(sensor_name)
+    metadata_safe = mv["metadata_safe"]
 
     # Calculate time since last reading (use actual last reading time, not plot end time)
     now_ms = int(pd.Timestamp.now().timestamp() * 1000)
@@ -2226,46 +2314,20 @@ def _update_status_display(sensor_name, prepared, latest_time_ms):
     else:
         time_ago_str = f"{time_ago_part} ago"
 
-    # Format client record count
-    client_total_records = metadata_safe.get('client_total_records', 0)
-    if client_total_records is not None and client_total_records >= 1000000:
-        client_records_str = f"{client_total_records / 1000000:.1f}M"
-    elif client_total_records is not None and client_total_records >= 1000:
-        client_records_str = f"{client_total_records / 1000:.0f}K"
-    elif client_total_records is not None:
-        client_records_str = str(client_total_records)
-    else:
-        client_records_str = "—"
-
-    current_readings.text = f"""
-    <div style="background-color:#f0f0f0;padding:14px;border-radius:5px;margin-bottom:18px;box-shadow:0 2px 4px rgba(0,0,0,0.1);display:flex;flex-wrap:wrap;gap:2px;align-items:flex-start;max-width:1200px;">
-        <div style="flex:1 1 180px;min-width:180px;">
-            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Status</h3>
-            <p style="font-size:16px;margin:0;">{status_icon} {sensor_name}</p>
-            <p style="font-size:12px;margin:4px 0 0;color:#555;">{status_label}</p>
-            <p style="font-size:12px;margin:4px 0 0;color:#555;">{sensor_type_str}</p>
-        </div>
-        <div style="flex:1 1 200px;min-width:200px;">
-            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Last reading</h3>
-            <p style="font-size:16px;margin:0;">{curr_temp:.1f}°C · {curr_hum:.1f}%</p>
+    reading_html = f"""<p style="font-size:16px;margin:0;">{curr_temp:.1f}°C · {curr_hum:.1f}%</p>
             <p style="font-size:12px;margin:4px 0 0;color:#555;">{time_ago_str}</p>
-            <p style="font-size:11px;margin:2px 0 0;color:#777;">{curr_time_str}</p>
-        </div>
-        <div style="flex:1 1 200px;min-width:200px;">
-            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Client Info</h3>
-            <p style="font-size:16px;margin:0;font-family:monospace;">{device_ip}</p>
-            <p style="font-size:12px;margin:4px 0 0;color:#555;">CPU: {cpu_str} | Memory: {mem_str}</p>
-            <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {client_db_str} | Records: {client_records_str}</p>
-        </div>
-        <div style="flex:1 1 220px;min-width:220px;">
-            <h3 style="margin:0 0 5px 0;font-size:14px;font-weight:600;">Server Info</h3>
-            <p style="font-size:16px;margin:0;">Uptime: {uptime_str}</p>
-            <p style="font-size:12px;margin:4px 0 0;color:#555;">Last Sync: {last_sync_str}</p>
-            <p style="font-size:12px;margin:4px 0 0;color:#555;">Database: {server_db_size:.1f} MB | Records: {records_str}</p>
-            {error_html}
-        </div>
-    </div>
-    """
+            <p style="font-size:11px;margin:2px 0 0;color:#777;">{curr_time_str}</p>"""
+
+    current_readings.text = _build_status_panel_html(
+        sensor_name=sensor_name, reading_html=reading_html, **{
+            k: mv[k] for k in (
+                "status_icon", "status_label", "sensor_type_str", "device_ip",
+                "cpu_str", "mem_str", "client_db_str", "client_records_str",
+                "uptime_str", "last_sync_str", "server_db_size", "records_str",
+                "error_html"
+            )
+        }
+    )
 
 
 _stream_cycle_count = 0
