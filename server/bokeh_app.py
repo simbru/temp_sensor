@@ -476,11 +476,13 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
 
     # LTTB downsampling: cap points sent to browser while preserving visual shape
     if max_points is not None and max_points > 0 and len(result["time"]) > max_points:
-        logger.info(f"LTTB downsampling: {len(result['time']):,} → {max_points:,} points")
-        # Separate time from data arrays for lttb_downsample
+        pre_lttb_count = len(result["time"])
+        t0 = time.perf_counter()
         data_arrays = {k: v for k, v in result.items() if k != "time"}
         result["time"], data_arrays = lttb_downsample(result["time"], data_arrays, max_points)
         result.update(data_arrays)
+        elapsed = time.perf_counter() - t0
+        logger.info(f"LTTB downsampling: {pre_lttb_count:,} → {len(result['time']):,} points in {elapsed:.3f}s")
 
     return result
 
@@ -1702,10 +1704,10 @@ def fetch_incremental_data(sensor_name):
         last_timestamp_ms = data_cache["last_timestamp"]
         now_ms = int(datetime.now().timestamp() * 1000)
 
-        # Fetch only new records
+        # Fetch only new records (start_time + 1 to exclude the already-cached point)
         new_records = aggregator.get_sensor_data(
             sensor_name,
-            start_time=last_timestamp_ms,
+            start_time=last_timestamp_ms + 1,
             end_time=now_ms
         )
 
@@ -1720,24 +1722,22 @@ def fetch_incremental_data(sensor_name):
             logger.debug(f"Fetched {new_count} new records for {sensor_name}")
             data_cache["new_point_count"] = new_count
 
-            # Convert to lists for extension (handle both basic and extended sensors)
-            data_cache["raw_data"]["time"] = list(data_cache["raw_data"]["time"]) + list(new_records["time"])
-            data_cache["raw_data"]["temperature"] = list(data_cache["raw_data"]["temperature"]) + list(new_records["temperature"])
-            data_cache["raw_data"]["humidity"] = list(data_cache["raw_data"]["humidity"]) + list(new_records["humidity"])
+            # Append new records using numpy concatenation (avoids copying entire dataset as Python lists)
+            for key in ("time", "temperature", "humidity"):
+                data_cache["raw_data"][key] = np.concatenate([
+                    np.asarray(data_cache["raw_data"][key]),
+                    np.asarray(new_records[key])
+                ])
 
             # Handle extended sensor data if present
-            if "pressure" in new_records:
-                if "pressure" not in data_cache["raw_data"]:
-                    data_cache["raw_data"]["pressure"] = []
-                data_cache["raw_data"]["pressure"] = list(data_cache["raw_data"]["pressure"]) + list(new_records["pressure"])
-            if "light" in new_records:
-                if "light" not in data_cache["raw_data"]:
-                    data_cache["raw_data"]["light"] = []
-                data_cache["raw_data"]["light"] = list(data_cache["raw_data"]["light"]) + list(new_records["light"])
-            if "noise" in new_records:
-                if "noise" not in data_cache["raw_data"]:
-                    data_cache["raw_data"]["noise"] = []
-                data_cache["raw_data"]["noise"] = list(data_cache["raw_data"]["noise"]) + list(new_records["noise"])
+            for key in ("pressure", "light", "noise"):
+                if key in new_records:
+                    if key not in data_cache["raw_data"]:
+                        data_cache["raw_data"][key] = np.array([])
+                    data_cache["raw_data"][key] = np.concatenate([
+                        np.asarray(data_cache["raw_data"][key]),
+                        np.asarray(new_records[key])
+                    ])
 
             # Trim old data to prevent endless accumulation (only for windowed mode)
             window_minutes = current_window.get("minutes")
@@ -2358,8 +2358,22 @@ loading_indicator = Div(
     height=40,
 )
 
+# Client-side JS loading indicator — shows instantly on browser before Python round-trip.
+# The Python _show_loading is kept as fallback for non-widget-triggered loads.
+_loading_js_show = CustomJS(args=dict(indicator=loading_indicator), code="""
+    indicator.visible = true;
+    indicator.text = '<div style="padding:8px 16px;background:#e3f2fd;border-radius:4px;color:#1565c0;font-weight:bold;text-align:center;">⏳ Loading...</div>';
+""")
+
+# Wire JS loading to sensor selector (fires on browser before Python on_change)
+sensor_selector.js_on_change("value", _loading_js_show)
+
+# Wire JS loading to time window buttons
+for _btn in [btn_10min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all]:
+    _btn.js_on_click(_loading_js_show)
+
 def _show_loading(msg="Loading data..."):
-    """Show loading indicator before blocking work."""
+    """Show loading indicator (Python-side fallback for non-widget triggers)."""
     loading_indicator.text = (
         f"<div style='padding:8px 16px;background:#e3f2fd;border-radius:4px;"
         f"color:#1565c0;font-weight:bold;text-align:center;'>"

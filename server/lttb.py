@@ -18,9 +18,9 @@ def lttb_downsample(time_vals, data_arrays, threshold):
     The first data array (typically temperature) drives the index selection;
     all other arrays are sliced to the same indices so they stay aligned.
 
-    NaN markers (gap indicators) are preserved: any index where the primary
-    data array is NaN is automatically kept, and LTTB runs on the non-NaN
-    segments independently.
+    NaN markers (gap indicators) are preserved where budget allows.
+    If there are more NaN markers than the threshold, a subset of evenly-
+    spaced NaN indices is kept so output never exceeds the threshold.
 
     Args:
         time_vals:    1-D array of timestamps (any numeric type, e.g. ms epoch).
@@ -66,18 +66,25 @@ def lttb_downsample(time_vals, data_arrays, threshold):
         # Simple case: no gaps, run LTTB on full array
         indices = _lttb_core(times, primary, threshold)
     else:
-        # Complex case: preserve all NaN markers, run LTTB on non-NaN segments
-        nan_indices = set(np.where(nan_mask)[0])
+        # Complex case: preserve NaN markers, run LTTB on non-NaN segments
+        nan_idx_arr = np.where(nan_mask)[0]
         non_nan_indices = np.where(~nan_mask)[0]
 
-        # Budget: we need to keep all NaN indices, distribute remaining budget
-        # across non-NaN data proportionally
-        nan_budget = len(nan_indices)
-        remaining_budget = max(threshold - nan_budget, 3)
+        nan_count = len(nan_idx_arr)
+
+        # Clamp NaN budget so total output never exceeds threshold
+        if nan_count >= threshold - 2:
+            # Too many NaN markers — keep an evenly-spaced subset
+            nan_budget = threshold - 2  # reserve 2 slots minimum for real data
+            keep = np.linspace(0, nan_count - 1, nan_budget, dtype=int)
+            nan_idx_arr = nan_idx_arr[keep]
+            remaining_budget = 3  # minimum for LTTB
+        else:
+            remaining_budget = max(threshold - nan_count, 3)
 
         if len(non_nan_indices) <= remaining_budget:
-            # Enough budget to keep everything
-            indices = np.arange(n)
+            # Enough budget to keep all real data
+            indices = np.sort(np.concatenate([non_nan_indices, nan_idx_arr]))
         else:
             # Run LTTB on non-NaN data only
             sub_times = times[non_nan_indices]
@@ -86,10 +93,7 @@ def lttb_downsample(time_vals, data_arrays, threshold):
             # Map sub-indices back to original indices
             selected_non_nan = non_nan_indices[sub_selected]
             # Merge with NaN indices
-            indices = np.sort(np.concatenate([
-                selected_non_nan,
-                np.array(list(nan_indices), dtype=int)
-            ]))
+            indices = np.sort(np.concatenate([selected_non_nan, nan_idx_arr]))
 
     time_out = times[indices]
     data_out = {k: np.asarray(v)[indices] for k, v in data_arrays.items()}
@@ -99,6 +103,10 @@ def lttb_downsample(time_vals, data_arrays, threshold):
 def _lttb_core(times, values, threshold):
     """
     Core LTTB algorithm — no NaN handling, pure downsampling.
+
+    Uses vectorized bucket boundary + cumulative sum precomputation for
+    fast range averages, keeping only the small inner-bucket max-area
+    selection as a Python loop.
 
     Args:
         times:     1-D float array of timestamps.
@@ -120,42 +128,55 @@ def _lttb_core(times, values, threshold):
     # Bucket size (first and last buckets have 1 point each)
     bucket_size = (n - 2) / (threshold - 2)
 
+    # ── Vectorized precomputation ────────────────────────────────────
+    # Precompute ALL bucket boundaries at once (eliminates per-iteration np.floor)
+    indices = np.arange(threshold - 2)
+    bucket_starts = np.floor(indices * bucket_size).astype(int) + 1
+    bucket_ends = np.floor((indices + 1) * bucket_size).astype(int) + 1
+    bucket_ends = np.minimum(bucket_ends, n - 1)
+
+    # Next-bucket boundaries for average computation
+    next_starts = bucket_ends.copy()
+    next_ends = np.floor((indices + 2) * bucket_size).astype(int) + 1
+    next_ends = np.minimum(next_ends, n)
+
+    # Cumulative sum trick: O(1) range average instead of O(k) np.mean per bucket
+    cumsum_t = np.empty(n + 1)
+    cumsum_t[0] = 0.0
+    np.cumsum(times, out=cumsum_t[1:])
+
+    cumsum_v = np.empty(n + 1)
+    cumsum_v[0] = 0.0
+    np.cumsum(values, out=cumsum_v[1:])
+
+    counts = next_ends - next_starts
+    # Guard against zero-length buckets (shouldn't happen, but be safe)
+    safe_counts = np.maximum(counts, 1)
+    avg_times = (cumsum_t[next_ends] - cumsum_t[next_starts]) / safe_counts
+    avg_vals = (cumsum_v[next_ends] - cumsum_v[next_starts]) / safe_counts
+
+    # ── Inner loop (only iterates within small buckets, ~6 pts each) ─
     prev_selected_idx = 0
 
-    for i in range(1, threshold - 1):
-        # Current bucket range
-        bucket_start = int(np.floor((i - 1) * bucket_size)) + 1
-        bucket_end = int(np.floor(i * bucket_size)) + 1
-        bucket_end = min(bucket_end, n - 1)
+    for i in range(threshold - 2):
+        bs = bucket_starts[i]
+        be = bucket_ends[i]
+        at = avg_times[i]
+        av = avg_vals[i]
 
-        # Next bucket range (for computing average)
-        next_bucket_start = int(np.floor(i * bucket_size)) + 1
-        next_bucket_end = int(np.floor((i + 1) * bucket_size)) + 1
-        next_bucket_end = min(next_bucket_end, n)
-
-        # Average of next bucket
-        avg_time = np.mean(times[next_bucket_start:next_bucket_end])
-        avg_val = np.mean(values[next_bucket_start:next_bucket_end])
-
-        # Previous selected point
         prev_time = times[prev_selected_idx]
         prev_val = values[prev_selected_idx]
 
-        # Find point in current bucket with max triangle area
-        best_idx = bucket_start
-        best_area = -1.0
+        # Vectorized area computation within the bucket
+        bucket_times = times[bs:be]
+        bucket_vals = values[bs:be]
+        areas = np.abs(
+            (prev_time - at) * (bucket_vals - prev_val)
+            - (prev_time - bucket_times) * (av - prev_val)
+        )
+        best_idx = bs + int(np.argmax(areas))
 
-        for j in range(bucket_start, bucket_end):
-            # Triangle area = 0.5 * |x_a(y_b - y_c) + x_b(y_c - y_a) + x_c(y_a - y_b)|
-            area = abs(
-                (prev_time - avg_time) * (values[j] - prev_val)
-                - (prev_time - times[j]) * (avg_val - prev_val)
-            )
-            if area > best_area:
-                best_area = area
-                best_idx = j
-
-        selected[i] = best_idx
+        selected[i + 1] = best_idx
         prev_selected_idx = best_idx
 
     return selected
