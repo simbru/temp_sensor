@@ -426,8 +426,10 @@ class DataAggregator:
         logger.info(f"Starting full historical backfill for {sensor_name}...")
 
         try:
-            # Fetch all data from client (no limit)
-            data = self.client.get_sensor_data(sensor_name, limit=None)
+            # Fetch all data from client (no limit).
+            # Use a generous timeout — low-memory Pis can be slow to serialize
+            # their entire database into a single JSON response.
+            data = self.client.get_sensor_data(sensor_name, limit=None, timeout=60)
             if data is None:
                 logger.error(f"Failed to fetch historical data from {sensor_name}")
                 return "error"

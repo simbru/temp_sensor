@@ -141,27 +141,27 @@ except Exception as e:
 # Initialize multi-sensor client and data aggregator as GLOBAL SINGLETON
 # This prevents creating duplicate polling threads for each Bokeh session
 #
-# IMPORTANT: We use sys.modules to store the singleton to survive Bokeh module reloads.
-# When Bokeh --dev mode or session refreshes cause module reimport, normal module-level
-# globals get reset, but the old daemon polling threads keep running. This causes
-# exponential growth in HTTP requests as each reload spawns new threads.
-# By storing in sys.modules (which persists across reloads), we ensure only ONE
-# aggregator instance and one set of polling threads ever exists.
+# IMPORTANT: Bokeh assigns each session a unique __name__ (e.g. "bokeh_app_5d21ad8f..."),
+# so module-level globals are DIFFERENT objects per session. We must store the singleton
+# in a location that is stable across all sessions within the same Python process.
+# We attach a dict to the `sys` module itself (which is always the same object).
 
-_SINGLETON_KEY = '_temp_sensor_aggregator_singleton'
-_aggregator_lock = __import__('threading').Lock()
+if not hasattr(sys, '_temp_sensor_singletons'):
+    setattr(sys, '_temp_sensor_singletons', {'lock': __import__('threading').Lock()})
 
 def get_aggregator():
     """Get or create the global aggregator instance (thread-safe singleton that survives module reloads)."""
+    store = getattr(sys, '_temp_sensor_singletons')
+
     # Check if singleton already exists (survives module reloads)
-    existing = getattr(sys.modules[__name__], _SINGLETON_KEY, None)
+    existing = store.get('aggregator')
     if existing is not None:
         logger.debug("Reusing existing aggregator instance (module was reloaded)")
         return existing
 
-    with _aggregator_lock:
+    with store['lock']:
         # Double-check after acquiring lock
-        existing = getattr(sys.modules[__name__], _SINGLETON_KEY, None)
+        existing = store.get('aggregator')
         if existing is not None:
             return existing
 
@@ -184,8 +184,7 @@ def get_aggregator():
         instance.start_polling()
         logger.info("Started background polling threads")
 
-        # Store in a way that survives module reloads
-        setattr(sys.modules[__name__], _SINGLETON_KEY, instance)
+        store['aggregator'] = instance
         return instance
 
 # Get the singleton aggregator instance
