@@ -428,8 +428,10 @@ class DataAggregator:
         # Paginated backfill: fetch in bounded batches using the `since` parameter.
         # A single unbounded /data/range request can OOM or timeout on low-memory Pis
         # (e.g., enviropi with 416MB RAM serializing 100k+ records as JSON).
-        BATCH_LIMIT = 50000  # Max the Pi API allows per request
-        BATCH_TIMEOUT = 60   # Generous timeout per batch
+        # 2000 rows keeps JSON payloads small (~120KB) and fast even on Pi Zeros.
+        # For 640k records this means ~320 batches, but each completes in seconds.
+        BATCH_LIMIT = 2000
+        BATCH_TIMEOUT = 30
 
         total_inserted = 0
         since_ts = 0  # Start from epoch (ensures ORDER BY timestamp ASC on client)
