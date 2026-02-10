@@ -425,47 +425,67 @@ class DataAggregator:
         table_name = self._get_table_name(sensor_name)
         logger.info(f"Starting full historical backfill for {sensor_name}...")
 
+        # Paginated backfill: fetch in bounded batches using the `since` parameter.
+        # A single unbounded /data/range request can OOM or timeout on low-memory Pis
+        # (e.g., enviropi with 416MB RAM serializing 100k+ records as JSON).
+        BATCH_LIMIT = 50000  # Max the Pi API allows per request
+        BATCH_TIMEOUT = 60   # Generous timeout per batch
+
+        total_inserted = 0
+        since_ts = 0  # Start from epoch (ensures ORDER BY timestamp ASC on client)
+
         try:
-            # Fetch all data from client (no limit).
-            # Use a generous timeout — low-memory Pis can be slow to serialize
-            # their entire database into a single JSON response.
-            data = self.client.get_sensor_data(sensor_name, limit=None, timeout=60)
-            if data is None:
-                logger.error(f"Failed to fetch historical data from {sensor_name}")
-                return "error"
+            while True:
+                # Fetch a batch: use /data/range with since + limit for pagination
+                data = self.client.get_sensor_data(
+                    sensor_name,
+                    start=since_ts,
+                    range_limit=BATCH_LIMIT,
+                    timeout=BATCH_TIMEOUT,
+                )
+                if data is None:
+                    if total_inserted > 0:
+                        # We already got some data — partial success, don't lose it
+                        logger.warning(f"Backfill interrupted after {total_inserted:,} records for {sensor_name}")
+                        return "ok"
+                    logger.error(f"Failed to fetch historical data from {sensor_name}")
+                    return "error"
 
-            sensor_data = data.get("data", {})
-            times = sensor_data.get("time", [])
-            temperatures = sensor_data.get("temperature", [])
-            humidities = sensor_data.get("humidity", [])
-            pressures = sensor_data.get("pressure", [None] * len(times))  # Default to None if not present
-            lights = sensor_data.get("light", [None] * len(times))
-            noises = sensor_data.get("noise", [None] * len(times))
+                sensor_data = data.get("data", {})
+                times = sensor_data.get("time", [])
 
-            if len(times) == 0:
-                logger.warning(f"No historical data available for {sensor_name}")
-                return "empty"
+                if len(times) == 0:
+                    if total_inserted > 0:
+                        break  # Pagination complete — no more data
+                    logger.warning(f"No historical data available for {sensor_name}")
+                    return "empty"
 
-            # Prepare records for insertion (6-tuple now)
-            records = list(zip(times, temperatures, humidities, pressures, lights, noises))
-            total_records = len(records)
+                temperatures = sensor_data.get("temperature", [])
+                humidities = sensor_data.get("humidity", [])
+                pressures = sensor_data.get("pressure", [None] * len(times))
+                lights = sensor_data.get("light", [None] * len(times))
+                noises = sensor_data.get("noise", [None] * len(times))
 
-            # Insert in batches via the write queue
-            batch_size = 10000
-            inserted_count = 0
+                records = list(zip(times, temperatures, humidities, pressures, lights, noises))
+                self._submit_write(("insert_batch", table_name, records, sensor_name))
+                total_inserted += len(records)
 
-            for i in range(0, total_records, batch_size):
-                batch = records[i:i + batch_size]
-                self._submit_write(("insert_batch", table_name, batch, sensor_name))
-                inserted_count += len(batch)
-                if (i + batch_size) % 50000 == 0:
-                    logger.info(f"Backfilled {inserted_count:,} / {total_records:,} records for {sensor_name}...")
+                logger.info(f"Backfilled batch: {len(records):,} records for {sensor_name} (total: {total_inserted:,})")
 
-            logger.info(f"Backfill complete: {total_records:,} records synced for {sensor_name}")
+                if len(times) < BATCH_LIMIT:
+                    break  # Last batch was smaller than limit — we've got everything
+
+                # Next batch starts after the last timestamp we received
+                since_ts = max(times) + 1
+
+            logger.info(f"Backfill complete: {total_inserted:,} records synced for {sensor_name}")
             return "ok"
 
         except Exception as e:
             logger.error(f"Error during historical backfill for {sensor_name}: {e}")
+            if total_inserted > 0:
+                logger.info(f"Partial backfill saved: {total_inserted:,} records for {sensor_name}")
+                return "ok"
             return "error"
 
     def update_sensor_data(self, sensor_name: str, limit: int = 10):
