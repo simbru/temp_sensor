@@ -79,6 +79,7 @@ class DataAggregator:
         # Per-sensor poll locks — prevents overlapping polls for the same sensor
         self._poll_locks = {}  # sensor_name -> threading.Lock()
         self._backfill_in_progress = set()  # sensor names currently backfilling
+        self._empty_backfill_completed = set()  # sensors where backfill found no data (reachable but empty)
 
         # Metadata fetch throttling — only fetch metrics/status/config every Nth poll
         self._poll_counts = {}  # sensor_name -> int
@@ -407,7 +408,7 @@ class DataAggregator:
         # Replace spaces and special chars with underscores
         return "sensor_" + "".join(c if c.isalnum() else "_" for c in sensor_name).lower()
 
-    def _backfill_all_historical_data(self, sensor_name: str) -> bool:
+    def _backfill_all_historical_data(self, sensor_name: str) -> str:
         """
         Backfill all historical data from a sensor on initial sync.
 
@@ -417,7 +418,9 @@ class DataAggregator:
             sensor_name: Name of sensor to backfill
 
         Returns:
-            True if successful, False otherwise
+            "ok" if data was successfully backfilled,
+            "empty" if sensor was reachable but had no data,
+            "error" if sensor was unreachable or request failed
         """
         table_name = self._get_table_name(sensor_name)
         logger.info(f"Starting full historical backfill for {sensor_name}...")
@@ -427,7 +430,7 @@ class DataAggregator:
             data = self.client.get_sensor_data(sensor_name, limit=None)
             if data is None:
                 logger.error(f"Failed to fetch historical data from {sensor_name}")
-                return False
+                return "error"
 
             sensor_data = data.get("data", {})
             times = sensor_data.get("time", [])
@@ -439,7 +442,7 @@ class DataAggregator:
 
             if len(times) == 0:
                 logger.warning(f"No historical data available for {sensor_name}")
-                return False
+                return "empty"
 
             # Prepare records for insertion (6-tuple now)
             records = list(zip(times, temperatures, humidities, pressures, lights, noises))
@@ -457,11 +460,11 @@ class DataAggregator:
                     logger.info(f"Backfilled {inserted_count:,} / {total_records:,} records for {sensor_name}...")
 
             logger.info(f"Backfill complete: {total_records:,} records synced for {sensor_name}")
-            return True
+            return "ok"
 
         except Exception as e:
             logger.error(f"Error during historical backfill for {sensor_name}: {e}")
-            return False
+            return "error"
 
     def update_sensor_data(self, sensor_name: str, limit: int = 10):
         """
@@ -493,18 +496,25 @@ class DataAggregator:
             logger.debug(f"Last timestamp in DB for {sensor_name}: {last_timestamp}")
 
             # If this is the first sync (no data in server DB), do full historical backfill
-            if last_timestamp is None:
+            if last_timestamp is None and sensor_name not in self._empty_backfill_completed:
                 if sensor_name in self._backfill_in_progress:
                     logger.debug(f"Backfill already in progress for {sensor_name}, skipping")
                     return
                 self._backfill_in_progress.add(sensor_name)
                 try:
                     logger.info(f"First sync detected for {sensor_name}, initiating full historical backfill")
-                    success = self._backfill_all_historical_data(sensor_name)
-                    if not success:
+                    backfill_result = self._backfill_all_historical_data(sensor_name)
+                    if backfill_result == "ok":
+                        last_timestamp = self._fetch_last_timestamp(table_name)
+                    elif backfill_result == "empty":
+                        # Sensor is reachable but has no data (e.g., broken sensor, fresh install).
+                        # Mark it so we don't re-attempt backfill every poll cycle.
+                        # Fall through to v2 poll to get status/metadata (e.g., hardware_failure).
+                        self._empty_backfill_completed.add(sensor_name)
+                        logger.info(f"{sensor_name}: reachable but no data; skipping future backfill attempts")
+                    else:  # "error" — sensor genuinely unreachable
                         self._update_metadata(sensor_name, device_ip=device_ip, status="error", error="Failed to backfill historical data")
                         return
-                    last_timestamp = self._fetch_last_timestamp(table_name)
                 finally:
                     self._backfill_in_progress.discard(sensor_name)
 
@@ -569,6 +579,9 @@ class DataAggregator:
         if new_records:
             self._submit_write(("insert_data", table_name, new_records, sensor_name))
             logger.info(f"Added {len(new_records)} new records for {sensor_name} (v2)")
+            # Sensor is producing data — clear the empty-backfill flag so a proper
+            # backfill is attempted if needed (e.g., sensor was repaired).
+            self._empty_backfill_completed.discard(sensor_name)
 
         # Override status if hardware failure detected
         if hardware_status == "hardware_failure":
@@ -652,6 +665,7 @@ class DataAggregator:
         if new_records:
             self._submit_write(("insert_data", table_name, new_records, sensor_name))
             logger.info(f"Added {len(new_records)} new records for {sensor_name} (v1)")
+            self._empty_backfill_completed.discard(sensor_name)
 
         # Override status if hardware failure detected
         if hardware_status == "hardware_failure":
