@@ -525,6 +525,8 @@ class DataAggregator:
                 self._backfill_in_progress.add(sensor_name)
                 try:
                     logger.info(f"First sync detected for {sensor_name}, initiating full historical backfill")
+                    # Show "syncing" immediately so dashboard doesn't display stale error
+                    self._update_metadata(sensor_name, device_ip=device_ip, status="syncing", error=None)
                     backfill_result = self._backfill_all_historical_data(sensor_name)
                     if backfill_result == "ok":
                         last_timestamp = self._fetch_last_timestamp(table_name)
