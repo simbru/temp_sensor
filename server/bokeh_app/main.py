@@ -1,10 +1,8 @@
 """
 Multi-sensor Bokeh Server dashboard for lab temperature monitoring.
-Run with: bokeh serve --show server/bokeh_app.py
+Run with: bokeh serve server/bokeh_app --port 8000
 """
-import configparser
 import logging
-import logging.handlers
 import math
 import pathlib
 import sys
@@ -13,8 +11,8 @@ import time
 import numpy as np
 import pandas as pd
 
-# Add project root to path
-_project_root = pathlib.Path(__file__).parent.parent
+# Add project root to path so 'server.*' imports work
+_project_root = pathlib.Path(__file__).parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
@@ -23,171 +21,14 @@ from bokeh.models import ColumnDataSource, Button, Spinner, Range1d, Toggle, Cus
 from bokeh.layouts import column, row
 from bokeh.models.widgets import Div
 
-from server.api_client import MultiSensorClient
-from server.data_aggregator import DataAggregator
 from server.lttb import lttb_downsample
-
-# Configure logging to both file and console
-log_dir = _project_root / "logs"
-log_dir.mkdir(exist_ok=True)
-log_file = log_dir / "server.log"
-
-# Create formatter
-formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+from server.bokeh_app._startup import (
+    get_aggregator, sensor_configs, poll_interval, dashboard_update_ms, max_plot_points,
 )
-
-# File handler with rotation (10MB max, keep 5 old files)
-# On Windows, RotatingFileHandler fails to rename open log files when multiple
-# threads are logging simultaneously (WinError 32). Use a safe wrapper that
-# catches rotation errors and continues logging to the current file.
-class _SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
-    """RotatingFileHandler that silently skips rotation on Windows file lock errors."""
-    def doRollover(self):
-        try:
-            super().doRollover()
-        except PermissionError:
-            # Another thread has the file open — skip rotation this time.
-            # The file will be rotated on the next successful attempt.
-            pass
-
-file_handler = _SafeRotatingFileHandler(
-    log_file,
-    maxBytes=10 * 1024 * 1024,  # 10MB
-    backupCount=5,
-    encoding='utf-8'
-)
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(formatter)
-
-# Console handler (still show logs in terminal)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(formatter)
-
-# Get root logger and add handlers directly (more reliable than basicConfig)
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-
-# Remove any existing handlers to avoid duplicates
-for handler in root_logger.handlers[:]:
-    root_logger.removeHandler(handler)
-
-# Add our handlers
-root_logger.addHandler(file_handler)
-root_logger.addHandler(console_handler)
 
 logger = logging.getLogger(__name__)
-logger.info(f"Logging to: {log_file}")
-logger.info(f"Dashboard server starting...")
 
-# Load server configuration
-CONFIG_PATH = _project_root / "server" / "config_server.ini"
-
-def load_server_config():
-    """Load server configuration from config_server.ini."""
-    config = configparser.ConfigParser()
-    config.optionxform = str  # type: ignore[attr-defined]
-
-    if not CONFIG_PATH.exists():
-        raise FileNotFoundError(f"Server configuration not found at {CONFIG_PATH}")
-
-    config.read(CONFIG_PATH)
-
-    # Parse sensor configurations
-    sensor_configs = []
-    if "SENSORS" in config:
-        for name, value in config["SENSORS"].items():
-            # Parse format: "url" or "url, poll_interval_s"
-            parts = [p.strip() for p in value.split(',')]
-            url = parts[0]
-            poll_interval = int(parts[1]) if len(parts) > 1 else 30  # Default 30s
-
-            sensor_configs.append({
-                "name": name.replace("_", " "),
-                "url": url,
-                "poll_interval_s": poll_interval
-            })
-
-    if not sensor_configs:
-        raise ValueError("No sensors configured in config_server.ini")
-
-    poll_interval = int(config.get("SERVER", "poll_interval_s", fallback="30"))
-    min_gap_threshold = int(config.get("SERVER", "min_gap_threshold_s", fallback="60"))
-    db_path = config.get("SERVER", "database_path", fallback="sensor_data.db")
-    update_ms = int(config.get("SERVER", "dashboard_update_ms", fallback="10000"))
-    max_plot_points = int(config.get("SERVER", "max_plot_points", fallback="50000"))
-
-    # Data retention config (optional section — sensible defaults if missing)
-    retention_config = {
-        "hot_retention_days": int(config.get("RETENTION", "hot_retention_days", fallback="7")),
-        "warm_retention_days": int(config.get("RETENTION", "warm_retention_days", fallback="90")),
-        "warm_resolution_s": int(config.get("RETENTION", "warm_resolution_s", fallback="60")),
-        "cold_resolution_s": int(config.get("RETENTION", "cold_resolution_s", fallback="900")),
-    }
-
-    return sensor_configs, poll_interval, min_gap_threshold, db_path, update_ms, max_plot_points, retention_config
-
-try:
-    sensor_configs, poll_interval, min_gap_threshold, db_path, dashboard_update_ms, max_plot_points, retention_config = load_server_config()
-    logger.info(f"Loaded {len(sensor_configs)} sensor configurations")
-    logger.info(f"Max plot points: {max_plot_points:,}")
-    logger.info(f"Retention: hot={retention_config['hot_retention_days']}d, warm={retention_config['warm_retention_days']}d")
-except Exception as e:
-    logger.error(f"Failed to load server configuration: {e}")
-    raise
-
-# Initialize multi-sensor client and data aggregator as GLOBAL SINGLETON
-# This prevents creating duplicate polling threads for each Bokeh session
-#
-# IMPORTANT: Bokeh assigns each session a unique __name__ (e.g. "bokeh_app_5d21ad8f..."),
-# so module-level globals are DIFFERENT objects per session. We must store the singleton
-# in a location that is stable across all sessions within the same Python process.
-# We attach a dict to the `sys` module itself (which is always the same object).
-
-if not hasattr(sys, '_temp_sensor_singletons'):
-    setattr(sys, '_temp_sensor_singletons', {'lock': __import__('threading').Lock()})
-
-def get_aggregator():
-    """Get or create the global aggregator instance (thread-safe singleton that survives module reloads)."""
-    store = getattr(sys, '_temp_sensor_singletons')
-
-    # Check if singleton already exists (survives module reloads)
-    existing = store.get('aggregator')
-    if existing is not None:
-        logger.debug("Reusing existing aggregator instance (module was reloaded)")
-        return existing
-
-    with store['lock']:
-        # Double-check after acquiring lock
-        existing = store.get('aggregator')
-        if existing is not None:
-            return existing
-
-        logger.info("Creating global data aggregator instance...")
-        multi_client = MultiSensorClient(sensor_configs)
-        instance = DataAggregator(
-            multi_client,
-            sensor_configs=sensor_configs,
-            db_path=db_path,
-            poll_interval=poll_interval,
-            min_gap_threshold=min_gap_threshold,
-            retention_config=retention_config
-        )
-
-        # Start background polling (non-blocking — threads populate data asynchronously)
-        # NOTE: We intentionally do NOT call poll_once() here. That was blocking
-        # startup for 20-40s when sensors were offline (10s timeout × 4 HTTP requests
-        # × N offline sensors). The polling threads started below will populate data
-        # in the background. The dashboard handles "no data yet" gracefully.
-        instance.start_polling()
-        logger.info("Started background polling threads")
-
-        store['aggregator'] = instance
-        return instance
-
-# Get the singleton aggregator instance
+# Get the singleton aggregator instance (already created by app_hooks.on_server_loaded)
 aggregator = get_aggregator()
 
 # Constants (adapted from original dashboard)

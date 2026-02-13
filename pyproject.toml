@@ -65,4 +65,11 @@ enviroplus = [
     "fonts",  # Font management
     "font-roboto",  # Roboto font (RobotoMedium used by Pimoroni examples)
 ]
+# Pimoroni Multi-Sensor Stick (BME280 + LTR559 via I2C)
+# Install with: uv sync --extra sensor-stick
+sensor-stick = [
+    "pimoroni-bme280; sys_platform == 'linux'",
+    "ltr559; sys_platform == 'linux'",
+    "smbus2; sys_platform == 'linux'",
+]
 
