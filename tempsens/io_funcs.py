@@ -356,9 +356,8 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
         max_temp_delta = float(CONFIG["DEFAULT"]["max_temp_delta_c"])
         max_humidity_delta = float(CONFIG["DEFAULT"]["max_humidity_delta_pct"])
 
-        # Warmup period for Enviro+ CPU compensation stabilization
-        # SENSOR_STICK and other extended sensors don't need warmup
-        if has_extended_data and sensor.name == "ENVIROPLUS":
+        # Warmup period for extended sensors (discards initial uncalibrated BME280 reads)
+        if has_extended_data:
             current_time = time.time()
             
             # Initialize warmup start time on first reading

@@ -524,6 +524,11 @@ class SensorStickSensor:
         self.bme280 = BME280(i2c_dev=self.bus)
         self.ltr559 = LTR559()
 
+        # Priming read: first BME280 read returns uncalibrated data
+        self.bme280.get_temperature()
+        self.bme280.get_humidity()
+        self.bme280.get_pressure()
+
         self.temp_scale = temp_scale
         self.temp_offset = temp_offset
         self.humidity_scale = humidity_scale
