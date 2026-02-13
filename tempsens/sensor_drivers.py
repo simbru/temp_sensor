@@ -472,8 +472,13 @@ class EnviroPlusSensor:
 
     @staticmethod
     def detect() -> bool:
-        """Attempt to detect Enviro+ hardware on I2C bus."""
+        """Attempt to detect Enviro+ hardware on I2C bus.
+
+        Requires the enviroplus package to distinguish from other boards
+        (like the Multi-Sensor Stick) that use the same BME280 + LTR559 chips.
+        """
         try:
+            from enviroplus import gas  # noqa: F401 - presence check only
             from smbus2 import SMBus
             from bme280 import BME280
             from ltr559 import LTR559
