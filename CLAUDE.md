@@ -93,6 +93,12 @@ uv sync --extra pi-hardware         # Install with hardware sensor libraries
 uv run python run_client.py         # Run with real sensor (auto-detected or configured)
 ```
 
+**On Raspberry Pi with Pimoroni Multi-Sensor Stick**:
+```bash
+uv sync --group client --extra sensor-stick
+uv run python run_client.py         # Run with BME280 + LTR559 (temp, humidity, pressure, light)
+```
+
 **On Raspberry Pi with Enviro+ board**:
 ```bash
 uv sync --extra pi-hardware --extra enviroplus
@@ -111,11 +117,12 @@ Protocol-based multi-sensor abstraction with auto-detection.
 | DHT22 | GPIO (pin D4 hardcoded) | Temp, humidity | Fresh instance per read (prevents FD leaks) |
 | AHT20 | I2C | Temp, humidity | Reliable I2C detection |
 | BME280 | I2C (0x76) | Temp, humidity, pressure | `adafruit_bme280` library |
+| Sensor Stick | I2C (0x76 + 0x23) | Temp, humidity, pressure, light | Pimoroni BME280 + LTR559, no CPU compensation |
 | Enviro+ | I2C + SPI | Temp, humidity, pressure, light, noise | CPU temp compensation, LTR559 light sensor |
 | Simulated | None | Temp, humidity | 20% random failure rate for testing |
 
 **Auto-Detection Order** (when `sensor_type = AUTO`):
-1. ENVIROPLUS → 2. AHT20 → 3. BME280 → 4. DHT22 → 5. SIMULATED
+1. ENVIROPLUS → 2. SENSOR_STICK → 3. AHT20 → 4. BME280 → 5. DHT22 → 6. SIMULATED
 
 **Known Issue:** AHT20 detection calls `busio.I2C(board.SCL, board.SDA)` which can hang indefinitely if the I2C bus is in a bad state. Set `sensor_type` explicitly in `config.ini` to skip auto-detection on problematic hardware.
 
@@ -286,7 +293,7 @@ loginterval_s = 2              # Seconds between sensor reads
 outputfile = templog.db        # SQLite database path
 device_name = Temperature Sensor
 api_port = 5000
-sensor_type = AUTO             # AUTO | DHT22 | AHT20 | BME280 | ENVIROPLUS | SIMULATED
+sensor_type = AUTO             # AUTO | DHT22 | AHT20 | BME280 | SENSOR_STICK | ENVIROPLUS | SIMULATED
 max_temp_delta_c = 3.0         # Spike filter: max temp change per reading
 max_humidity_delta_pct = 10.0  # Spike filter: max humidity change per reading
 enable_lcd_display = False     # Enviro+ LCD output
@@ -367,7 +374,7 @@ uv sync --extra pi-hardware
 device_name = Room 397
 api_port = 5000
 loginterval_s = 10
-sensor_type = AUTO             # Or explicit: DHT22, AHT20, BME280, ENVIROPLUS
+sensor_type = AUTO             # Or explicit: DHT22, AHT20, BME280, SENSOR_STICK, ENVIROPLUS
 ```
 
 **Run client (sensor logging + API server)**:

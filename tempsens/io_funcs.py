@@ -356,9 +356,9 @@ def log_data(filename = CONFIG["DEFAULT"]["outputfile"]):
         max_temp_delta = float(CONFIG["DEFAULT"]["max_temp_delta_c"])
         max_humidity_delta = float(CONFIG["DEFAULT"]["max_humidity_delta_pct"])
 
-        # Warmup period for sensors that need stabilization (Enviro+ with CPU compensation)
-        # Only applies to extended sensors; simple sensors like DHT22 don't need warmup
-        if has_extended_data:
+        # Warmup period for Enviro+ CPU compensation stabilization
+        # SENSOR_STICK and other extended sensors don't need warmup
+        if has_extended_data and sensor.name == "ENVIROPLUS":
             current_time = time.time()
             
             # Initialize warmup start time on first reading

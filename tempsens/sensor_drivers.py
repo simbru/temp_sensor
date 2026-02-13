@@ -492,6 +492,106 @@ class EnviroPlusSensor:
             return False
 
 
+class SensorStickSensor:
+    """Driver for Pimoroni Multi-Sensor Stick (BME280 + LTR559 via I2C).
+
+    A standalone I2C sensor board with temperature, humidity, pressure, and light
+    sensing. Unlike the Enviro+ HAT, this is cable-connected so no CPU temperature
+    compensation is needed.
+    """
+
+    def __init__(self, temp_scale=1.0, temp_offset=0.0,
+                 humidity_scale=1.0, humidity_offset=0.0,
+                 pressure_scale=1.0, pressure_offset=0.0,
+                 light_scale=1.0, light_offset=0.0,
+                 **kwargs):
+        try:
+            from smbus2 import SMBus
+            from bme280 import BME280
+            from ltr559 import LTR559
+        except ImportError:
+            raise ImportError(
+                "Pimoroni sensor libraries not available - install with: "
+                "uv sync --extra sensor-stick"
+            )
+
+        self.bus = SMBus(1)
+        self.bme280 = BME280(i2c_dev=self.bus)
+        self.ltr559 = LTR559()
+
+        self.temp_scale = temp_scale
+        self.temp_offset = temp_offset
+        self.humidity_scale = humidity_scale
+        self.humidity_offset = humidity_offset
+        self.pressure_scale = pressure_scale
+        self.pressure_offset = pressure_offset
+        self.light_scale = light_scale
+        self.light_offset = light_offset
+
+    def read(self) -> Tuple[Optional[float], Optional[float]]:
+        """Read temperature and humidity from BME280."""
+        try:
+            temp = self.bme280.get_temperature()
+            humidity = self.bme280.get_humidity()
+
+            temp = (temp * self.temp_scale) + self.temp_offset
+            humidity = (humidity * self.humidity_scale) + self.humidity_offset
+            humidity = max(0, min(100, humidity))
+
+            return temp, humidity
+        except Exception as e:
+            raise RuntimeError(f"Sensor Stick BME280 read error: {e}")
+
+    def read_extended(self) -> Dict[str, Optional[float]]:
+        """Read all sensors: temperature, humidity, pressure, light."""
+        try:
+            temp = self.bme280.get_temperature()
+            humidity = self.bme280.get_humidity()
+            pressure = self.bme280.get_pressure()
+            lux = self.ltr559.get_lux()
+
+            temp = (temp * self.temp_scale) + self.temp_offset
+            humidity = (humidity * self.humidity_scale) + self.humidity_offset
+            humidity = max(0, min(100, humidity))
+            pressure = (pressure * self.pressure_scale) + self.pressure_offset
+            lux = max(0, (lux * self.light_scale) + self.light_offset)
+
+            return {
+                "temperature": temp,
+                "humidity": humidity,
+                "pressure": pressure,
+                "light": lux,
+            }
+        except Exception as e:
+            raise RuntimeError(f"Sensor Stick read error: {e}")
+
+    @property
+    def name(self) -> str:
+        return "SENSOR_STICK"
+
+    @property
+    def available_sensors(self) -> list[str]:
+        return ["temperature", "humidity", "pressure", "light"]
+
+    @staticmethod
+    def detect() -> bool:
+        """Check if BME280 + LTR559 are available via Pimoroni libraries."""
+        try:
+            from smbus2 import SMBus
+            from bme280 import BME280
+            from ltr559 import LTR559
+
+            bus = SMBus(1)
+            bme = BME280(i2c_dev=bus)
+            ltr = LTR559()
+
+            _ = bme.get_temperature()
+            _ = ltr.get_lux()
+            return True
+        except Exception:
+            return False
+
+
 class SimulatedSensor:
     """Simulated sensor for testing without hardware."""
 
@@ -540,6 +640,7 @@ class SimulatedSensor:
 # DHT22 last (can only check if libraries exist, not if hardware is connected)
 SENSOR_REGISTRY = [
     ("ENVIROPLUS", EnviroPlusSensor),
+    ("SENSOR_STICK", SensorStickSensor),
     ("AHT20", AHT20Sensor),
     ("BME280", BME280Sensor),
     ("DHT22", DHT22Sensor),
@@ -567,7 +668,7 @@ def detect_sensor(**kwargs) -> SensorInterface:
             if sensor_class.detect():
                 print("Found!", flush=True)
                 # Pass kwargs to sensors that support them (like EnviroPlusSensor)
-                if sensor_name == "ENVIROPLUS":
+                if sensor_name in ("ENVIROPLUS", "SENSOR_STICK"):
                     sensor = sensor_class(**kwargs)
                 else:
                     sensor = sensor_class()
@@ -617,7 +718,7 @@ def get_sensor(sensor_type: str, **kwargs) -> SensorInterface:
             print(f"Initializing {sensor_type} sensor...")
             try:
                 # Pass kwargs to sensors that support them (like EnviroPlusSensor)
-                if name == "ENVIROPLUS":
+                if name in ("ENVIROPLUS", "SENSOR_STICK"):
                     sensor = sensor_class(**kwargs)
                 else:
                     sensor = sensor_class()
