@@ -1,0 +1,17 @@
+<service>
+  <id>BokehDashboard</id>
+  <name>Temperature Dashboard (Bokeh)</name>
+  <description>Multi-sensor temperature monitoring dashboard</description>
+  <executable>C:\Users\main\temp_sensor\.venv\Scripts\python.exe</executable>
+  <arguments>-m bokeh serve server/bokeh_app --port 8000 --address 127.0.0.1 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=139.184.163.16:80</arguments>
+  <workingdirectory>C:\Users\main\temp_sensor</workingdirectory>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>5</keepFiles>
+    <logpath>C:\Users\main\temp_sensor\logs</logpath>
+  </log>
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <resetfailure>1 hour</resetfailure>
+</service>

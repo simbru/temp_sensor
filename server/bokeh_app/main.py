@@ -976,7 +976,10 @@ temp_plot.x_range.on_change('start', range_change_callback)
 temp_plot.x_range.on_change('end', range_change_callback)
 
 # UI widgets
-current_readings = Div(text="<h3>Loading...</h3>", sizing_mode="stretch_width")
+_initial_loading_msg = "Loading..."
+if initial_metadata and initial_metadata.get("status") == "syncing":
+    _initial_loading_msg = f"Syncing data for {current_sensor_state['name']} — this may take a moment…"
+current_readings = Div(text=f"<h3>{_initial_loading_msg}</h3>", sizing_mode="stretch_width")
 
 # Sensor selection dropdown
 sensor_names = [cfg["name"] for cfg in sensor_configs]
@@ -1174,7 +1177,11 @@ def update_time_window(minutes, sync_inputs=True):
     if needs_refetch:
         # Refetch data with new window — show loading indicator
         sensor_name = current_sensor_state["name"]
-        _show_loading("Loading time range...")
+        meta = aggregator.get_sensor_metadata(sensor_name)
+        if meta and meta.get("status") == "syncing":
+            _show_loading(f"Syncing data for {sensor_name} — this may take a moment…")
+        else:
+            _show_loading("Loading time range...")
 
         def _do_refetch():
             try:
@@ -1423,6 +1430,10 @@ def on_sensor_change(attr, old, new):
 
     def _do_sensor_load():
         try:
+            # Refine loading message if sensor is syncing backlog
+            meta = aggregator.get_sensor_metadata(new)
+            if meta and meta.get("status") == "syncing":
+                _show_loading(f"Syncing data for {new} — this may take a moment…")
             fetch_initial_data(new)
             update_view()
             logger.info(f"Switched to sensor: {new}")

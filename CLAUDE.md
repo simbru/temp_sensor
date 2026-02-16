@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Deployment Context
 
 **Production Environment:**
-- **Lab Server (Windows)**: Runs `server/bokeh_app.py` natively on Windows at work/university, accessible from campus network
+- **Lab Server (Windows)**: Runs `server/bokeh_app/` as a Windows service (WinSW) at work/university, accessible from campus network
 - **Raspberry Pi Clients**: Deployed in various rooms (Room 307, etc.), connected via Tailscale VPN
 - **Live System**: Multiple sensor types (DHT22, AHT20, BME280, Enviro+) logging 24/7, data aggregated to central dashboard
 
@@ -48,17 +48,18 @@ tempsens/                    # Main package directory (client-side)
 ├── sensor.py               # Background logging process (sched-based loop)
 ├── sensor_drivers.py       # Multi-sensor driver layer (DHT22, AHT20, BME280, Enviro+, Simulated)
 ├── api_server.py           # FastAPI server (v2 /poll + v1 legacy endpoints)
-├── lcd_display.py          # Enviro+ ST7735 LCD display with proximity mode switching
-└── dashboard/              # Original single-sensor dashboard
-    ├── __init__.py
-    └── bokeh_app.py        # Bokeh Server entry point (local mode)
+└── lcd_display.py          # Enviro+ ST7735 LCD display with proximity mode switching
 
 server/                      # Server-side components (central dashboard)
 ├── __init__.py
 ├── api_client.py           # HTTP client with v2/v1 auto-detection per sensor
 ├── data_aggregator.py      # Per-sensor polling threads, single-writer DB, gap detection
-├── bokeh_app.py            # Multi-sensor Bokeh dashboard with singleton aggregator
-└── config_server.ini       # Server configuration (sensor list, per-sensor poll intervals)
+├── bokeh_app/              # Multi-sensor Bokeh dashboard (directory app)
+│   ├── main.py             # Dashboard layout, plots, callbacks
+│   ├── app_hooks.py        # Bokeh lifecycle hooks (on_server_loaded)
+│   └── _startup.py         # Aggregator singleton initialization
+├── config_server.ini       # Server configuration (sensor list, per-sensor poll intervals)
+└── SERVICE.md              # WinSW service setup and management guide
 
 dev/                         # Development/testing harness
 ├── run_test_clients.py     # Spawn N test clients with simulated sensors
@@ -228,7 +229,7 @@ CREATE INDEX idx_timestamp ON sensor_data(timestamp DESC);
 - **Log spam control**: Logs first error and every 10th consecutive error
 - **Status tracking**: active, idle, error, syncing, hardware_failure, degraded
 
-**`server/bokeh_app.py`**: Multi-sensor dashboard
+**`server/bokeh_app/`**: Multi-sensor dashboard
 - **Singleton pattern**: Aggregator stored in `sys.modules` to survive Bokeh reloads
   - Thread-safe double-checked locking
   - Non-blocking startup: dashboard loads immediately, data arrives asynchronously
@@ -274,7 +275,7 @@ CREATE TABLE sensor_<name> (
 
 **Standalone Mode (Single Pi)**:
 1. `sensor.py` → `log_data()` → spike filtering → `write_data()` → local SQLite
-2. `dashboard/bokeh_app.py` reads SQLite directly
+2. `server/bokeh_app/` reads SQLite directly
 
 **Spike Filtering Behavior**:
 - First reading after startup always accepted (no previous reading to compare)
@@ -353,7 +354,7 @@ uv run python run_client.py
 
 **Test server dashboard (requires configured sensors in config_server.ini)**:
 ```bash
-uv run bokeh serve --show server/bokeh_app.py --port 8000
+uv run bokeh serve --show server/bokeh_app --port 8000
 # Dashboard at http://localhost:8000
 ```
 
@@ -384,7 +385,7 @@ uv run python run_client.py
 
 **Or run standalone with local dashboard**:
 ```bash
-uv run bokeh serve --show tempsens/dashboard/bokeh_app.py
+uv run bokeh serve --show server/bokeh_app --port 8000
 ```
 
 ### Lab Server Deployment (Native Windows)
@@ -393,16 +394,38 @@ uv run bokeh serve --show tempsens/dashboard/bokeh_app.py
 
 **Configure sensors** — edit `server/config_server.ini` with Tailscale IPs for each Pi.
 
-**Run multi-sensor dashboard**:
+**The dashboard runs as a Windows service via WinSW.** See `server/SERVICE.md` for full setup, management, and troubleshooting details.
+
+**Quick reference:**
+```powershell
+C:\tools\BokehDashboard.exe status     # Check if running
+C:\tools\BokehDashboard.exe restart    # Restart (e.g. after git pull + uv sync)
+C:\tools\BokehDashboard.exe stop       # Stop
+```
+
+The service auto-starts on boot and auto-restarts on crash (10s/30s/60s escalating delay).
+
+**After updating code or dependencies:**
+```powershell
+cd C:\Users\main\temp_sensor
+git pull
+uv sync --group server
+C:\tools\BokehDashboard.exe restart
+```
+
+**Manual run (for development/debugging only):**
 ```powershell
 uv sync --group server
 
-uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=<SERVER_IP>:80
+uv run python -m bokeh serve server/bokeh_app --port 8000 --address 127.0.0.1 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=<SERVER_IP>:80
+```
 
-# Set up port 80 forwarding (one-time, PowerShell as Admin)
+**Network setup (one-time, PowerShell as Admin):**
+```powershell
+# Port 80 forwarding to Bokeh on 8000
 netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=8000 connectaddress=127.0.0.1
 
-# Add firewall rule
+# Firewall rule
 New-NetFirewallRule -DisplayName "Temperature Dashboard HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Any
 ```
 
@@ -469,7 +492,7 @@ User Browser → http://139.184.163.16
 ### Deployment Steps
 1. Deploy `run_client.py` on each Pi with unique `device_name` in `config.ini`
 2. Configure server's `config_server.ini` with all Pi API endpoints (Tailscale IPs)
-3. Run `bokeh serve server/bokeh_app.py` on lab server
+3. Install WinSW service on lab server (see `server/SERVICE.md`)
 4. Access dashboard from campus network
 
 ## WSL2 Deployment (Legacy, Not Recommended)

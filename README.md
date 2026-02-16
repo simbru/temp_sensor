@@ -1,6 +1,6 @@
 # Temperature Monitoring System
 
-A distributed temperature and humidity monitoring system for Raspberry Pi with multiple sensor support (DHT22, AHT20, BME280).
+A distributed temperature and humidity monitoring system for Raspberry Pi with multiple sensor support (DHT22, AHT20, BME280, Enviro+, Pimoroni Sensor Stick).
 
 **Features:**
 - Multi-sensor dashboard with real-time updates
@@ -33,17 +33,21 @@ netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connect
 New-NetFirewallRule -DisplayName "Temperature Dashboard HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Any
 
 # Run dashboard (replace <SERVER_IP> with your server's campus IP)
-uv run python -m bokeh serve server/bokeh_app.py --port 8000 --address 127.0.0.1 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=<SERVER_IP>:80
+uv run python -m bokeh serve server/bokeh_app --port 8000 --address 127.0.0.1 --allow-websocket-origin=localhost:8000 --allow-websocket-origin=<SERVER_IP>:80
 ```
 
 **Access:** `http://<SERVER_IP>/bokeh_app` from any campus computer
+
+**For production use**, the dashboard should run as a Windows service (auto-start on boot, auto-restart on crash). See `server/SERVICE.md` for WinSW setup.
 
 ### 2. Pi Client Setup (Raspberry Pi)
 
 **What you need:** Raspberry Pi with a supported temperature/humidity sensor:
 - **DHT22** wired to GPIO4 (digital sensor)
 - **AHT20** connected via I2C (more accurate, less prone to read failures)
-- **BME280** connected via I2C (includes pressure sensor for future expansion)
+- **BME280** connected via I2C (temp, humidity, pressure)
+- **Pimoroni Sensor Stick** via I2C cable (BME280 + LTR559 light sensor, cable-mounted away from CPU)
+- **Enviro+** board (temp, humidity, pressure, light, noise — with CPU heat compensation)
 
 ```bash
 # Install system dependencies
@@ -61,7 +65,7 @@ uv sync --group client --extra pi-hardware
 # Configure
 cp config.ini.example config.ini
 nano config.ini  # Set device_name = "Room 307"
-                 # Set sensor_type = "AUTO" (or "DHT22", "AHT20", "BME280")
+                 # Set sensor_type = "AUTO" (or "DHT22", "AHT20", "BME280", "SENSOR_STICK", "ENVIROPLUS")
 
 # Run client
 uv run python run_client.py
@@ -106,7 +110,9 @@ git pull  # Your configs won't be touched!
 - One of the following sensors:
   - **DHT22** - Digital temperature/humidity sensor
   - **AHT20** - I2C temperature/humidity sensor (more accurate, fewer read failures)
-  - **BME280** - I2C temp/humidity/pressure sensor (Pimoroni Enviro module)
+  - **BME280** - I2C temp/humidity/pressure sensor (Adafruit)
+  - **Pimoroni Multi-Sensor Stick** - BME280 + LTR559 via I2C cable (temp, humidity, pressure, light)
+  - **Enviro+** - Pimoroni board with BME280, LTR559, MEMS mic (temp, humidity, pressure, light, noise)
 
 #### DHT22 Wiring (GPIO)
 - **VCC (or +)** → Pin 1 (3.3V power)
@@ -133,22 +139,18 @@ git pull  # Your configs won't be touched!
 
 #### Sensor Auto-Detection
 
-The system automatically detects which sensor is connected. To manually specify:
+The system automatically detects which sensor is connected. Detection order: Enviro+ > Sensor Stick > AHT20 > BME280 > DHT22 > Simulated.
+
+To manually specify:
 
 ```ini
 # config.ini
-sensor_type = AUTO        # Auto-detect (default)
-# sensor_type = DHT22     # Force DHT22
-# sensor_type = AHT20     # Force AHT20
-# sensor_type = BME280    # Force BME280
-```
-
-On startup, the system will report which sensor it detected:
-```
-Auto-detecting sensors...
-  Checking for DHT22... Not found
-  Checking for AHT20... Found!
-Initialized AHT20 sensor
+sensor_type = AUTO           # Auto-detect (default)
+# sensor_type = DHT22        # Force DHT22
+# sensor_type = AHT20        # Force AHT20
+# sensor_type = BME280       # Force BME280
+# sensor_type = SENSOR_STICK # Force Pimoroni Multi-Sensor Stick
+# sensor_type = ENVIROPLUS   # Force Enviro+
 ```
 
 ### Software
@@ -209,17 +211,18 @@ sudo systemctl restart tempsens.service  # Restart
 sudo systemctl status tempsens.service   # Status
 ```
 
-### Windows Server (Task Scheduler)
+### Windows Server (WinSW Service)
 
-Use the automated installer (PowerShell as Administrator):
+The dashboard runs as a native Windows service via [WinSW](https://github.com/winsw/winsw). This provides auto-start on boot and auto-restart on crash with no console window.
+
+See [server/SERVICE.md](server/SERVICE.md) for full setup, management, and troubleshooting.
+
+**Quick reference:**
 ```powershell
-cd C:\path\to\temp_sensor
-.\install_dashboard_task.ps1
+C:\tools\BokehDashboard.exe status     # Check if running
+C:\tools\BokehDashboard.exe restart    # Restart
+C:\tools\BokehDashboard.exe stop       # Stop
 ```
-
-The script creates a Scheduled Task that auto-starts on boot with optional visible console window.
-
-**Manual setup:** See [DEPLOY_SERVER.md](DEPLOY_SERVER.md) for detailed instructions.
 
 ---
 
@@ -230,7 +233,7 @@ The script creates a Scheduled Task that auto-starts on boot with optional visib
 ```bash
 cd ~/temp_sensor
 git pull
-uv sync --extra pi  # Only if dependencies changed
+uv sync --extra pi-hardware  # Only if dependencies changed
 sudo systemctl restart tempsens.service
 ```
 
@@ -243,25 +246,16 @@ sudo journalctl -u tempsens.service -f  # View live logs
 ### On Windows Server
 
 ```powershell
-cd C:\users\main\temp_sensor
-Stop-ScheduledTask -TaskName TempDashboard
+cd C:\Users\main\temp_sensor
 git pull
-uv sync  # Only if dependencies changed
-Start-ScheduledTask -TaskName TempDashboard
+uv sync --group server    # Only if dependencies changed
+C:\tools\BokehDashboard.exe restart
 ```
 
 **Check it worked:**
 ```powershell
-Get-ScheduledTask -TaskName TempDashboard
-Get-Content logs\dashboard.log -Tail 50 -Wait
-```
-
-**Alternative (if running manually with visible console):**
-```powershell
-# Press Ctrl+C in the dashboard console window to stop
-git pull
-uv sync  # Only if dependencies changed
-.\start_dashboard_visible.ps1
+C:\tools\BokehDashboard.exe status
+type logs\BokehDashboard.err.log
 ```
 
 ### Common Issues After Update
@@ -270,20 +264,20 @@ uv sync  # Only if dependencies changed
 ```bash
 # Pi: Reinstall dependencies
 cd ~/temp_sensor
-uv sync --extra pi --reinstall
+uv sync --extra pi-hardware --reinstall
 sudo systemctl restart tempsens.service
 
 # Windows: Reinstall dependencies
-cd C:\users\main\temp_sensor
-uv sync --reinstall
-Start-ScheduledTask -TaskName TempDashboard
+cd C:\Users\main\temp_sensor
+uv sync --group server --reinstall
+C:\tools\BokehDashboard.exe restart
 ```
 
 **"Port already in use" (Windows):**
 ```powershell
 # Kill any lingering Python processes
 Get-Process | Where-Object {$_.Name -like "*python*"} | Stop-Process -Force
-Start-ScheduledTask -TaskName TempDashboard
+C:\tools\BokehDashboard.exe start
 ```
 
 **Service won't start (Pi):**
@@ -336,21 +330,27 @@ The dashboard accurately represents missing data to ensure scientific accuracy:
 
 ## API Reference
 
-Each Pi exposes a REST API:
+Each Pi exposes a REST API with v2 (preferred) and v1 (legacy) endpoints.
 
-**GET /status** - Device status and latest reading
+**GET /poll** (v2, preferred) - Single request returns data + metrics + hardware status + config
+```bash
+curl "http://<PI_IP>:5000/poll?limit=10"
+curl "http://<PI_IP>:5000/poll?since=1700000000000&limit=100"
+```
+
+**GET /status** (v1) - Device status and latest reading
 ```bash
 curl http://<PI_IP>:5000/status
 ```
 
-**GET /data/latest?limit=100** - Last N readings
+**GET /data/latest?limit=100** (v1) - Last N readings
 ```bash
 curl "http://<PI_IP>:5000/data/latest?limit=50"
 ```
 
-**GET /data/range?start=...&end=...** - Time range query
+**GET /data/range?start=...&end=...** (v1) - Time range query (timestamps in ms since epoch)
 ```bash
-curl "http://<PI_IP>:5000/data/range?start=2025-11-14%2010:00:00&end=2025-11-14%2012:00:00"
+curl "http://<PI_IP>:5000/data/range?start=1700000000000&end=1700100000000"
 ```
 
 ---
@@ -441,7 +441,7 @@ loginterval_s = 10                    # Seconds between sensor reads
 device_name = Room 307                # Display name
 api_port = 5000                       # API server port
 outputfile = templog.db               # Local SQLite database
-sensor_type = AUTO                    # AUTO, DHT22, AHT20, BME280, ENVIROPLUS, or SIMULATED
+sensor_type = AUTO                    # AUTO, DHT22, AHT20, BME280, SENSOR_STICK, ENVIROPLUS, or SIMULATED
 max_temp_delta_c = 3.0                # Spike filter: reject readings >3°C from last valid
 max_humidity_delta_pct = 10.0         # Spike filter: reject readings >10% from last valid
 enable_lcd_display = False            # Enable ST7735 LCD on Enviro+ boards
@@ -457,14 +457,18 @@ humidity_calibration_offset = 0.0
 ### Server (`server/config_server.ini`)
 ```ini
 [SERVER]
-poll_interval_s = 2                   # Seconds between polling sensors
+poll_interval_s = 30                  # Default poll interval (fallback)
+min_gap_threshold_s = 60              # Minimum gap before marking offline
 dashboard_port = 8000                 # Bokeh server port
 database_path = sensor_data.db        # SQLite cache
-dashboard_update_ms = 2000            # Dashboard refresh (ms)
+dashboard_update_ms = 5000            # Dashboard refresh (ms)
+max_plot_points = 50000               # Maximum data points on plot
 
 [SENSORS]
-Room_307 = http://<PI_IP_1>:5000
-Lab_Bench = http://<PI_IP_2>:5000
+# Format: sensor_name = url, poll_interval_s (optional)
+Room_307 = http://<PI_IP_1>:5000, 60        # Poll every 60s
+Lab_Bench = http://<PI_IP_2>:5000, 1        # Fast polling: 1s
+Incubator = http://<PI_IP_3>:5000           # Uses default: 30s
 ```
 
 ---
@@ -620,7 +624,7 @@ Test_Sensor_3 = http://localhost:5003, 2
 **4. Start dashboard manually:**
 ```bash
 # In a separate terminal
-uv run bokeh serve server/bokeh_app.py --show
+uv run bokeh serve server/bokeh_app --show
 # Opens at http://localhost:5006/bokeh_app
 ```
 
@@ -650,21 +654,22 @@ uv run bokeh serve server/bokeh_app.py --show
 
 ```
 ┌─────────────────┐
-│  Raspberry Pi   │  DHT22 → sensor.py → templog.db
-│                 │                   ↓
-│  FastAPI :5000  │  ←──── Serves data via REST API
+│  Raspberry Pi   │  Sensor → sensor.py → templog.db
+│                 │  (DHT22/AHT20/BME280/Sensor Stick/Enviro+)
+│  FastAPI :5000  │  ←──── Serves data via REST API (v2 /poll)
 └────────┬────────┘
          │
-         │ Campus Network / VPN
+         │ Tailscale VPN (100.x.x.x)
          │
-         ↓ HTTP polling every 2s
+         ↓ HTTP polling (configurable per sensor)
 ┌─────────────────┐
 │  Lab Server     │  data_aggregator.py → sensor_data.db
-│                 │                     ↓
+│  (Windows)      │                     ↓
 │  Bokeh :8000    │  ←──── Dashboard queries SQLite
+│  (WinSW svc)   │
 └────────┬────────┘
          │
-         │ Port 80 forwarding
+         │ Port 80 → 8000 (netsh portproxy)
          │
          ↓ WebSocket
 ┌─────────────────┐
@@ -808,4 +813,4 @@ MIT License
 
 ## Credits
 
-Built with [Bokeh](https://bokeh.org/), [FastAPI](https://fastapi.tiangolo.com/), [Adafruit DHT](https://github.com/adafruit/Adafruit_CircuitPython_DHT), and [uv](https://github.com/astral-sh/uv)
+Built with [Bokeh](https://bokeh.org/), [FastAPI](https://fastapi.tiangolo.com/), [Adafruit CircuitPython](https://github.com/adafruit/Adafruit_CircuitPython_DHT), [Pimoroni Enviro+](https://github.com/pimoroni/enviroplus-python), and [uv](https://github.com/astral-sh/uv)
