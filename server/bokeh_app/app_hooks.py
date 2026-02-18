@@ -21,7 +21,7 @@ def on_server_loaded(server_context):
     """Called when the Bokeh server starts, before any sessions are created."""
     logger.info("Bokeh server loaded — initializing aggregator and polling threads...")
     aggregator = get_aggregator()
-    logger.info(f"Aggregator ready, polling {len(aggregator._poll_threads)} sensors")
+    logger.info(f"Aggregator ready, polling {len(aggregator._polling_threads)} sensors")
 
 
 def on_server_unloaded(server_context):
