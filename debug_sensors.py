@@ -36,7 +36,7 @@ def test_dht22():
 
     except ImportError as e:
         print(f"✗ DHT22 libraries not available: {e}")
-        print("  Install with: uv sync --extra pi-hardware")
+        print("  Install with: uv sync --group client --extra pi-hardware")
         return False
 
 
@@ -297,6 +297,5 @@ if __name__ == "__main__":
     else:
         print("No sensors detected. Check wiring and library installation.")
         print("\nInstall options:")
-        print("  Adafruit sensors:  uv sync --extra pi-hardware")
-        print("  Pimoroni sensors:  pip install pimoroni-bme280 ltr559 smbus2")
-        print("  Enviro+ board:     uv sync --extra enviroplus")
+        print("  All sensors:    uv sync --group client --extra pi-hardware")
+        print("  Enviro+ board:  uv sync --group client --extra pi-hardware --extra enviroplus")

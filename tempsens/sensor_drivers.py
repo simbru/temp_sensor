@@ -83,7 +83,7 @@ class DHT22Sensor:
             import adafruit_dht
             import board
         except ImportError:
-            raise ImportError("adafruit_dht not available - install with 'uv sync --extra pi'")
+            raise ImportError("adafruit_dht not available - install with 'uv sync --group client --extra pi-hardware'")
 
         self.pin = pin if pin is not None else board.D4
         self._sensor = None  # Lazy initialization to avoid file descriptor leaks
@@ -517,7 +517,7 @@ class SensorStickSensor:
         except ImportError:
             raise ImportError(
                 "Pimoroni sensor libraries not available - install with: "
-                "uv sync --extra sensor-stick"
+                "uv sync --group client --extra pi-hardware"
             )
 
         self.bus = SMBus(1)

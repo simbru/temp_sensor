@@ -41,7 +41,7 @@ echo ""
 SERVICE_FILE="/tmp/tempsens.service"
 cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=Temperature Sensor Client (DHT22)
+Description=Temperature Sensor Client
 After=network-online.target tailscaled.service
 Wants=network-online.target
 

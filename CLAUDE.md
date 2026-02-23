@@ -90,19 +90,13 @@ uv run python run_client.py         # Run with simulated sensor data
 
 **On Raspberry Pi**:
 ```bash
-uv sync --extra pi-hardware         # Install with hardware sensor libraries
-uv run python run_client.py         # Run with real sensor (auto-detected or configured)
-```
-
-**On Raspberry Pi with Pimoroni Multi-Sensor Stick**:
-```bash
-uv sync --group client --extra sensor-stick
-uv run python run_client.py         # Run with BME280 + LTR559 (temp, humidity, pressure, light)
+uv sync --group client --extra pi-hardware   # Install with hardware sensor libraries
+uv run python run_client.py                  # Run with real sensor (auto-detected or configured)
 ```
 
 **On Raspberry Pi with Enviro+ board**:
 ```bash
-uv sync --extra pi-hardware --extra enviroplus
+uv sync --group client --extra pi-hardware --extra enviroplus
 uv run python run_client.py         # Includes LCD display if enabled in config
 ```
 
@@ -367,7 +361,7 @@ uv run python dev/run_full_test_environment.py
 
 **Install dependencies**:
 ```bash
-uv sync --extra pi-hardware
+uv sync --group client --extra pi-hardware
 ```
 
 **Configure device** — edit `config.ini`:

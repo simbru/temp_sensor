@@ -74,6 +74,62 @@ uv run python run_client.py
 **Note:** Client API runs on port 5000. Add this Pi's IP to server config.
 
 ---
+### Setup Steps
+
+**1. Install Tailscale client on each device:**
+
+**Raspberry Pi:**
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+**Windows Server:**
+- Download installer from [tailscale.com](https://tailscale.com/download)
+- Install and run
+
+**2. Connect to the lab's Tailscale network:**
+
+**On Raspberry Pi:**
+```bash
+# Authenticate with Tailscale (opens browser login)
+sudo tailscale up
+```
+
+Copy the URL shown and open it in a browser to authenticate. Contact the lab admin to be added to the shared Tailscale network.
+
+**On Windows Server:**
+- Open Tailscale app
+- Sign in with your account
+- Request access to the lab's tailnet from the admin
+
+**3. Verify connectivity:**
+
+```bash
+# Check Tailscale status
+tailscale status
+
+# Note the assigned private IP (100.x.x.x)
+tailscale ip -4
+
+# Test connectivity between server and Pi
+ping <tailscale-ip>
+```
+
+**4. Update server config to use Tailscale IPs:**
+
+Edit `server/config_server.ini`:
+```ini
+[SENSORS]
+Room_307 = http://100.x.x.x:5000   # Use the Tailscale IP from 'tailscale ip -4'
+Lab_Bench = http://100.x.x.x:5000
+Incubator = http://100.x.x.x:5000
+```
+
+**5. Configure auto-start:**
+
+Tailscale automatically starts on boot (systemd on Pi, Windows service on server). Sensors will reconnect after reboots without manual intervention.
+
+---
 
 ## Managing Configuration Files
 
@@ -233,7 +289,7 @@ C:\tools\BokehDashboard.exe stop       # Stop
 ```bash
 cd ~/temp_sensor
 git pull
-uv sync --extra pi-hardware  # Only if dependencies changed
+uv sync --group client --extra pi-hardware  # Only if dependencies changed
 sudo systemctl restart tempsens.service
 ```
 
@@ -264,7 +320,7 @@ type logs\BokehDashboard.err.log
 ```bash
 # Pi: Reinstall dependencies
 cd ~/temp_sensor
-uv sync --extra pi-hardware --reinstall
+uv sync --group client --extra pi-hardware --reinstall
 sudo systemctl restart tempsens.service
 
 # Windows: Reinstall dependencies
@@ -695,63 +751,6 @@ uv run bokeh serve server/bokeh_app --show
 - **Secure:** Encrypted peer-to-peer connections
 
 **User Access:** Dashboard users still access via the server's static campus IP - **no VPN needed for viewing the dashboard**.
-
----
-
-### Setup Steps
-
-**1. Install Tailscale client on each device:**
-
-**Raspberry Pi:**
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-```
-
-**Windows Server:**
-- Download installer from [tailscale.com](https://tailscale.com/download)
-- Install and run
-
-**2. Connect to the lab's Tailscale network:**
-
-**On Raspberry Pi:**
-```bash
-# Authenticate with Tailscale (opens browser login)
-sudo tailscale up
-```
-
-Copy the URL shown and open it in a browser to authenticate. Contact the lab admin to be added to the shared Tailscale network.
-
-**On Windows Server:**
-- Open Tailscale app
-- Sign in with your account
-- Request access to the lab's tailnet from the admin
-
-**3. Verify connectivity:**
-
-```bash
-# Check Tailscale status
-tailscale status
-
-# Note the assigned private IP (100.x.x.x)
-tailscale ip -4
-
-# Test connectivity between server and Pi
-ping <tailscale-ip>
-```
-
-**4. Update server config to use Tailscale IPs:**
-
-Edit `server/config_server.ini`:
-```ini
-[SENSORS]
-Room_307 = http://100.x.x.x:5000   # Use the Tailscale IP from 'tailscale ip -4'
-Lab_Bench = http://100.x.x.x:5000
-Incubator = http://100.x.x.x:5000
-```
-
-**5. Configure auto-start:**
-
-Tailscale automatically starts on boot (systemd on Pi, Windows service on server). Sensors will reconnect after reboots without manual intervention.
 
 ---
 

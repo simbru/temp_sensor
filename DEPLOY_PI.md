@@ -1,376 +1,186 @@
 # Raspberry Pi Deployment Guide
 
-Complete setup guide for deploying temperature sensor client on Raspberry Pi with auto-start on boot.
+Step-by-step setup for deploying a temperature sensor client on Raspberry Pi.
+
+Tested on Pi Zero 2W with Pi OS Lite (Bookworm/Trixie).
 
 ## Prerequisites
 
-- Raspberry Pi with Raspberry Pi OS installed
-- DHT22 sensor connected to GPIO4 (pin 7)
-- Network connectivity (WiFi or Ethernet)
+- Raspberry Pi with Pi OS installed (Lite or Desktop)
+- A supported sensor connected (see wiring in [README.md](README.md#hardware-pi-only))
 - SSH access to the Pi
+- Network connectivity (WiFi or Ethernet)
 
-## Initial Setup (One-Time)
+## Step 1: Install system packages
 
-### 1. Install System Dependencies
+Pi OS Lite doesn't include `git` or Python dev headers. Install them:
 
 ```bash
-# Update package lists
-sudo apt update
-
-# Install Python dependencies for DHT22 sensor
-sudo apt install -y python3-dev python3-pip libgpiod2
-
-# Install uv (Python package manager)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Add uv to PATH for current session
-source $HOME/.cargo/env
+sudo apt-get update
+sudo apt-get install -y python3-dev git
 ```
 
-### 2. Clone Repository
+**DHT22 only** — also install the GPIO daemon library:
+```bash
+sudo apt-get install -y libgpiod2
+```
+
+## Step 2: Clone the repository
 
 ```bash
-# Clone to home directory
 cd ~
-git clone https://github.com/YOUR_USERNAME/temp_sensor.git
+git clone https://github.com/simbru/temp_sensor temp_sensor
 cd temp_sensor
-
-# Install Python dependencies (including DHT22 hardware support)
-uv sync --extra pi
 ```
 
-### 3. Configure Sensor
+## Step 3: Install uv
 
 ```bash
-# Edit config file
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+```
+
+Verify it works:
+```bash
+uv --version
+```
+
+## Step 4: Enable I2C (if using an I2C sensor)
+
+**Skip this step if using DHT22.**
+
+Required for: AHT20, BME280, Sensor Stick, Enviro+.
+
+```bash
+sudo raspi-config
+```
+
+Navigate to: **Interface Options** > **I2C** > **Enable** > **Finish**
+
+Verify I2C is enabled:
+```bash
+ls /dev/i2c-1
+```
+
+## Step 5: Install Python dependencies
+
+Choose the command that matches your sensor:
+
+| Sensor | Install command |
+|--------|----------------|
+| DHT22, AHT20, BME280, Sensor Stick | `uv sync --group client --extra pi-hardware` |
+| Enviro+ | `uv sync --group client --extra pi-hardware --extra enviroplus` |
+
+**Important:** Always include `--group client` — it provides FastAPI and uvicorn for the API server.
+
+## Step 6: Configure
+
+```bash
+cp config.ini.example config.ini
 nano config.ini
 ```
 
-Set these values:
+Set at minimum:
 ```ini
-[DEFAULT]
-device_name = Room 307           # Descriptive name for this sensor
-api_port = 5000                  # Port for API server
-loginterval_s = 60               # Seconds between readings
-temp_offset_c = 0.0              # Calibration offset for temperature
-humidity_offset_pct = 0.0        # Calibration offset for humidity
+device_name = Room 307          # Unique name for this sensor
+sensor_type = AUTO              # Or: DHT22, AHT20, BME280, SENSOR_STICK, ENVIROPLUS
+loginterval_s = 10              # Seconds between readings
 ```
 
-Save and exit (Ctrl+X, Y, Enter).
+Save and exit (`Ctrl+X`, `Y`, `Enter`).
 
-### 4. Test Sensor Manually
+## Step 7: Test manually
 
 ```bash
-# Test that sensor works
 uv run python run_client.py
 ```
 
-You should see readings like:
+You should see sensor readings like:
 ```
-[2025-11-18 14:30:45] 22.3°C  45.2%
+[2026-02-18 16:16:26] 23.8°C  28.2%
 ```
 
-Press Ctrl+C to stop. If you see readings, the sensor is working!
+Press `Ctrl+C` to stop. If readings appear, the sensor is working.
 
-## Auto-Start Setup
+## Step 8: Install as a service
 
-### 5. Verify Tailscale Auto-Start
+This sets up auto-start on boot with automatic restart on failure:
 
 ```bash
-# Check if Tailscale service is enabled
-sudo systemctl status tailscaled
-
-# If not enabled, enable it
-sudo systemctl enable tailscaled
-
-# Verify Headscale connection
-tailscale status
-```
-
-Expected output: Should show your Headscale IP (e.g., 100.64.0.5) and "online" status.
-
-### 6. Install Sensor Service
-
-**Option A: Automatic install (recommended)**
-
-```bash
-# Run the install script (auto-detects username and paths)
 cd ~/temp_sensor
 bash install_service.sh
 ```
 
-The script will:
-- Auto-detect your username and home directory
-- Generate service file with correct paths
-- Install to systemd
-- Ask if you want to enable/start now
+The script auto-detects your username and paths, then asks to enable and start the service.
 
-**Option B: Manual install**
-
+Verify it's running:
 ```bash
-# Edit service file to match your username
-nano ~/temp_sensor/tempsens.service
-# Change "YOUR_USERNAME" to your actual username (e.g., weatherstation, pi, etc.)
-
-# Copy service file to systemd directory
-sudo cp ~/temp_sensor/tempsens.service /etc/systemd/system/
-
-# Reload systemd to recognize new service
-sudo systemctl daemon-reload
-
-# Enable service to start on boot
-sudo systemctl enable tempsens.service
-
-# Start service now (without rebooting)
-sudo systemctl start tempsens.service
-```
-
-### 7. Verify Service is Running
-
-```bash
-# Check service status
 sudo systemctl status tempsens.service
+sudo journalctl -u tempsens.service -f    # Live logs
 ```
 
-Expected output:
-```
-● tempsens.service - Temperature Sensor Client (DHT22)
-   Loaded: loaded (/etc/systemd/system/tempsens.service; enabled)
-   Active: active (running) since Mon 2025-11-18 14:30:00 UTC
-```
+## Step 9: Connect to server
 
-```bash
-# View live logs
-sudo journalctl -u tempsens.service -f
+On the lab server, add this Pi to `server/config_server.ini`:
+
+```ini
+[SENSORS]
+Room_307 = http://<PI_TAILSCALE_IP>:5000, 60
 ```
 
-You should see sensor readings scrolling by.
+Then restart the server dashboard. See [DEPLOY_SERVER.md](DEPLOY_SERVER.md) or [server/SERVICE.md](server/SERVICE.md).
 
-### 8. Test API Endpoint
+---
 
-```bash
-# From the Pi itself
-curl http://localhost:5000/status
-
-# From another machine on the network (use Pi's Headscale IP)
-curl http://100.64.0.5:5000/status
-```
-
-Expected output:
-```json
-{
-  "device_name": "Room 307",
-  "status": "running",
-  "ip": "100.64.0.5",
-  ...
-}
-```
-
-## Boot Sequence
-
-After setup, on **every boot**:
-
-1. **Pi boots** → Raspberry Pi OS starts
-2. **Network initializes** → WiFi/Ethernet connects
-3. **Tailscale starts** → `tailscaled.service` auto-starts, connects to Headscale
-4. **Sensor starts** → `tempsens.service` auto-starts after network is online
-5. **Readings begin** → Sensor starts logging, API available
-
-**No manual intervention required!**
-
-## Service Management Commands
-
-```bash
-# Start service
-sudo systemctl start tempsens.service
-
-# Stop service
-sudo systemctl stop tempsens.service
-
-# Restart service (after config changes)
-sudo systemctl restart tempsens.service
-
-# Check status
-sudo systemctl status tempsens.service
-
-# View logs (last 50 lines)
-sudo journalctl -u tempsens.service -n 50
-
-# View logs (live/follow mode)
-sudo journalctl -u tempsens.service -f
-
-# Disable auto-start
-sudo systemctl disable tempsens.service
-
-# Enable auto-start
-sudo systemctl enable tempsens.service
-```
-
-## Updating Code
-
-When you pull new code from git:
+## Updating
 
 ```bash
 cd ~/temp_sensor
 git pull
-uv sync --extra pi  # Update dependencies if needed
+uv sync --group client --extra pi-hardware   # Match your original install command
 sudo systemctl restart tempsens.service
+```
+
+## Service management
+
+```bash
+sudo systemctl status tempsens.service       # Check status
+sudo systemctl restart tempsens.service      # Restart (e.g. after config change)
+sudo systemctl stop tempsens.service         # Stop
+sudo journalctl -u tempsens.service -f       # Live logs
+sudo journalctl -u tempsens.service -n 50    # Last 50 lines
 ```
 
 ## Troubleshooting
 
+### "No module named 'uvicorn'" or missing FastAPI
+You installed sensor extras without `--group client`. Fix:
+```bash
+uv sync --group client --extra pi-hardware   # Adjust extras for your sensor
+```
+
+### "No such file or directory: '/dev/i2c-1'"
+I2C is not enabled. Run `sudo raspi-config` > Interface Options > I2C > Enable, then retry.
+
+### Sensor returns None / hardware failure
+- Check wiring matches your sensor type (see [README.md](README.md#hardware-pi-only))
+- For I2C sensors, verify detection: `i2cdetect -y 1`
+  - AHT20 → address `0x38`
+  - BME280 → address `0x76`
+- DHT22 checksum errors are normal (~20% failure rate) — the code retries automatically
+
 ### Service won't start
-
 ```bash
-# Check service status
-sudo systemctl status tempsens.service
-
-# Check detailed logs
-sudo journalctl -u tempsens.service -n 100
-
-# Common issues:
-# 1. Wrong WorkingDirectory in service file
-# 2. uv not in PATH
-# 3. Config file missing or invalid
+sudo journalctl -u tempsens.service -n 50    # Check error details
 ```
 
-### Sensor read failures
+Common causes: missing config.ini, wrong sensor_type, I2C not enabled, missing dependencies.
 
+### API not reachable from server
 ```bash
-# Check if sensor is connected to GPIO4
-# Check wiring: VCC → 3.3V, GND → GND, DATA → GPIO4
-
-# Test sensor manually
-cd ~/temp_sensor
-uv run python -c "from tempsens import io_funcs; io_funcs.log_data()"
-```
-
-### Tailscale not connected
-
-```bash
-# Check Tailscale status
-tailscale status
-
-# Reconnect to Headscale (replace with your server IP and auth key)
-sudo tailscale up --login-server=http://139.184.163.16:8080 --authkey=YOUR_KEY
-
-# Check Tailscale logs
-sudo journalctl -u tailscaled -n 50
-```
-
-### API not accessible from server
-
-```bash
-# On Pi: Check if API is listening
-netstat -tulpn | grep 5000
-
-# On Pi: Test locally
+# Test locally on Pi
 curl http://localhost:5000/status
 
-# On server: Test Headscale connectivity
-ping 100.64.0.5
-
-# On server: Test API
-curl http://100.64.0.5:5000/status
-
-# Common issues:
-# 1. Headscale connection down
-# 2. Wrong IP in server config
-# 3. Firewall blocking port 5000 (unlikely on Pi)
-```
-
-### Database corruption after power loss
-
-The sensor uses SQLite with WAL mode for crash safety, but SD card corruption can still occur with improper shutdowns.
-
-```bash
-# Check database integrity
-cd ~/temp_sensor
-uv run python -c "import sqlite3; conn = sqlite3.connect('templog.db'); conn.execute('PRAGMA integrity_check').fetchall()"
-
-# If corrupted, delete and restart (sensor will recreate)
-rm templog.db templog.db-wal templog.db-shm
-sudo systemctl restart tempsens.service
-```
-
-### Service log verbosity
-
-To increase logging verbosity, edit the service file:
-
-```bash
-sudo nano /etc/systemd/system/tempsens.service
-```
-
-Add to `[Service]` section:
-```
-Environment="TEMPSENS_DEBUG=1"
-```
-
-Then reload:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart tempsens.service
-```
-
-## Configuration Changes
-
-After modifying `config.ini`:
-
-```bash
-# Changes are picked up on restart
-sudo systemctl restart tempsens.service
-
-# No need to reinstall service unless service file itself changed
-```
-
-## Hardware Considerations
-
-**SD Card Longevity:**
-- SQLite is configured with SD card optimizations (see `tempsens/io_funcs.py:154-158`)
-- `synchronous=NORMAL` balances safety and write reduction
-- 64MB cache reduces write frequency
-- WAL mode minimizes write amplification
-
-**Power Supply:**
-- Use quality power supply (2.5A minimum for Pi 3/4)
-- Poor power can cause sensor read failures and SD corruption
-- Consider UPS or battery backup for critical deployments
-
-**Sensor Reliability:**
-- DHT22 occasionally fails reads (checksum errors) - this is normal
-- Code retries up to 5 times per reading
-- Spike filtering rejects physically impossible readings
-- Failed reads are not written to database (gaps shown in plots)
-
-## Security Notes
-
-- API has no authentication (relies on Headscale network isolation)
-- Only accessible via Headscale VPN (100.64.0.x IPs)
-- Not exposed to internet or campus network directly
-- Server dashboard provides the public interface
-
-## Next Steps
-
-After Pi is set up and running:
-
-1. Add Pi's Headscale IP to server's `config_server.ini`
-2. Restart server dashboard to see new sensor
-3. Verify data is flowing in dashboard
-4. Set calibration offsets if needed (compare to reference thermometer)
-
-## Additional Sensors
-
-To deploy additional Pis:
-
-1. Repeat this guide on each Pi
-2. Use unique `device_name` in each `config.ini`
-3. Each Pi gets unique Headscale IP automatically
-4. Add all sensors to server's `config_server.ini`
-
-Example `server/config_server.ini`:
-```ini
-[SENSORS]
-Room_307 = http://100.64.0.5:5000, 900     # 15 min intervals
-Lab_Bench = http://100.64.0.6:5000, 60     # 1 min intervals
-Incubator = http://100.64.0.7:5000, 10     # 10 sec intervals
+# Test from server
+curl http://<PI_IP>:5000/status
 ```

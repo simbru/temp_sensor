@@ -42,7 +42,7 @@ local-dev = [
 
 [project.optional-dependencies]
 # Pi-specific hardware (must be installed separately on Raspberry Pi)
-# Install with: uv sync --extra pi-hardware
+# Install with: uv sync --group client --extra pi-hardware
 pi-hardware = [
     # CircuitPython compatibility layer (provides board module)
     "adafruit-blinka; sys_platform == 'linux'",
@@ -51,11 +51,15 @@ pi-hardware = [
     "RPi.GPIO; sys_platform == 'linux'",
     # AHT20 sensor support
     "adafruit-circuitpython-ahtx0; sys_platform == 'linux'",
-    # BME280 sensor support (Enviro module)
+    # BME280 sensor support (Adafruit)
     "adafruit-circuitpython-bme280; sys_platform == 'linux'",
+    # Pimoroni Multi-Sensor Stick (BME280 + LTR559 via I2C)
+    "pimoroni-bme280; sys_platform == 'linux'",
+    "ltr559; sys_platform == 'linux'",
+    "smbus2; sys_platform == 'linux'",
 ]
 # Pimoroni Enviro+ support (BME280, light, noise sensors with LCD display)
-# Install with: uv sync --group client --extra enviroplus
+# Install with: uv sync --group client --extra pi-hardware --extra enviroplus
 # The client group provides fastapi and uvicorn for the API server
 enviroplus = [
     # Use the official Pimoroni enviroplus package which bundles all dependencies
@@ -64,12 +68,5 @@ enviroplus = [
     "setuptools",  # Required by fonts package (uses pkg_resources)
     "fonts",  # Font management
     "font-roboto",  # Roboto font (RobotoMedium used by Pimoroni examples)
-]
-# Pimoroni Multi-Sensor Stick (BME280 + LTR559 via I2C)
-# Install with: uv sync --extra sensor-stick
-sensor-stick = [
-    "pimoroni-bme280; sys_platform == 'linux'",
-    "ltr559; sys_platform == 'linux'",
-    "smbus2; sys_platform == 'linux'",
 ]
 
