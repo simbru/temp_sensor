@@ -418,7 +418,9 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
         cursor = conn.cursor()
 
         # Build query based on parameters
-        if limit is not None and not start_time and not end_time:
+        # `is None`, not falsiness: start_time=0 is a real bound ("from the epoch") and must
+        # page oldest-first, not fall through to "last N readings".
+        if limit is not None and start_time is None and end_time is None:
             # Original behavior: get last N readings regardless of range
             query = """
                 SELECT timestamp, temperature, humidity, pressure, light, noise
@@ -435,10 +437,10 @@ def fetch_log_data_range(filename=FILENAME, start_time=None, end_time=None, limi
             conditions = []
             params = []
 
-            if start_time:
+            if start_time is not None:
                 conditions.append("timestamp >= ?")
                 params.append(start_time)
-            if end_time:
+            if end_time is not None:
                 conditions.append("timestamp <= ?")
                 params.append(end_time)
 

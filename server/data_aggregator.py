@@ -57,7 +57,9 @@ class DataAggregator:
         self._resync_batch_limit = 5000
         self._resync_timeout = max(15, poll_interval * 2)
         self._min_gap_threshold = min_gap_threshold
-        self._start_of_time = 0  # INTEGER timestamp: Unix epoch (Jan 1, 1970)
+        # INTEGER timestamp just after the Unix epoch. Not 0: clients treat start=0 as
+        # "no start" and return the newest rows instead of the oldest.
+        self._start_of_time = 1
         self._stop_polling = threading.Event()
         self._polling_threads = {}  # Map sensor_name -> thread
         self._start_time = None  # Will be set from database in _init_database()
@@ -325,51 +327,38 @@ class DataAggregator:
                                 self._record_counts[sensor_name] = \
                                     self._record_counts.get(sensor_name, 0) + inserted
 
-                        elif op_type == "insert_warm":
-                            # Retention: insert 1-min aggregated rows
-                            _, agg_table, rows = op
-                            cursor = conn.cursor()
-                            cursor.executemany(
-                                f"INSERT OR IGNORE INTO {agg_table} "
-                                f"(bucket_start, count, "
-                                f"temperature_avg, temperature_min, temperature_max, "
-                                f"humidity_avg, humidity_min, humidity_max, "
-                                f"pressure_avg, light_avg, noise_avg) "
-                                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                rows
-                            )
-                            conn.commit()
-
-                        elif op_type == "insert_cold":
-                            # Retention: insert 15-min aggregated rows
-                            _, agg_table, rows = op
-                            cursor = conn.cursor()
-                            cursor.executemany(
-                                f"INSERT OR IGNORE INTO {agg_table} "
-                                f"(bucket_start, count, "
-                                f"temperature_avg, temperature_min, temperature_max, "
-                                f"humidity_avg, humidity_min, humidity_max, "
-                                f"pressure_avg, light_avg, noise_avg) "
-                                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                rows
-                            )
-                            conn.commit()
-
-                        elif op_type == "delete_old":
-                            # Retention: delete rows older than cutoff
-                            _, table_name, cutoff_ms, ts_column = op
-                            ts_col = ts_column or "timestamp"
+                        elif op_type == "retain_tier":
+                            # Retention: aggregate rows below the cutoff into the next tier and
+                            # delete them in ONE transaction. The select runs here, at write
+                            # time, so it covers exactly the rows being deleted, and a failed
+                            # insert rolls back the delete instead of losing the rows.
+                            _, src_table, dst_table, select_sql, ts_col, cutoff_ms = op
                             cursor = conn.cursor()
                             cursor.execute(
-                                f"DELETE FROM {table_name} WHERE {ts_col} < ?",
+                                f"INSERT OR IGNORE INTO {dst_table} "
+                                f"(bucket_start, count, "
+                                f"temperature_avg, temperature_min, temperature_max, "
+                                f"humidity_avg, humidity_min, humidity_max, "
+                                f"pressure_avg, light_avg, noise_avg) "
+                                f"{select_sql}",
+                                (cutoff_ms,)
+                            )
+                            aggregated = cursor.rowcount
+                            cursor.execute(
+                                f"DELETE FROM {src_table} WHERE {ts_col} < ?",
                                 (cutoff_ms,)
                             )
                             conn.commit()
-                            logger.info(f"Retention: deleted {cursor.rowcount} rows from {table_name}")
+                            if aggregated > 0 or cursor.rowcount > 0:
+                                logger.info(
+                                    f"Retention: {src_table} -> {dst_table}: "
+                                    f"{aggregated} buckets written, {cursor.rowcount} rows deleted"
+                                )
 
                         break  # Success — exit retry loop
 
                     except sqlite3.OperationalError as e:
+                        conn.rollback()  # never leave a half-applied op to be committed by the next one
                         if "database is locked" in str(e) and attempt < max_retries - 1:
                             logger.warning(f"DB write retry {attempt + 1}/{max_retries}: {e}")
                             time.sleep(0.1 * (attempt + 1))
@@ -382,6 +371,7 @@ class DataAggregator:
 
             except Exception as e:
                 logger.error(f"Error in writer thread: {e}", exc_info=True)
+                conn.rollback()
                 # Still mark as done to avoid blocking join()
                 try:
                     self._write_queue.task_done()
@@ -408,7 +398,7 @@ class DataAggregator:
         # Replace spaces and special chars with underscores
         return "sensor_" + "".join(c if c.isalnum() else "_" for c in sensor_name).lower()
 
-    def _backfill_all_historical_data(self, sensor_name: str) -> str:
+    def _backfill_all_historical_data(self, sensor_name: str, since_ts: int = 1) -> str:
         """
         Backfill all historical data from a sensor on initial sync.
 
@@ -416,6 +406,7 @@ class DataAggregator:
 
         Args:
             sensor_name: Name of sensor to backfill
+            since_ts: First timestamp to fetch (INTEGER ms, must be > 0)
 
         Returns:
             "ok" if data was successfully backfilled,
@@ -434,7 +425,9 @@ class DataAggregator:
         BATCH_TIMEOUT = 30
 
         total_inserted = 0
-        since_ts = 0  # Start from epoch (ensures ORDER BY timestamp ASC on client)
+        # since_ts must be > 0: clients treat start=0 as "no start" and return the
+        # NEWEST rows, which made pagination stop after a single batch.
+        since_ts = max(since_ts, 1)
 
         try:
             while True:
@@ -519,6 +512,11 @@ class DataAggregator:
             last_timestamp = self._fetch_last_timestamp(table_name)
             logger.debug(f"Last timestamp in DB for {sensor_name}: {last_timestamp}")
 
+            # Raw rows are purged after hot_retention_days, so after a long outage the raw
+            # table can be empty while older data lives on in the aggregate tables. Resume
+            # after the newest aggregate instead of treating the sensor as brand new.
+            aggregate_end = self._fetch_aggregate_end(table_name) if last_timestamp is None else None
+
             # If this is the first sync (no data in server DB), do full historical backfill
             if last_timestamp is None and sensor_name not in self._empty_backfill_completed:
                 if sensor_name in self._backfill_in_progress:
@@ -529,7 +527,9 @@ class DataAggregator:
                     logger.info(f"First sync detected for {sensor_name}, initiating full historical backfill")
                     # Show "syncing" immediately so dashboard doesn't display stale error
                     self._update_metadata(sensor_name, device_ip=device_ip, status="syncing", error=None)
-                    backfill_result = self._backfill_all_historical_data(sensor_name)
+                    backfill_result = self._backfill_all_historical_data(
+                        sensor_name, since_ts=aggregate_end or self._start_of_time
+                    )
                     if backfill_result == "ok":
                         last_timestamp = self._fetch_last_timestamp(table_name)
                     elif backfill_result == "empty":
@@ -543,6 +543,9 @@ class DataAggregator:
                         return
                 finally:
                     self._backfill_in_progress.discard(sensor_name)
+
+            if last_timestamp is None and aggregate_end is not None:
+                last_timestamp = aggregate_end - 1  # poll/resync from the end of the aggregates
 
             # Try v2 consolidated poll first (1 HTTP request instead of 1-4)
             api_version = self.client.get_sensor_api_version(sensor_name)
@@ -1216,7 +1219,6 @@ class DataAggregator:
         warm_cutoff_ms = now_ms - (self._warm_retention_days * 86400 * 1000)
 
         sensor_names = self.client.get_all_sensor_names()
-        total_aggregated = 0
         total_deleted = 0
 
         for sensor_name in sensor_names:
@@ -1225,63 +1227,51 @@ class DataAggregator:
             cold_table = f"{table_name}_15min"
 
             try:
-                agg, deleted = self._retain_sensor(
+                total_deleted += self._retain_sensor(
                     table_name, warm_table, cold_table,
                     hot_cutoff_ms, warm_cutoff_ms
                 )
-                total_aggregated += agg
-                total_deleted += deleted
             except Exception as e:
                 logger.error(f"Retention failed for {sensor_name}: {e}")
 
-        if total_aggregated > 0 or total_deleted > 0:
-            logger.info(
-                f"Retention complete: aggregated {total_aggregated:,} buckets, "
-                f"deleted {total_deleted:,} raw rows"
-            )
+        if total_deleted > 0:
+            logger.info(f"Retention queued: {total_deleted:,} raw rows to aggregate and purge")
 
     def _retain_sensor(self, table_name, warm_table, cold_table,
                        hot_cutoff_ms, warm_cutoff_ms):
-        """Run retention for a single sensor. Returns (aggregated_count, deleted_count)."""
+        """Queue retention for a single sensor. Returns the number of raw rows being aggregated."""
         conn = self._get_read_conn()
         cursor = conn.cursor()
-        aggregated = 0
-        deleted = 0
 
-        # ── Step 1: Aggregate raw → warm (1-min buckets) ──────────────
-        # Find the latest bucket already aggregated so we don't redo work
-        cursor.execute(f"SELECT MAX(bucket_start) FROM {warm_table}")
-        row = cursor.fetchone()
-        warm_start_ms = row[0] if row and row[0] is not None else 0
-
-        # Only aggregate data that is older than hot_cutoff AND newer than last warm bucket
+        # Cutoffs are aligned to bucket boundaries so a bucket is only ever built once,
+        # from complete data. Everything below a cutoff is aggregated (no "newer than the
+        # last bucket" bound, which skipped late/backfilled rows) and deleted in the same
+        # transaction by the writer, so no row is ever deleted without being aggregated.
         bucket_ms = self._warm_resolution_s * 1000
-        cursor.execute(f"""
-            SELECT
-                (timestamp / {bucket_ms}) * {bucket_ms} AS bucket,
-                COUNT(*) AS cnt,
-                AVG(temperature), MIN(temperature), MAX(temperature),
-                AVG(humidity), MIN(humidity), MAX(humidity),
-                AVG(pressure), AVG(light), AVG(noise)
-            FROM {table_name}
-            WHERE timestamp < ? AND timestamp > ?
-            GROUP BY bucket
-            ORDER BY bucket
-        """, (hot_cutoff_ms, warm_start_ms))
-
-        warm_rows = cursor.fetchall()
-        if warm_rows:
-            # Submit aggregated rows via write queue
-            self._submit_write(("insert_warm", warm_table, warm_rows))
-            aggregated += len(warm_rows)
-
-        # ── Step 2: Aggregate warm → cold (15-min buckets) ────────────
-        cursor.execute(f"SELECT MAX(bucket_start) FROM {cold_table}")
-        row = cursor.fetchone()
-        cold_start_ms = row[0] if row and row[0] is not None else 0
-
         cold_bucket_ms = self._cold_resolution_s * 1000
-        cursor.execute(f"""
+        hot_cutoff_ms = (hot_cutoff_ms // bucket_ms) * bucket_ms
+        warm_cutoff_ms = (warm_cutoff_ms // cold_bucket_ms) * cold_bucket_ms
+
+        # ── Step 1: raw → warm (1-min buckets), then delete those raw rows ──
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE timestamp < ?",
+                       (hot_cutoff_ms,))
+        deleted = cursor.fetchone()[0]
+        if deleted > 0:
+            self._submit_write(("retain_tier", table_name, warm_table, f"""
+                SELECT
+                    (timestamp / {bucket_ms}) * {bucket_ms} AS bucket,
+                    COUNT(*),
+                    AVG(temperature), MIN(temperature), MAX(temperature),
+                    AVG(humidity), MIN(humidity), MAX(humidity),
+                    AVG(pressure), AVG(light), AVG(noise)
+                FROM {table_name}
+                WHERE timestamp < ?
+                GROUP BY bucket
+            """, "timestamp", hot_cutoff_ms))
+
+        # ── Step 2: warm → cold (15-min buckets), then delete those warm rows ──
+        # Always queued: step 1 may have just produced warm rows older than warm_cutoff.
+        self._submit_write(("retain_tier", warm_table, cold_table, f"""
             SELECT
                 (bucket_start / {cold_bucket_ms}) * {cold_bucket_ms} AS bucket,
                 SUM(count),
@@ -1293,23 +1283,11 @@ class DataAggregator:
                 SUM(light_avg * count) / SUM(count),
                 SUM(noise_avg * count) / SUM(count)
             FROM {warm_table}
-            WHERE bucket_start < ? AND bucket_start > ?
+            WHERE bucket_start < ?
             GROUP BY bucket
-            ORDER BY bucket
-        """, (warm_cutoff_ms, cold_start_ms))
+        """, "bucket_start", warm_cutoff_ms))
 
-        cold_rows = cursor.fetchall()
-        if cold_rows:
-            self._submit_write(("insert_cold", cold_table, cold_rows))
-            aggregated += len(cold_rows)
-
-        # ── Step 3: Delete raw rows older than hot tier ───────────────
-        cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE timestamp < ?",
-                       (hot_cutoff_ms,))
-        delete_count = cursor.fetchone()[0]
-        if delete_count > 0:
-            self._submit_write(("delete_old", table_name, hot_cutoff_ms, None))
-            deleted += delete_count
+        if deleted > 0:
             # Update in-memory record count
             sensor_name_key = None
             for sn in self._record_counts:
@@ -1318,17 +1296,10 @@ class DataAggregator:
                     break
             if sensor_name_key:
                 self._record_counts[sensor_name_key] = max(
-                    0, self._record_counts.get(sensor_name_key, 0) - delete_count
+                    0, self._record_counts.get(sensor_name_key, 0) - deleted
                 )
 
-        # ── Step 4: Delete warm rows older than warm tier ─────────────
-        cursor.execute(f"SELECT COUNT(*) FROM {warm_table} WHERE bucket_start < ?",
-                       (warm_cutoff_ms,))
-        warm_delete = cursor.fetchone()[0]
-        if warm_delete > 0:
-            self._submit_write(("delete_old", warm_table, warm_cutoff_ms, "bucket_start"))
-
-        return aggregated, deleted
+        return deleted
 
     def _poll_sensor_loop(self, sensor_name: str, poll_interval: int):
         """
@@ -1499,6 +1470,18 @@ class DataAggregator:
         cursor = conn.cursor()
         cursor.execute(f"SELECT MAX(timestamp) FROM {table_name}")
         return cursor.fetchone()[0]
+
+    def _fetch_aggregate_end(self, table_name: str) -> Optional[int]:
+        """End (exclusive, INTEGER ms) of the newest 1-min/15-min aggregate bucket, or None."""
+        conn = self._get_read_conn()
+        cursor = conn.cursor()
+        ends = []
+        for suffix, resolution_s in (("_1min", self._warm_resolution_s), ("_15min", self._cold_resolution_s)):
+            cursor.execute(f"SELECT MAX(bucket_start) FROM {table_name}{suffix}")
+            bucket_start = cursor.fetchone()[0]
+            if bucket_start is not None:
+                ends.append(bucket_start + resolution_s * 1000)
+        return max(ends) if ends else None
 
     def _check_gap_in_data(self, sensor_data: Dict, last_timestamp: Optional[int]) -> bool:
         """
