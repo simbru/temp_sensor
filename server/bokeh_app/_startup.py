@@ -10,6 +10,7 @@ import logging.handlers
 import pathlib
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from server.api_client import MultiSensorClient
 from server.data_aggregator import DataAggregator
@@ -98,6 +99,9 @@ def load_server_config():
     db_path = config.get("SERVER", "database_path", fallback="sensor_data.db")
     update_ms = int(config.get("SERVER", "dashboard_update_ms", fallback="10000"))
     max_plot_points = int(config.get("SERVER", "max_plot_points", fallback="50000"))
+    # Points sent to the browser per view (LTTB target). Zooming re-downsamples the visible
+    # slice, so this only needs to match screen resolution; more makes rendering slow.
+    display_points = min(int(config.get("SERVER", "display_points", fallback="5000")), max_plot_points)
 
     retention_config = {
         "hot_retention_days": int(config.get("RETENTION", "hot_retention_days", fallback="7")),
@@ -106,13 +110,15 @@ def load_server_config():
         "cold_resolution_s": int(config.get("RETENTION", "cold_resolution_s", fallback="900")),
     }
 
-    return sensor_configs, poll_interval, min_gap_threshold, db_path, update_ms, max_plot_points, retention_config
+    return (sensor_configs, poll_interval, min_gap_threshold, db_path, update_ms, max_plot_points,
+            display_points, retention_config)
 
 
 # Load config once at import time
-sensor_configs, poll_interval, min_gap_threshold, db_path, dashboard_update_ms, max_plot_points, retention_config = load_server_config()
+(sensor_configs, poll_interval, min_gap_threshold, db_path, dashboard_update_ms, max_plot_points,
+ display_points, retention_config) = load_server_config()
 logger.info(f"Loaded {len(sensor_configs)} sensor configurations")
-logger.info(f"Max plot points: {max_plot_points:,}")
+logger.info(f"Max plot points: {max_plot_points:,} (display: {display_points:,} per view)")
 logger.info(f"Retention: hot={retention_config['hot_retention_days']}d, warm={retention_config['warm_retention_days']}d")
 
 
@@ -120,6 +126,13 @@ logger.info(f"Retention: hot={retention_config['hot_retention_days']}d, warm={re
 # Store in sys module so it survives Bokeh's per-session module reloads.
 if not hasattr(sys, '_temp_sensor_singletons'):
     setattr(sys, '_temp_sensor_singletons', {'lock': threading.Lock()})
+
+# Dashboard sessions run their DB queries and data preparation here instead of on
+# the Tornado event loop, so one session's long load doesn't freeze the others.
+_store = getattr(sys, '_temp_sensor_singletons')
+if 'load_executor' not in _store:
+    _store['load_executor'] = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dashboard-load")
+load_executor = _store['load_executor']
 
 
 def get_aggregator() -> DataAggregator:

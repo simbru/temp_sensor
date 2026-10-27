@@ -233,10 +233,17 @@ CREATE INDEX idx_timestamp ON sensor_data(timestamp DESC);
 - Real-time status indicators for each sensor
 - **Gap visualization**: Server-side NaN marker insertion
   - Timestamps from aggregator are milliseconds since epoch (float)
-  - `_insert_gap_markers()` detects gaps > configured threshold
-  - Prevents moving average from falsely interpolating across outages
-  - Small glitches (< threshold): lines connect across gaps
-  - Large outages (> threshold): visual breaks in both raw and moving average lines
+  - `_insert_gap_markers_multi()` inserts one NaN per gap; a gap is a step > 3× the *local*
+    sampling interval (rolling median), so mixed raw / 1-min / 15-min retention tiers only
+    break at real outages
+  - `_segment_rolling_mean()` restarts the moving average after each gap, so it never
+    interpolates across outages
+- **Background loads**: window/sensor/MA changes run fetch + prepare on a shared thread pool
+  (`load_executor` in `_startup.py`), never on the Tornado loop; newer requests supersede
+  older ones (`load_state["generation"]`)
+- **Point budget**: `display_points` (default 5000) LTTB points per view; zoom/pan
+  re-downsamples the visible slice from the cached raw data (`view_range`)
+- **Day lines**: one `vspan` renderer per plot sharing `day_boundary_source`; toggled in the browser
 
 **Database Schema (Server):**
 ```sql
@@ -316,6 +323,7 @@ dashboard_port = 8000
 database_path = sensor_data.db
 dashboard_update_ms = 5000     # Dashboard refresh rate
 max_plot_points = 50000        # Maximum data points on plot
+display_points = 5000          # LTTB target per view (optional); zoom/pan re-downsamples the visible slice
 
 [SENSORS]
 # Format: sensor_name = url, poll_interval_s

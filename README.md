@@ -519,6 +519,7 @@ dashboard_port = 8000                 # Bokeh server port
 database_path = sensor_data.db        # SQLite cache
 dashboard_update_ms = 5000            # Dashboard refresh (ms)
 max_plot_points = 50000               # Maximum data points on plot
+display_points = 5000                 # Points per view (optional; zooming re-samples the visible range)
 
 [SENSORS]
 # Format: sensor_name = url, poll_interval_s (optional)
