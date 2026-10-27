@@ -7,6 +7,7 @@ import math
 import pathlib
 import sys
 import time
+from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -17,13 +18,15 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from bokeh.plotting import figure, curdoc
-from bokeh.models import ColumnDataSource, Button, Spinner, Range1d, Toggle, CustomJS, Select, Span
+from bokeh.events import ConnectionLost
+from bokeh.models import ColumnDataSource, Button, Spinner, Range1d, Toggle, CustomJS, Select
 from bokeh.layouts import column, row
 from bokeh.models.widgets import Div
 
 from server.lttb import lttb_downsample
 from server.bokeh_app._startup import (
     get_aggregator, sensor_configs, poll_interval, dashboard_update_ms, max_plot_points,
+    display_points, load_executor,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +46,9 @@ TEMP_CENTER_DEADBAND = 0.25
 HUM_CENTER_DEADBAND = 2.0
 MAX_FETCH_SAMPLES = 200000
 FETCH_PADDING_SAMPLES = 200
+CUSTOM_WINDOW_DEBOUNCE_MS = 400  # Wait for spinner clicks to settle before reloading
+ZOOM_DETAIL_DEBOUNCE_MS = 300  # Wait for zoom/pan to settle before re-downsampling the view
+ZOOM_DETAIL_MARGIN = 0.5  # Also prepare half a view width either side, so short pans stay filled
 
 UPDATE_INTERVAL = dashboard_update_ms
 SAMPLE_INTERVAL_SECONDS = poll_interval  # Approximate
@@ -213,10 +219,6 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
             result["noise_ma"] = noises
         return result
 
-    # Note: Removed simple downsampling as it caused "snaking" artifacts
-    # Smart windowing now limits data at fetch time instead
-    # Future: Could implement LTTB algorithm here for "All data" view
-
     # Always insert NaN markers for large gaps (sensor offline), but threshold depends on connect_points
     # - connect_points=True: Only show breaks for 3+ missed readings (large outages)
     # - connect_points=False: Show breaks for 1.5+ missed readings (more sensitive)
@@ -226,11 +228,9 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
             gap_threshold = log_interval_s * 3.0  # 3x log interval = 3 missed readings
         else:
             gap_threshold = log_interval_s * 1.5  # 1.5x log interval = 1-2 missed readings
-        expected_interval_s = log_interval_s  # Use actual sensor interval
     else:
         # Fallback for unknown log interval
         gap_threshold = 180 if connect_points else 60
-        expected_interval_s = 2  # Fallback typical interval
 
     # Build list of all arrays to process together (ensures same gap markers for all)
     arrays_to_process = [temps, hums]
@@ -253,9 +253,8 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
 
     # Insert gap markers for ALL sensor arrays in a single pass
     # This ensures all arrays get the same gap markers at the same positions
-    result_arrays = _insert_gap_markers_multi(time_vals, arrays_to_process,
-                                               gap_threshold_s=gap_threshold,
-                                               expected_interval_s=expected_interval_s)
+    result_arrays, marker_mask = _insert_gap_markers_multi(time_vals, arrays_to_process,
+                                                            gap_threshold_s=gap_threshold)
 
     # Unpack results
     time_vals = result_arrays[0]
@@ -274,12 +273,9 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
 
     window = max(int(window_size), 1)
 
-    # Calculate rolling average, properly handling NaN gaps
-    # pandas rolling().mean() automatically skips NaN values when calculating the mean,
-    # so gaps (NaN markers) won't corrupt the moving average on either side.
-    # min_periods=1 ensures MA starts immediately after a gap with available data.
-    temp_ma = pd.Series(temps).rolling(window=window, min_periods=1).mean().to_numpy()
-    hum_ma = pd.Series(hums).rolling(window=window, min_periods=1).mean().to_numpy()
+    # Moving averages restart after each gap marker so they never bridge an outage
+    temp_ma = _segment_rolling_mean(temps, marker_mask, window)
+    hum_ma = _segment_rolling_mean(hums, marker_mask, window)
 
     result = {
         "time": time_vals,
@@ -295,21 +291,21 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
     
     if has_pressure and pressures is not None and len(pressures) == n_points:
         result["pressure"] = pressures
-        result["pressure_ma"] = pd.Series(pressures).rolling(window=window, min_periods=1).mean().to_numpy()
+        result["pressure_ma"] = _segment_rolling_mean(pressures, marker_mask, window)
     else:
         result["pressure"] = np.full(n_points, np.nan)
         result["pressure_ma"] = np.full(n_points, np.nan)
-    
+
     if has_light and lights is not None and len(lights) == n_points:
         result["light"] = lights
-        result["light_ma"] = pd.Series(lights).rolling(window=window, min_periods=1).mean().to_numpy()
+        result["light_ma"] = _segment_rolling_mean(lights, marker_mask, window)
     else:
         result["light"] = np.full(n_points, np.nan)
         result["light_ma"] = np.full(n_points, np.nan)
-    
+
     if has_noise and noises is not None and len(noises) == n_points:
         result["noise"] = noises
-        result["noise_ma"] = pd.Series(noises).rolling(window=window, min_periods=1).mean().to_numpy()
+        result["noise_ma"] = _segment_rolling_mean(noises, marker_mask, window)
     else:
         result["noise"] = np.full(n_points, np.nan)
         result["noise_ma"] = np.full(n_points, np.nan)
@@ -324,267 +320,95 @@ def prepare_source_data(raw_data, window_size, max_points=None, connect_points=F
         elapsed = time.perf_counter() - t0
         logger.info(f"LTTB downsampling: {pre_lttb_count:,} → {len(result['time']):,} points in {elapsed:.3f}s")
 
-    return result
+    return _to_wire_dtypes(result)
 
 
-def _insert_gap_markers(time_vals, temps, hums, gap_threshold_s=60, expected_interval_s=2):
+def _to_wire_dtypes(columns):
+    """float64 time (ms epoch needs the precision), float32 for everything else (halves payload)."""
+    return {
+        key: np.asarray(values, dtype=np.float64 if key == "time" else np.float32)
+        for key, values in columns.items()
+    }
+
+
+GAP_INTERVAL_MULTIPLE = 3.0  # A gap is a step > 3x the local sampling interval
+GAP_MEDIAN_WINDOW = 51  # Neighbouring steps used to estimate the local sampling interval
+
+
+def _insert_gap_markers_multi(time_vals, data_arrays, gap_threshold_s=60):
     """
-    Insert NaN at time gaps to show missing data in plots.
+    Insert one NaN marker into every time gap, for multiple aligned arrays at once.
 
-    Uses adaptive gap detection that auto-detects the actual logging interval
-    from the data itself, making it robust to changes in sensor logging rate.
-
-    IMPORTANT: time_vals are milliseconds since epoch (float), not ISO strings.
-    This is the format returned by data_aggregator for Bokeh plotting.
-
-    Args:
-        time_vals: Millisecond timestamps (float) - NOT ISO strings
-        temps: Temperature values
-        hums: Humidity values
-        gap_threshold_s: Fallback gap threshold if auto-detection fails (default 60s)
-        expected_interval_s: Fallback interval if auto-detection fails (default 2s)
-
-    Returns:
-        Tuple of (times, temps, hums) with NaN inserted at gaps
-    """
-    if len(time_vals) < 2:
-        return time_vals, temps, hums
-
-    # Calculate time gaps directly from milliseconds (avoid datetime conversion)
-    time_diffs_ms = np.diff(time_vals)
-    time_diffs_s = time_diffs_ms / 1000.0
-
-    # ADAPTIVE GAP DETECTION:
-    # Calculate global median interval to understand typical logging rate
-    # Filter out extreme outliers (> 10x median) to avoid skewing by sensor outages
-    median_interval = np.median(time_diffs_s)
-
-    # Filter time_diffs for baseline calculation (remove outliers)
-    reasonable_diffs = time_diffs_s[time_diffs_s < median_interval * 10]
-
-    if len(reasonable_diffs) > 0:
-        # Use 95th percentile of reasonable intervals as baseline
-        baseline_interval = np.percentile(reasonable_diffs, 95)
-    else:
-        # Fallback if all data is outliers (shouldn't happen)
-        baseline_interval = expected_interval_s
-
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.debug(f"Gap detection - Median interval: {median_interval:.1f}s, Baseline (95th percentile): {baseline_interval:.1f}s")
-
-    # Detect gaps using adaptive threshold
-    # A gap is significant if it's 3x the baseline interval
-    adaptive_gap_threshold = max(baseline_interval * 3, gap_threshold_s)
-    gap_mask = time_diffs_s > adaptive_gap_threshold
-    gap_indices = np.where(gap_mask)[0] + 1  # +1 because diff shifts indices
-
-    if len(gap_indices) == 0:
-        return time_vals, temps, hums
-    
-    # Calculate exact size needed by examining each gap
-    total_nan_markers = 0
-    for gap_idx in gap_indices:
-        gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
-        gap_size_seconds = gap_size_ms / 1000.0
-
-        # LOCAL ADAPTIVE INTERVAL:
-        # Check local interval around this gap for more accurate NaN marker calculation
-        local_window_start = max(0, gap_idx - 50)
-        local_window_end = min(len(time_diffs_s), gap_idx + 50)
-        local_diffs = time_diffs_s[local_window_start:local_window_end]
-
-        # Filter out other large gaps in local window
-        local_reasonable = local_diffs[local_diffs < adaptive_gap_threshold]
-
-        if len(local_reasonable) > 5:
-            local_interval = np.median(local_reasonable)
-        else:
-            # Not enough local data, use global baseline
-            local_interval = baseline_interval
-
-        # Use the larger of baseline or local interval to be conservative
-        effective_interval = max(baseline_interval, local_interval)
-
-        num_missing = int(gap_size_seconds / effective_interval)
-        num_nan_markers = max(min(num_missing, 100), 5)
-        total_nan_markers += num_nan_markers
-    
-    # Preallocate result arrays with exact size
-    result_size = len(time_vals) + total_nan_markers
-    result_times = np.empty(result_size, dtype=float)
-    result_temps = np.empty(result_size, dtype=float)
-    result_hums = np.empty(result_size, dtype=float)
-    
-    write_idx = 0
-    prev_idx = 0
-    
-    for gap_idx in gap_indices:
-        # Copy data up to gap
-        chunk_size = gap_idx - prev_idx
-        result_times[write_idx:write_idx+chunk_size] = time_vals[prev_idx:gap_idx]
-        result_temps[write_idx:write_idx+chunk_size] = temps[prev_idx:gap_idx]
-        result_hums[write_idx:write_idx+chunk_size] = hums[prev_idx:gap_idx]
-        write_idx += chunk_size
-
-        # Calculate how many NaN markers to insert using adaptive interval
-        gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
-        gap_size_seconds = gap_size_ms / 1000.0
-
-        # LOCAL ADAPTIVE INTERVAL (same logic as above):
-        local_window_start = max(0, gap_idx - 50)
-        local_window_end = min(len(time_diffs_s), gap_idx + 50)
-        local_diffs = time_diffs_s[local_window_start:local_window_end]
-        local_reasonable = local_diffs[local_diffs < adaptive_gap_threshold]
-
-        if len(local_reasonable) > 5:
-            local_interval = np.median(local_reasonable)
-        else:
-            local_interval = baseline_interval
-
-        effective_interval = max(baseline_interval, local_interval)
-        num_missing = int(gap_size_seconds / effective_interval)
-
-        # Insert enough NaN markers to prevent moving average from bridging the gap
-        # Minimum of 5 ensures even moderate MA windows show the break
-        num_nan_markers = max(min(num_missing, 100), 5)  # Cap at 100 to avoid huge gaps
-
-        # Insert NaN with interpolated millisecond timestamps within the gap
-        # Vectorized: create all NaN markers at once instead of loop
-        gap_start_ms = time_vals[gap_idx - 1]
-        gap_end_ms = time_vals[gap_idx]
-        nan_times = np.linspace(gap_start_ms, gap_end_ms, num_nan_markers + 2)[1:-1]  # Exclude endpoints
-
-        result_times[write_idx:write_idx+num_nan_markers] = nan_times
-        result_temps[write_idx:write_idx+num_nan_markers] = np.nan
-        result_hums[write_idx:write_idx+num_nan_markers] = np.nan
-        write_idx += num_nan_markers
-
-        prev_idx = gap_idx
-    
-    # Copy remaining data
-    remaining = len(time_vals) - prev_idx
-    result_times[write_idx:write_idx+remaining] = time_vals[prev_idx:]
-    result_temps[write_idx:write_idx+remaining] = temps[prev_idx:]
-    result_hums[write_idx:write_idx+remaining] = hums[prev_idx:]
-    write_idx += remaining
-    
-    return (result_times[:write_idx],
-            result_temps[:write_idx],
-            result_hums[:write_idx])
-
-
-def _insert_gap_markers_multi(time_vals, data_arrays, gap_threshold_s=60, expected_interval_s=2):
-    """
-    Insert NaN at time gaps for multiple data arrays simultaneously.
-    
-    This ensures all arrays get gap markers at exactly the same positions,
-    preventing shape mismatches when sensors have extended data (pressure, light, noise).
+    The expected sampling interval is estimated locally (rolling median of the
+    neighbouring steps), so data mixing resolutions - raw readings, 1-min and
+    15-min retention tiers - only breaks at real outages, not at every coarse bucket.
 
     Args:
         time_vals: Millisecond timestamps (float)
         data_arrays: List of data arrays to process (all must have same length as time_vals)
-        gap_threshold_s: Fallback gap threshold if auto-detection fails
-        expected_interval_s: Fallback interval if auto-detection fails
+        gap_threshold_s: Minimum step (seconds) that can count as a gap
 
     Returns:
-        List of arrays: [time_vals, array1, array2, ...] with NaN inserted at gaps
+        (arrays, marker_mask): arrays is [time_vals, array1, array2, ...] with NaN
+        inserted at gaps; marker_mask is True at the inserted positions.
     """
+    time_vals = np.asarray(time_vals, dtype=float)
     if len(time_vals) < 2:
-        return [time_vals] + list(data_arrays)
+        return [time_vals] + list(data_arrays), np.zeros(len(time_vals), dtype=bool)
 
-    # Calculate time gaps directly from milliseconds
-    time_diffs_ms = np.diff(time_vals)
-    time_diffs_s = time_diffs_ms / 1000.0
-
-    # ADAPTIVE GAP DETECTION
-    median_interval = np.median(time_diffs_s)
-    reasonable_diffs = time_diffs_s[time_diffs_s < median_interval * 10]
-
-    if len(reasonable_diffs) > 0:
-        baseline_interval = np.percentile(reasonable_diffs, 95)
-    else:
-        baseline_interval = expected_interval_s
-
-    # Detect gaps using adaptive threshold
-    adaptive_gap_threshold = max(baseline_interval * 3, gap_threshold_s)
-    gap_mask = time_diffs_s > adaptive_gap_threshold
-    gap_indices = np.where(gap_mask)[0] + 1
+    steps_s = np.diff(time_vals) / 1000.0
+    local_interval_s = (
+        pd.Series(steps_s)
+        .rolling(GAP_MEDIAN_WINDOW, center=True, min_periods=1)
+        .median()
+        .to_numpy()
+    )
+    is_gap = steps_s > np.maximum(local_interval_s * GAP_INTERVAL_MULTIPLE, gap_threshold_s)
+    gap_indices = np.flatnonzero(is_gap) + 1  # position of the first point after each gap
 
     if len(gap_indices) == 0:
-        return [time_vals] + list(data_arrays)
+        return [time_vals] + list(data_arrays), np.zeros(len(time_vals), dtype=bool)
 
-    # Calculate exact size needed
-    total_nan_markers = 0
-    gap_info = []  # Store (gap_idx, num_nan_markers, nan_times) for each gap
+    marker_times = (time_vals[gap_indices - 1] + time_vals[gap_indices]) / 2.0
+    result = [np.insert(time_vals, gap_indices, marker_times)]
+    result += [np.insert(np.asarray(arr, dtype=float), gap_indices, np.nan) for arr in data_arrays]
 
-    for gap_idx in gap_indices:
-        gap_size_ms = time_vals[gap_idx] - time_vals[gap_idx - 1]
-        gap_size_seconds = gap_size_ms / 1000.0
+    # np.insert places the k-th marker at gap_indices[k] + k in the output
+    marker_mask = np.zeros(len(result[0]), dtype=bool)
+    marker_mask[gap_indices + np.arange(len(gap_indices))] = True
+    return result, marker_mask
 
-        # Local adaptive interval
-        local_window_start = max(0, gap_idx - 50)
-        local_window_end = min(len(time_diffs_s), gap_idx + 50)
-        local_diffs = time_diffs_s[local_window_start:local_window_end]
-        local_reasonable = local_diffs[local_diffs < adaptive_gap_threshold]
 
-        if len(local_reasonable) > 5:
-            local_interval = np.median(local_reasonable)
-        else:
-            local_interval = baseline_interval
+def _segment_rolling_mean(values, marker_mask, window):
+    """
+    Trailing moving average (NaN-skipping, min_periods=1) that restarts after
+    every gap marker, so the average never bridges an outage. NaN at markers.
+    """
+    values = np.asarray(values, dtype=float)
+    n = len(values)
+    if n == 0:
+        return values
 
-        effective_interval = max(baseline_interval, local_interval)
-        num_missing = int(gap_size_seconds / effective_interval)
-        num_nan_markers = max(min(num_missing, 100), 5)
+    valid = ~np.isnan(values)
+    csum = np.concatenate(([0.0], np.cumsum(np.where(valid, values, 0.0))))
+    ccount = np.concatenate(([0], np.cumsum(valid)))
 
-        # Pre-calculate NaN timestamps
-        gap_start_ms = time_vals[gap_idx - 1]
-        gap_end_ms = time_vals[gap_idx]
-        nan_times = np.linspace(gap_start_ms, gap_end_ms, num_nan_markers + 2)[1:-1]
+    idx = np.arange(n)
+    # First index of the segment each point belongs to (point after the latest marker)
+    segment_start = np.maximum.accumulate(np.where(marker_mask, idx + 1, 0))
+    lo = np.maximum(idx - window + 1, segment_start)
+    hi = idx + 1
 
-        gap_info.append((gap_idx, num_nan_markers, nan_times))
-        total_nan_markers += num_nan_markers
-
-    # Preallocate result arrays
-    result_size = len(time_vals) + total_nan_markers
-    result_times = np.empty(result_size, dtype=float)
-    result_arrays = [np.empty(result_size, dtype=float) for _ in data_arrays]
-
-    write_idx = 0
-    prev_idx = 0
-
-    for gap_idx, num_nan_markers, nan_times in gap_info:
-        # Copy data up to gap
-        chunk_size = gap_idx - prev_idx
-        result_times[write_idx:write_idx+chunk_size] = time_vals[prev_idx:gap_idx]
-        for i, arr in enumerate(data_arrays):
-            result_arrays[i][write_idx:write_idx+chunk_size] = arr[prev_idx:gap_idx]
-        write_idx += chunk_size
-
-        # Insert NaN markers
-        result_times[write_idx:write_idx+num_nan_markers] = nan_times
-        for result_arr in result_arrays:
-            result_arr[write_idx:write_idx+num_nan_markers] = np.nan
-        write_idx += num_nan_markers
-
-        prev_idx = gap_idx
-
-    # Copy remaining data
-    remaining = len(time_vals) - prev_idx
-    result_times[write_idx:write_idx+remaining] = time_vals[prev_idx:]
-    for i, arr in enumerate(data_arrays):
-        result_arrays[i][write_idx:write_idx+remaining] = arr[prev_idx:]
-    write_idx += remaining
-
-    # Trim to actual size and return
-    return [result_times[:write_idx]] + [arr[:write_idx] for arr in result_arrays]
+    counts = ccount[hi] - ccount[lo]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(counts > 0, (csum[hi] - csum[lo]) / counts, np.nan)
 
 
 # Fetch initial data for first sensor
 initial_data_raw = aggregator.get_sensor_data(current_sensor_state["name"], limit=1000)
 initial_metadata = aggregator.get_sensor_metadata(current_sensor_state["name"])
 initial_log_interval = (initial_metadata or {}).get('log_interval_s')
-initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW, max_plot_points,
+initial_data = prepare_source_data(initial_data_raw, DEFAULT_MA_WINDOW, display_points,
                                    connect_points=False, log_interval_s=initial_log_interval)
 source = ColumnDataSource(data=initial_data)
 
@@ -657,7 +481,23 @@ data_cache = {
     # Info about data availability outside current window
     "total_records": 0,
     "newest_timestamp_ms": None,  # Most recent data timestamp in entire DB
+    # Earliest timestamp raw_data is guaranteed to cover (None = from the beginning)
+    "fetch_type": None,
+    "fetched_start_ms": None,
+    # (start_ms, end_ms) the plot is zoomed to, prepared at full detail; None = whole dataset
+    "view_range": None,
+    "prep_view_range": None,
 }
+
+# Background loads: each request bumps the generation; a finished load is only
+# applied if no newer request has been made since, so rapid clicks never queue up.
+load_state = {
+    "generation": 0,
+    "busy": False,
+}
+
+# Session document, captured at session creation for use from worker threads
+session_doc = curdoc()
 
 range_update_state = {
     "programmatic": False,
@@ -693,9 +533,6 @@ temp_plot.xgrid.minor_grid_line_color = "lightgray"
 temp_plot.xgrid.minor_grid_line_alpha = 0.15
 temp_plot.xaxis.ticker.num_minor_ticks = 5
 
-# Store day boundary spans for dynamic updates
-day_boundary_spans_temp = []
-
 humidity_plot = figure(
     title=f"Humidity - {current_sensor_state['name']}",
     x_axis_label="Time",
@@ -724,9 +561,6 @@ humidity_plot.xgrid.minor_grid_line_color = "lightgray"
 humidity_plot.xgrid.minor_grid_line_alpha = 0.15
 humidity_plot.xaxis.ticker.num_minor_ticks = 5
 
-# Store day boundary spans for dynamic updates
-day_boundary_spans_hum = []
-
 # Create pressure plot (shown only if sensor provides pressure data)
 pressure_plot = figure(
     title=f"Pressure - {current_sensor_state['name']}",
@@ -751,7 +585,6 @@ pressure_plot.xgrid.grid_line_color = "gray"
 pressure_plot.xgrid.grid_line_alpha = 0.3
 pressure_plot.xgrid.minor_grid_line_alpha = 0.15
 pressure_plot.xaxis.ticker.num_minor_ticks = 5
-day_boundary_spans_pressure = []
 
 # Create light plot (shown only if sensor provides light data)
 light_plot = figure(
@@ -777,7 +610,6 @@ light_plot.xgrid.grid_line_color = "gray"
 light_plot.xgrid.grid_line_alpha = 0.3
 light_plot.xgrid.minor_grid_line_alpha = 0.15
 light_plot.xaxis.ticker.num_minor_ticks = 5
-day_boundary_spans_light = []
 
 # Create noise plot (shown only if sensor provides noise data)
 noise_plot = figure(
@@ -803,71 +635,33 @@ noise_plot.xgrid.grid_line_color = "gray"
 noise_plot.xgrid.grid_line_alpha = 0.3
 noise_plot.xgrid.minor_grid_line_alpha = 0.15
 noise_plot.xaxis.ticker.num_minor_ticks = 5
-day_boundary_spans_noise = []
+
+
+# Day boundary lines: one vspan renderer per plot, all fed by a single shared source.
+# Updating the source replaces the lines in place, so they can never stack up.
+day_boundary_source = ColumnDataSource(data={"x": []})
+day_boundary_renderers = [
+    plot.vspan(x="x", source=day_boundary_source, line_color="navy", line_width=2, line_alpha=0.4)
+    for plot in (temp_plot, humidity_plot, pressure_plot, light_plot, noise_plot)
+]
 
 
 def _update_day_boundaries(data_times):
-    """Add vertical lines at midnight (day boundaries) within the data range."""
-    try:
-        if len(data_times) == 0:
-            return
+    """Place vertical lines at each midnight within the data range."""
+    if len(data_times) == 0:
+        return
 
-        from datetime import datetime, timedelta
-        import pandas as pd
+    day_ms = 86_400_000
+    first_midnight = (int(data_times[0]) // day_ms + 1) * day_ms
+    midnight_times = list(range(first_midnight, int(data_times[-1]) + 1, day_ms))
 
-        # Convert milliseconds to datetime
-        start_dt = pd.Timestamp(data_times[0], unit='ms')
-        end_dt = pd.Timestamp(data_times[-1], unit='ms')
-
-        # Find all midnight boundaries in range
-        current_date = start_dt.normalize() + timedelta(days=1)  # Next midnight after start
-        midnight_times = []
-
-        while current_date <= end_dt:
-            midnight_ms = current_date.value / 1e6  # Convert to milliseconds
-            midnight_times.append(midnight_ms)
-            current_date += timedelta(days=1)
-
-        # Check if boundaries changed - skip expensive renderer updates if same
-        global day_boundary_spans_temp, day_boundary_spans_hum, _last_midnight_times
-        if '_last_midnight_times' not in globals():
-            _last_midnight_times = None
-
-        if _last_midnight_times == midnight_times:
-            return  # No change, skip update
-
-        _last_midnight_times = midnight_times
-
-        # Remove old spans
-        for span in day_boundary_spans_temp:
-            try:
-                temp_plot.renderers.remove(span)
-            except Exception:
-                pass
-        for span in day_boundary_spans_hum:
-            try:
-                humidity_plot.renderers.remove(span)
-            except Exception:
-                pass
-
-        day_boundary_spans_temp.clear()
-        day_boundary_spans_hum.clear()
-
-        # Add new spans at midnight boundaries
-        for midnight_ms in midnight_times:
-            span_temp = Span(location=midnight_ms, dimension='height',
-                             line_color='navy', line_width=2, line_alpha=0.4)
-            span_hum = Span(location=midnight_ms, dimension='height',
-                            line_color='navy', line_width=2, line_alpha=0.4)
-
-            temp_plot.add_layout(span_temp)
-            humidity_plot.add_layout(span_hum)
-
-            day_boundary_spans_temp.append(span_temp)
-            day_boundary_spans_hum.append(span_hum)
-    except Exception as e:
-        logger.warning(f"Failed to update day boundaries: {e}")
-        # Non-critical - continue without day boundaries
+    if day_boundary_source.data["x"] != midnight_times:
+        day_boundary_source.data = {"x": midnight_times}
+        # Over long ranges the lines sit a few pixels apart; keep them faint so the data stays readable
+        many = len(midnight_times) > 45
+        for renderer in day_boundary_renderers:
+            renderer.glyph.line_width = 1 if many else 2
+            renderer.glyph.line_alpha = 0.15 if many else 0.4
 
 
 def _set_temp_y_range(center: float | None, window: float, *, record_auto: bool = False) -> None:
@@ -970,6 +764,47 @@ def range_change_callback(attr, old, new):
     if current_window["auto_range"]:
         current_window["auto_range"] = False
         logger.info("Auto-scroll disabled: user zoomed/panned the plot")
+    _schedule_zoom_detail()
+
+
+zoom_state = {"pending_timeout": None}
+
+
+def _schedule_zoom_detail():
+    """Debounced: re-downsample the visible range once zooming/panning stops."""
+    pending = zoom_state["pending_timeout"]
+    if pending is not None:
+        try:
+            session_doc.remove_timeout_callback(pending)
+        except ValueError:
+            pass  # Already fired
+    zoom_state["pending_timeout"] = session_doc.add_timeout_callback(
+        _apply_zoom_detail, ZOOM_DETAIL_DEBOUNCE_MS
+    )
+
+
+def _apply_zoom_detail():
+    zoom_state["pending_timeout"] = None
+    raw_data = data_cache["raw_data"]
+    start, end = temp_plot.x_range.start, temp_plot.x_range.end
+    if current_window["auto_range"] or raw_data is None or start is None or end is None or end <= start:
+        return
+
+    previous = data_cache["view_range"]
+    span = end - start
+    if (previous is not None and previous[0] <= start and previous[1] >= end
+            and previous[1] - previous[0] <= span * (1 + 2 * ZOOM_DETAIL_MARGIN) * 1.5):
+        return  # Small pan within the already-detailed range
+
+    times = raw_data["time"]
+    view_range = (start - span * ZOOM_DETAIL_MARGIN, end + span * ZOOM_DETAIL_MARGIN)
+    if view_range[0] <= times[0] and view_range[1] >= times[-1]:
+        view_range = None  # Zoomed out to everything
+    if view_range == previous:
+        return
+
+    data_cache["view_range"] = view_range
+    _request_load(None, refetch=False)
 
 
 temp_plot.x_range.on_change('start', range_change_callback)
@@ -1016,9 +851,12 @@ btn_3h = Button(label="3 hours", button_type="default", width=100)
 btn_12h = Button(label="12 hours", button_type="default", width=100)
 btn_24h = Button(label="24 hours", button_type="success", width=100)
 btn_1week = Button(label="1 week", button_type="default", width=100)
+btn_30d = Button(label="30 days", button_type="default", width=100)
+btn_60d = Button(label="60 days", button_type="default", width=100)
+btn_180d = Button(label="180 days", button_type="default", width=100)
 btn_all = Button(label="All data", button_type="default", width=100)
 
-time_buttons = [btn_10min, btn_1h, btn_3h, btn_12h, btn_24h, btn_1week, btn_all]
+time_buttons = [btn_10min, btn_1h, btn_3h, btn_12h, btn_24h, btn_1week, btn_30d, btn_60d, btn_180d, btn_all]
 
 # Custom window inputs (days/hours/minutes/seconds)
 # Note: No hard limits - you can enter any value (e.g., 120 minutes, 48 hours, etc.)
@@ -1041,6 +879,17 @@ data_display_select = Select(
 
 # Auto-scroll toggle
 auto_scroll_toggle = Toggle(label="Auto-scroll: ON", button_type="success", active=True, width=140)
+
+# Day line toggle - handled entirely in the browser, no server round-trip
+day_lines_toggle = Toggle(label="Day lines: ON", button_type="success", active=True, width=120)
+day_lines_toggle.js_on_change("active", CustomJS(
+    args=dict(toggle=day_lines_toggle, renderers=day_boundary_renderers),
+    code="""
+        for (const r of renderers) { r.visible = toggle.active; }
+        toggle.label = toggle.active ? "Day lines: ON" : "Day lines: OFF";
+        toggle.button_type = toggle.active ? "success" : "default";
+    """,
+))
 
 # CSV download button
 btn_download_csv = Button(label="Download CSV", button_type="success", width=150, height=40)
@@ -1146,54 +995,44 @@ def set_button_active(active_btn):
         btn.button_type = "success" if btn == active_btn else "default"
 
 
+def _cache_covers_window(minutes):
+    """True if the cached raw data already spans the requested window."""
+    if data_cache["raw_data"] is None or data_cache["sensor_name"] != current_sensor_state["name"]:
+        return False
+    fetched_start_ms = data_cache.get("fetched_start_ms")
+    if fetched_start_ms is None:
+        return data_cache.get("fetch_type") == "all"
+    if minutes is None:
+        return False
+    window_start_ms = time.time() * 1000 - minutes * 60 * 1000
+    return window_start_ms >= fetched_start_ms
+
+
 def update_time_window(minutes, sync_inputs=True):
     """
     Update the time window.
-    Triggers data refetch if window expanded beyond cached data.
+    Loads data in the background if the window reaches beyond the cached data.
     """
     logger.info(f"update_time_window called with minutes={minutes}")
-
-    # Check if we need to refetch data (window changed significantly)
-    old_minutes = current_window.get("minutes")
-    needs_refetch = False
-
-    if minutes != old_minutes:
-        # Switching between "All data" and windowed, or vice versa
-        if (minutes is None) != (old_minutes is None):
-            needs_refetch = True
-            logger.info(f"Window type changed (all data <-> windowed), refetching")
-        # Expanding window beyond cached range
-        elif minutes is not None and old_minutes is not None and minutes > old_minutes * 1.5:
-            needs_refetch = True
-            logger.info(f"Window expanded significantly ({old_minutes}m → {minutes}m), refetching")
 
     current_window["minutes"] = minutes
     current_window["force_update"] = True
     current_window["auto_range"] = True
+    data_cache["view_range"] = None
 
     if sync_inputs:
         set_time_inputs_from_minutes(minutes)
 
-    if needs_refetch:
-        # Refetch data with new window — show loading indicator
-        sensor_name = current_sensor_state["name"]
-        meta = aggregator.get_sensor_metadata(sensor_name)
-        if meta and meta.get("status") == "syncing":
-            _show_loading(f"Syncing data for {sensor_name} — this may take a moment…")
-        else:
-            _show_loading("Loading time range...")
+    if not _cache_covers_window(minutes):
+        _request_load(_loading_message(current_sensor_state["name"], f"Loading {format_minutes(minutes)}…"))
+        return
+    if not _prepared_is_current(data_cache["raw_data"], max(int(ma_spinner.value), 1)):
+        _request_load(f"Loading {format_minutes(minutes)}…", refetch=False)  # e.g. leaving a zoomed view
+        return
 
-        def _do_refetch():
-            try:
-                fetch_initial_data(sensor_name)
-                update_view()
-            finally:
-                _hide_loading()
-
-        curdoc().add_next_tick_callback(_do_refetch)
-        return  # update_view will be called in the callback
-
-    update_view()  # Update view with (possibly new) data
+    update_view()
+    if not load_state["busy"]:
+        _clear_busy()  # The browser showed the indicator on click
 
 
 def format_minutes(minutes):
@@ -1257,11 +1096,28 @@ def get_minutes_from_inputs():
 
 
 def on_custom_time_change(attr, old, new):
+    """Debounced: apply the custom window once the spinners stop changing."""
     if time_input_state["updating"]:
         return
 
+    _set_busy("Updating time window…")
+    pending = time_input_state.get("pending_timeout")
+    if pending is not None:
+        try:
+            session_doc.remove_timeout_callback(pending)
+        except ValueError:
+            pass  # Already fired
+    time_input_state["pending_timeout"] = session_doc.add_timeout_callback(
+        _apply_custom_time_window, CUSTOM_WINDOW_DEBOUNCE_MS
+    )
+
+
+def _apply_custom_time_window():
+    time_input_state["pending_timeout"] = None
     minutes = get_minutes_from_inputs()
     if minutes is None:
+        if not load_state["busy"]:
+            _clear_busy()
         return
 
     set_button_active(None)
@@ -1339,6 +1195,9 @@ btn_3h.on_click(lambda: (set_button_active(btn_3h), update_time_window(180)))
 btn_12h.on_click(lambda: (set_button_active(btn_12h), update_time_window(720)))
 btn_24h.on_click(lambda: (set_button_active(btn_24h), update_time_window(1440)))
 btn_1week.on_click(lambda: (set_button_active(btn_1week), update_time_window(10080)))
+btn_30d.on_click(lambda: (set_button_active(btn_30d), update_time_window(30 * 1440)))
+btn_60d.on_click(lambda: (set_button_active(btn_60d), update_time_window(60 * 1440)))
+btn_180d.on_click(lambda: (set_button_active(btn_180d), update_time_window(180 * 1440)))
 btn_all.on_click(lambda: (set_button_active(btn_all), update_time_window(None)))
 
 def on_temp_auto_toggle(attr, old, new):
@@ -1374,7 +1233,7 @@ def on_ma_change(attr, old, new):
     except (TypeError, ValueError):
         return
     current_window["force_update"] = True
-    update_view()  # Recalculate moving average from cached data
+    _request_load("Recalculating averages…", refetch=False)
 
 
 ma_spinner.on_change("value", on_ma_change)
@@ -1409,7 +1268,11 @@ def on_auto_scroll_toggle(attr, old, new):
     auto_scroll_toggle.label = f"Auto-scroll: {'ON' if new else 'OFF'}"
     if new:
         logger.info("Auto-scroll re-enabled by user")
-        update_view()  # Force immediate view update to current time
+        if data_cache["view_range"] is not None:
+            data_cache["view_range"] = None  # Leave the zoomed view: replot the whole window
+            _request_load(None, refetch=False)
+        else:
+            update_view()  # Force immediate view update to current time
 
 
 auto_scroll_toggle.on_change("active", on_auto_scroll_toggle)
@@ -1424,23 +1287,9 @@ def on_sensor_change(attr, old, new):
     light_plot.title.text = f"Light - {new}"
     noise_plot.title.text = f"Noise - {new}"
     current_window["force_update"] = True
-
-    # Show loading indicator, then fetch data on next tick so UI updates first
-    _show_loading(f"Loading {new}...")
-
-    def _do_sensor_load():
-        try:
-            # Refine loading message if sensor is syncing backlog
-            meta = aggregator.get_sensor_metadata(new)
-            if meta and meta.get("status") == "syncing":
-                _show_loading(f"Syncing data for {new} — this may take a moment…")
-            fetch_initial_data(new)
-            update_view()
-            logger.info(f"Switched to sensor: {new}")
-        finally:
-            _hide_loading()
-
-    curdoc().add_next_tick_callback(_do_sensor_load)
+    data_cache["view_range"] = None
+    logger.info(f"Switching to sensor: {new}")
+    _request_load(_loading_message(new, f"Loading {new}…"))
 
 
 sensor_selector.on_change("value", on_sensor_change)
@@ -1448,28 +1297,21 @@ sensor_selector.on_change("value", on_sensor_change)
 sensor_selector.js_on_change("value", save_sensor_js)
 
 
-def fetch_initial_data(sensor_name):
+def _query_window_data(sensor_name, window_minutes):
     """
-    Fetch data for a sensor from database with smart windowing.
+    Query a sensor's data from the database with smart windowing.
     - If viewing specific time window: fetches that window + margin
     - If "All data": fetches everything
-    Called on startup, sensor change, or window change.
+
+    Touches no Bokeh models or session state, so it is safe to run on a worker thread.
+    Returns a dict for _install_fetched_data().
     """
-    from datetime import datetime, timedelta
-    import pandas as pd
-
-    # Determine fetch strategy based on time window
-    window_minutes = current_window.get("minutes")
-
+    fetched_start_ms = None
     if window_minutes is None:
         # "All data" mode - fetch everything
         logger.info(f"Fetching ALL historical data for {sensor_name}")
-        try:
-            new_data = aggregator.get_sensor_data(sensor_name)
-            fetch_type = "all"
-        except Exception as e:
-            logger.error(f"Error fetching all data: {e}")
-            return None
+        new_data = aggregator.get_sensor_data(sensor_name)
+        fetch_type = "all"
     else:
         # Smart windowing - fetch only visible window + 2x margin
         margin_factor = 2.0  # Fetch 2x the visible window for smooth panning
@@ -1477,65 +1319,80 @@ def fetch_initial_data(sensor_name):
 
         logger.info(f"Fetching last {fetch_window_minutes:.0f} minutes of data for {sensor_name} (window: {window_minutes:.0f}m)")
 
-        try:
-            # Calculate time range (from now back to fetch_window_minutes ago)
-            end_time = datetime.now()
-            start_time = end_time - timedelta(minutes=fetch_window_minutes)
+        # INTEGER milliseconds for database query
+        end_ms = int(time.time() * 1000)
+        fetched_start_ms = end_ms - int(fetch_window_minutes * 60 * 1000)
 
-            # Convert to INTEGER milliseconds for database query
-            start_ms = int(start_time.timestamp() * 1000)
-            end_ms = int(end_time.timestamp() * 1000)
+        new_data = aggregator.get_sensor_data(sensor_name, start_time=fetched_start_ms, end_time=end_ms)
+        fetch_type = "windowed"
 
-            new_data = aggregator.get_sensor_data(sensor_name, start_time=start_ms, end_time=end_ms)
-            fetch_type = "windowed"
-
-            # Historical fallback: if time window returns nothing (sensor dead/stale),
-            # fall back to showing the most recent data regardless of age
-            if not new_data or len(new_data.get("time", [])) == 0:
-                logger.info(f"No data in time window for {sensor_name}, falling back to latest historical records")
-                new_data = aggregator.get_sensor_data(sensor_name, limit=1000)
-                fetch_type = "historical_fallback"
-        except Exception as e:
-            logger.error(f"Error fetching windowed data: {e}")
-            return None
-
-    try:
+        # Historical fallback: if time window returns nothing (sensor dead/stale),
+        # fall back to showing the most recent data regardless of age
         if not new_data or len(new_data.get("time", [])) == 0:
-            logger.warning(f"No data available for sensor: {sensor_name}")
-            # Check if there's data outside the current time window
-            total_records = aggregator.get_total_records(sensor_name)
-            newest_ts = aggregator.get_last_timestamp(sensor_name)
-            data_cache["sensor_name"] = sensor_name
-            data_cache["raw_data"] = None
-            data_cache["total_records"] = total_records
-            data_cache["newest_timestamp_ms"] = newest_ts
-            return None
+            logger.info(f"No data in time window for {sensor_name}, falling back to latest historical records")
+            new_data = aggregator.get_sensor_data(sensor_name, limit=1000)
+            fetch_type = "historical_fallback"
 
-        record_count = len(new_data.get('time', []))
-        logger.info(f"Fetched {record_count:,} records ({fetch_type})")
+    fetched = {
+        "data": new_data,
+        "fetch_type": fetch_type,
+        "fetched_start_ms": fetched_start_ms,
+        "log_interval_s": None,
+        "total_records": None,
+        "newest_timestamp_ms": None,
+    }
 
-        # Fetch metadata to get log_interval for smart gap detection
-        metadata = aggregator.get_sensor_metadata(sensor_name)
-        log_interval_s = (metadata or {}).get('log_interval_s')
+    if not new_data or len(new_data.get("time", [])) == 0:
+        logger.warning(f"No data available for sensor: {sensor_name}")
+        # Check if there's data outside the current time window
+        fetched["data"] = None
+        fetched["total_records"] = aggregator.get_total_records(sensor_name)
+        fetched["newest_timestamp_ms"] = aggregator.get_last_timestamp(sensor_name)
+        return fetched
 
-        # Update cache
-        data_cache["sensor_name"] = sensor_name
-        data_cache["raw_data"] = new_data
-        data_cache["last_timestamp"] = new_data["time"][-1] if len(new_data["time"]) > 0 else None
+    logger.info(f"Fetched {len(new_data['time']):,} records ({fetch_type})")
+
+    # Fetch metadata to get log_interval for smart gap detection
+    metadata = aggregator.get_sensor_metadata(sensor_name)
+    fetched["log_interval_s"] = (metadata or {}).get('log_interval_s')
+    fetched["total_records"] = len(new_data["time"])
+    fetched["newest_timestamp_ms"] = new_data["time"][-1]
+    return fetched
+
+
+def _install_fetched_data(sensor_name, fetched):
+    """Store a _query_window_data() result in the session cache. Returns the raw data."""
+    new_data = fetched["data"]
+    data_cache["sensor_name"] = sensor_name
+    data_cache["raw_data"] = new_data
+    data_cache["fetch_type"] = fetched["fetch_type"]
+    data_cache["fetched_start_ms"] = fetched["fetched_start_ms"]
+    data_cache["total_records"] = fetched["total_records"]
+    data_cache["newest_timestamp_ms"] = fetched["newest_timestamp_ms"]
+
+    if new_data is not None:
+        data_cache["last_timestamp"] = new_data["time"][-1]
         data_cache["last_fetch_time"] = time.time() * 1000
-        data_cache["log_interval_s"] = log_interval_s  # Store for gap detection
-        data_cache["total_records"] = len(new_data.get("time", []))
-        data_cache["newest_timestamp_ms"] = new_data["time"][-1] if len(new_data["time"]) > 0 else None
+        data_cache["log_interval_s"] = fetched["log_interval_s"]  # Store for gap detection
 
-        # Invalidate prepared data cache to force recalculation
-        # This ensures moving averages are recalculated with the new data
-        data_cache["prepared_data"] = None
-        data_cache["prep_raw_hash"] = None
+    # Invalidate prepared data cache to force recalculation
+    # This ensures moving averages are recalculated with the new data
+    data_cache["prepared_data"] = None
+    data_cache["prep_raw_hash"] = None
+    return new_data
 
-        return new_data
+
+def fetch_initial_data(sensor_name):
+    """
+    Fetch data for the current window synchronously (startup and fallback paths).
+    Interactive loads go through _request_load() instead.
+    """
+    try:
+        fetched = _query_window_data(sensor_name, current_window.get("minutes"))
     except Exception as e:
-        logger.error(f"Error processing fetched data: {e}")
+        logger.error(f"Error fetching data for {sensor_name}: {e}")
         return None
+    return _install_fetched_data(sensor_name, fetched)
 
 
 def fetch_incremental_data(sensor_name):
@@ -1617,6 +1474,8 @@ def fetch_incremental_data(sensor_name):
                         data_cache["raw_data"]["light"] = data_cache["raw_data"]["light"][first_keep_idx:]
                     if "noise" in data_cache["raw_data"]:
                         data_cache["raw_data"]["noise"] = data_cache["raw_data"]["noise"][first_keep_idx:]
+                    data_cache["fetched_start_ms"] = max(data_cache.get("fetched_start_ms") or cutoff_time,
+                                                         cutoff_time)
                     logger.debug(f"Trimmed {first_keep_idx} old points from cache")
 
             # Update last timestamp
@@ -1694,30 +1553,27 @@ def _prepare_stream_update(raw_data, window_size, new_count):
         # Compute moving averages for new points using trailing context from cache
         window = max(int(window_size), 1)
 
-        # Get the last (window-1) valid values from cached data for MA context
-        cached_temps = np.asarray(cached["temperature"])
-        cached_hums = np.asarray(cached["humidity"])
+        # MA context: the last (window-1) cached points. Gap markers (NaN in the cached
+        # temperature, as LTTB keeps them) and a junction gap restart the average.
+        n_context = min(window - 1, len(cached["time"]))
+        context_markers = np.isnan(np.asarray(cached["temperature"][len(cached["time"]) - n_context:], dtype=float))
+        marker_mask = np.zeros(n_context + n_total, dtype=bool)
+        marker_mask[:n_context] = context_markers
+        marker_mask[n_context:n_context + n_gap] = True
 
-        # Concatenate context + new data, compute MA, then take only the new part
-        context_temps = cached_temps[-(window - 1):] if window > 1 else np.array([])
-        context_hums = cached_hums[-(window - 1):] if window > 1 else np.array([])
-
-        full_temps = np.concatenate([context_temps, stream_temps])
-        full_hums = np.concatenate([context_hums, stream_hums])
-
-        temp_ma_full = pd.Series(full_temps).rolling(window=window, min_periods=1).mean().to_numpy()
-        hum_ma_full = pd.Series(full_hums).rolling(window=window, min_periods=1).mean().to_numpy()
-
-        # Take only the new portion (after the context window)
-        stream_temp_ma = temp_ma_full[len(context_temps):]
-        stream_hum_ma = hum_ma_full[len(context_hums):]
+        def _stream_ma(column, stream_vals):
+            context = np.asarray(cached[column][len(cached["time"]) - n_context:], dtype=float)
+            if len(context) != n_context:
+                context = np.full(n_context, np.nan)
+            full = np.concatenate([context, stream_vals])
+            return _segment_rolling_mean(full, marker_mask, window)[n_context:]
 
         result = {
             "time": stream_times,
             "temperature": stream_temps,
             "humidity": stream_hums,
-            "temp_ma": stream_temp_ma,
-            "hum_ma": stream_hum_ma,
+            "temp_ma": _stream_ma("temperature", stream_temps),
+            "hum_ma": _stream_ma("humidity", stream_hums),
         }
 
         # Handle extended sensor data
@@ -1734,18 +1590,14 @@ def _prepare_stream_update(raw_data, window_size, new_count):
                     stream_vals[0] = np.nan
                 stream_vals[n_gap:] = new_vals
 
-                context_vals = np.asarray(cached.get(field, []))
-                context_slice = context_vals[-(window - 1):] if window > 1 and len(context_vals) > 0 else np.array([])
-                full_vals = np.concatenate([context_slice, stream_vals])
-                ma_full = pd.Series(full_vals).rolling(window=window, min_periods=1).mean().to_numpy()
-
                 result[field] = stream_vals
-                result[f"{field}_ma"] = ma_full[len(context_slice):]
+                result[f"{field}_ma"] = (_stream_ma(field, stream_vals) if field in cached
+                                         else np.full(n_total, np.nan))
             else:
                 result[field] = np.full(n_total, np.nan)
                 result[f"{field}_ma"] = np.full(n_total, np.nan)
 
-        return result
+        return _to_wire_dtypes(result)
 
     except Exception as e:
         logger.warning(f"Stream update preparation failed, falling back to full update: {e}")
@@ -1787,10 +1639,45 @@ def _extend_prepared_cache(stream_dict):
             if hasattr(arr, '__len__') and len(arr) == n:
                 cached[key] = arr[trim:]
 
-    # Update the raw hash to match new data state
-    times = cached.get("time", [])
-    if len(times) > 0:
-        data_cache["prep_raw_hash"] = (len(times), times[0], times[-1])
+    # The prepared cache now reflects the current raw data (compared against _raw_hash in update_view)
+    data_cache["prep_raw_hash"] = _raw_hash(data_cache["raw_data"])
+
+
+def _raw_hash(raw_data):
+    """Cheap identity of the raw data: length + first/last timestamps (avoids hashing large arrays)."""
+    if not raw_data or raw_data.get("time") is None or len(raw_data["time"]) == 0:
+        return None
+    times = raw_data["time"]
+    return (len(times), times[0], times[-1])
+
+
+def _slice_to_view(raw_data, view_range):
+    """Raw data restricted to view_range (start_ms, end_ms); everything if view_range is None."""
+    if view_range is None or not raw_data:
+        return raw_data
+    times = np.asarray(raw_data["time"])
+    lo, hi = np.searchsorted(times, view_range[0]), np.searchsorted(times, view_range[1], side="right")
+    return {key: np.asarray(values)[lo:hi] if len(values) == len(times) else values
+            for key, values in raw_data.items()}
+
+
+def _prepared_is_current(raw_data, window):
+    """True if the cached prepared data matches the raw data, MA window and zoomed view."""
+    return (
+        data_cache["prepared_data"] is not None and
+        data_cache["prep_ma_window"] == window and
+        data_cache["prep_max_points"] == display_points and
+        data_cache["prep_view_range"] == data_cache["view_range"] and
+        data_cache["prep_raw_hash"] == _raw_hash(raw_data)
+    )
+
+
+def _store_prepared(prepared, raw_data, window, view_range):
+    data_cache["prepared_data"] = prepared
+    data_cache["prep_ma_window"] = window
+    data_cache["prep_max_points"] = display_points
+    data_cache["prep_view_range"] = view_range
+    data_cache["prep_raw_hash"] = _raw_hash(raw_data)
 
 
 def update_view():
@@ -1802,6 +1689,8 @@ def update_view():
         sensor_name = current_sensor_state["name"]
 
         if data_cache["raw_data"] is None or data_cache["sensor_name"] != sensor_name:
+            if load_state["busy"]:
+                return  # A background load for this sensor will refresh the view when done
             logger.debug("No cached data available, triggering initial fetch")
             fetch_initial_data(sensor_name)
             if data_cache["raw_data"] is None:
@@ -1814,14 +1703,6 @@ def update_view():
         # Check if we need to recompute prepared data
         window = max(int(ma_spinner.value), 1)
 
-        # Create a simple hash of the data (length + first/last timestamps)
-        # Avoids expensive hashing of large arrays
-        if raw_data and raw_data.get("time") is not None and len(raw_data.get("time", [])) > 0:
-            times = raw_data["time"]
-            raw_hash = (len(times), times[0] if len(times) > 0 else 0, times[-1] if len(times) > 0 else 0)
-        else:
-            raw_hash = None
-
         # Decide between streaming (fast incremental) vs full replacement
         new_point_count = data_cache.get("new_point_count", -1)
 
@@ -1831,7 +1712,7 @@ def update_view():
             new_point_count <= 100 and
             data_cache["prepared_data"] is not None and
             data_cache["prep_ma_window"] == window and
-            data_cache["prep_max_points"] == max_plot_points
+            data_cache["prep_max_points"] == display_points
         )
 
         if can_stream:
@@ -1850,26 +1731,16 @@ def update_view():
 
         if not can_stream:
             # FULL PATH: Recompute everything (sensor change, window change, etc.)
-            cache_valid = (
-                data_cache["prepared_data"] is not None and
-                data_cache["prep_ma_window"] == window and
-                data_cache["prep_max_points"] == max_plot_points and
-                data_cache["prep_raw_hash"] == raw_hash
-            )
-
-            if cache_valid:
+            if _prepared_is_current(raw_data, window):
                 logger.debug("Using cached prepared data")
                 prepared = data_cache["prepared_data"]
             else:
-                logger.debug(f"Recomputing prepared data (MA window: {window}, max points: {max_plot_points})")
-                log_interval_s = data_cache.get("log_interval_s")
-                prepared = prepare_source_data(raw_data, window, max_plot_points,
+                logger.debug(f"Recomputing prepared data (MA window: {window}, display points: {display_points})")
+                view_range = data_cache["view_range"]
+                prepared = prepare_source_data(_slice_to_view(raw_data, view_range), window, display_points,
                                               connect_points=False,
-                                              log_interval_s=log_interval_s)
-                data_cache["prepared_data"] = prepared
-                data_cache["prep_ma_window"] = window
-                data_cache["prep_max_points"] = max_plot_points
-                data_cache["prep_raw_hash"] = raw_hash
+                                              log_interval_s=data_cache.get("log_interval_s"))
+                _store_prepared(prepared, raw_data, window, view_range)
 
             # Replace entire dataset
             source.data = prepared
@@ -1878,9 +1749,10 @@ def update_view():
         data_cache["new_point_count"] = 0
 
         # Show/hide extended sensor plots based on available data
-        pressure_plot.visible = "pressure" in prepared and len(prepared.get("pressure", [])) > 0
-        light_plot.visible = "light" in prepared and len(prepared.get("light", [])) > 0
-        noise_plot.visible = "noise" in prepared and len(prepared.get("noise", [])) > 0
+        # (prepared always carries these columns - NaN-filled when the sensor lacks them)
+        pressure_plot.visible = bool(np.isfinite(prepared.get("pressure", [])).any())
+        light_plot.visible = bool(np.isfinite(prepared.get("light", [])).any())
+        noise_plot.visible = bool(np.isfinite(prepared.get("noise", [])).any())
 
         # Update day boundary markers
         _update_day_boundaries(prepared["time"])
@@ -2200,16 +2072,18 @@ def update_data():
     """
     global _stream_cycle_count
     try:
+        if load_state["busy"]:
+            return  # A background load is about to replace the data anyway
+
         sensor_name = current_sensor_state["name"]
 
         _stream_cycle_count += 1
-        if _stream_cycle_count >= _FULL_REFRESH_EVERY:
+        if _stream_cycle_count >= _FULL_REFRESH_EVERY and data_cache["sensor_name"] == sensor_name:
             # Periodic full refresh to maintain LTTB quality after many streaming updates
             _stream_cycle_count = 0
-            data_cache["new_point_count"] = -1  # Force full replacement path
-            data_cache["prepared_data"] = None
-            data_cache["prep_raw_hash"] = None
             logger.debug("Periodic full LTTB refresh triggered")
+            _request_load(None, refetch=False)
+            return
 
         # Fetch incremental data (only new records since last timestamp)
         fetch_incremental_data(sensor_name)
@@ -2229,7 +2103,7 @@ curdoc().add_periodic_callback(update_data, UPDATE_INTERVAL)
 
 # Layout
 sensor_selection_row = row(sensor_selector, btn_download_csv, sizing_mode="scale_width")
-time_button_row = row(btn_10min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all,
+time_button_row = row(btn_10min, btn_3h, btn_12h, btn_24h, btn_1week, btn_30d, btn_60d, btn_180d, btn_all,
                     sizing_mode="scale_width")#btn_1h,
 # custom_time_row = row(
 #                     sizing_mode="scale_width")
@@ -2246,9 +2120,14 @@ display_range_row = row(
     column(temp_window_spinner, temp_auto_toggle),
     column(hum_window_spinner, hum_auto_toggle),
     data_display_select,  # Dropdown to select data display mode
+    column(Div(text="&nbsp;", height=10), day_lines_toggle),  # Empty title space for alignment
     sizing_mode="scale_width"
 )
 
+_LOADING_HTML = (
+    "<div style='padding:8px 16px;background:#e3f2fd;border-radius:4px;"
+    "color:#1565c0;font-weight:bold;text-align:center;'>⏳ {msg}</div>"
+)
 loading_indicator = Div(
     text="",
     visible=False,
@@ -2256,36 +2135,146 @@ loading_indicator = Div(
     height=40,
 )
 
-# Client-side JS loading indicator — shows instantly on browser before Python round-trip.
-# The Python _show_loading is kept as fallback for non-widget-triggered loads.
-_loading_js_show = CustomJS(args=dict(indicator=loading_indicator), code="""
-    indicator.visible = true;
-    indicator.text = '<div style="padding:8px 16px;background:#e3f2fd;border-radius:4px;color:#1565c0;font-weight:bold;text-align:center;">⏳ Loading...</div>';
-""")
+# One line under the time buttons summarising the last load
+load_status = Div(text="", sizing_mode="stretch_width", height=20,
+                  styles={"font-size": "12px", "color": "#666"})
 
-# Wire JS loading to sensor selector (fires on browser before Python on_change)
+connection_banner = Div(
+    text=("<div style='padding:8px 16px;background:#fdecea;border-radius:4px;color:#b71c1c;"
+          "font-weight:bold;text-align:center;'>Connection to the server was lost. "
+          "Reload the page to reconnect.</div>"),
+    visible=False,
+    sizing_mode="stretch_width",
+)
+
+# Plots fade while their data is being replaced
+all_plots = [temp_plot, humidity_plot, pressure_plot, light_plot, noise_plot]
+_PLOT_IDLE_STYLE = {"opacity": "1", "transition": "opacity 0.15s"}
+_PLOT_BUSY_STYLE = {"opacity": "0.45", "transition": "opacity 0.15s"}
+for _plot in all_plots:
+    _plot.styles = _PLOT_IDLE_STYLE
+
+# Client-side loading indicator: shows instantly in the browser, before the Python round-trip.
+# Python replaces the message with a specific one and clears it when the update is done.
+_loading_js_show = CustomJS(
+    args=dict(indicator=loading_indicator, plots=all_plots,
+              html=_LOADING_HTML.format(msg="Loading…"), busy_style=_PLOT_BUSY_STYLE),
+    code="""
+        indicator.text = html;
+        indicator.visible = true;
+        for (const p of plots) { p.styles = busy_style; }
+    """,
+)
+
+# Wire JS loading to user-triggered reloads (fires before the Python callback). Spinners are
+# left out: Python also sets their values, which would re-show the indicator after it cleared.
 sensor_selector.js_on_change("value", _loading_js_show)
-
-# Wire JS loading to time window buttons
-for _btn in [btn_10min, btn_3h, btn_12h, btn_24h, btn_1week, btn_all]:
+for _btn in time_buttons:
     _btn.js_on_click(_loading_js_show)
 
-def _show_loading(msg="Loading data..."):
-    """Show loading indicator (Python-side fallback for non-widget triggers)."""
-    loading_indicator.text = (
-        f"<div style='padding:8px 16px;background:#e3f2fd;border-radius:4px;"
-        f"color:#1565c0;font-weight:bold;text-align:center;'>"
-        f"⏳ {msg}</div>"
-    )
-    loading_indicator.visible = True
+curdoc().js_on_event(ConnectionLost, CustomJS(args=dict(banner=connection_banner),
+                                              code="banner.visible = true;"))
 
-def _hide_loading():
-    """Hide loading indicator after data is ready."""
+
+def _set_busy(msg):
+    loading_indicator.text = _LOADING_HTML.format(msg=msg)
+    loading_indicator.visible = True
+    for plot in all_plots:
+        plot.styles = _PLOT_BUSY_STYLE
+
+
+def _clear_busy():
     loading_indicator.visible = False
     loading_indicator.text = ""
+    for plot in all_plots:
+        plot.styles = _PLOT_IDLE_STYLE
+
+
+def _loading_message(sensor_name, default):
+    meta = aggregator.get_sensor_metadata(sensor_name)
+    if meta and meta.get("status") == "syncing":
+        return f"Syncing data for {sensor_name} — this may take a moment…"
+    return default
+
+
+def _load_job(sensor_name, window_minutes, ma_window, raw_snapshot, log_interval_s, view_range):
+    """Worker thread: fetch (unless given a snapshot) and prepare plot data. No Bokeh access."""
+    t0 = time.perf_counter()
+    fetched = None
+    raw = raw_snapshot
+    if raw is None:
+        fetched = _query_window_data(sensor_name, window_minutes)
+        raw = fetched["data"]
+        log_interval_s = fetched["log_interval_s"]
+    prepared = None
+    if raw is not None:
+        prepared = prepare_source_data(_slice_to_view(raw, view_range), ma_window, display_points,
+                                       connect_points=False, log_interval_s=log_interval_s)
+    return {"fetched": fetched, "prepared": prepared, "raw": raw, "elapsed_s": time.perf_counter() - t0}
+
+
+def _request_load(message, refetch=True):
+    """
+    Fetch and prepare data on a worker thread, then apply it to the session.
+    message=None runs quietly (no indicator). A newer request supersedes older ones.
+    """
+    load_state["generation"] += 1
+    generation = load_state["generation"]
+    load_state["busy"] = True
+    if message is not None:
+        _set_busy(message)
+
+    sensor_name = current_sensor_state["name"]
+    window_minutes = current_window.get("minutes")
+    ma_window = max(int(ma_spinner.value), 1)
+    reuse_raw = (not refetch and data_cache["raw_data"] is not None
+                 and data_cache["sensor_name"] == sensor_name)
+    raw_snapshot = dict(data_cache["raw_data"]) if reuse_raw else None
+    view_range = data_cache["view_range"] if reuse_raw else None
+
+    future = load_executor.submit(_load_job, sensor_name, window_minutes, ma_window,
+                                  raw_snapshot, data_cache.get("log_interval_s"), view_range)
+
+    def _on_done(fut):
+        try:
+            session_doc.add_next_tick_callback(partial(
+                _apply_load, generation, fut, sensor_name, window_minutes, ma_window, view_range,
+                message is not None))
+        except Exception:
+            logger.debug("Session closed before background load finished", exc_info=True)
+
+    future.add_done_callback(_on_done)
+
+
+def _apply_load(generation, future, sensor_name, window_minutes, ma_window, view_range, report):
+    """Event loop: install a finished load, unless a newer request superseded it."""
+    if generation != load_state["generation"]:
+        return
+    try:
+        result = future.result()
+        if result["fetched"] is not None:
+            _install_fetched_data(sensor_name, result["fetched"])
+            data_cache["view_range"] = None  # New data: back to the whole-dataset view
+        if result["prepared"] is not None:
+            _store_prepared(result["prepared"], result["raw"], ma_window, view_range)
+        data_cache["new_point_count"] = -1  # Replace the plotted data, don't stream
+        load_state["busy"] = False
+        update_view()
+        if report:
+            readings = len(result["raw"]["time"]) if result["raw"] is not None else 0
+            load_status.text = (f"{sensor_name} · {format_minutes(window_minutes)} · "
+                                f"{readings:,} readings · loaded in {result['elapsed_s']:.1f} s")
+    except Exception as e:
+        logger.error(f"Background load failed for {sensor_name}: {e}", exc_info=True)
+        load_status.text = f"Loading {sensor_name} failed. Try again, or reload the page."
+    finally:
+        load_state["busy"] = False
+        _clear_busy()
+
 
 layout = column(
     Div(text="<h1> Multi-sensor temperature monitor</h1>", sizing_mode="stretch_width", height=60),
+    connection_banner,
     Div(text="<h3>Sensor Selection</h3>", sizing_mode="stretch_width", height=25),
     sensor_selection_row,
     loading_indicator,
@@ -2293,6 +2282,7 @@ layout = column(
     current_readings,
     Div(text="<h4>Quick set time window:</h4>", sizing_mode="stretch_width", height=25),
     time_button_row,
+    load_status,
     # Div(text="<h4>Custom Window:</h4>", sizing_mode="stretch_width", height=25),
     # custom_time_row,
     Div(text="<h4>Window control:</h4>", sizing_mode="stretch_width", height=25),
