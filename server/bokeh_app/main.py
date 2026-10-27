@@ -465,6 +465,21 @@ current_window = {
     "data_max": None,
 }
 
+WINDOW_VIEW_MARGIN = 1.5  # Auto-scroll views are prepared for 1.5x the window, leaving room to pan
+
+
+def _window_view_range():
+    """
+    View range for auto-scroll mode: the window plus a margin, open-ended so streamed points
+    fit. Spends the whole point budget on what is shown even when more data is cached
+    (e.g. 30 days after a 180-day load). None for "All data".
+    """
+    minutes = current_window.get("minutes")
+    if minutes is None:
+        return None
+    return (time.time() * 1000 - minutes * 60 * 1000 * WINDOW_VIEW_MARGIN, math.inf)
+
+
 # Data cache to avoid re-fetching on every button click
 data_cache = {
     "sensor_name": None,
@@ -484,8 +499,8 @@ data_cache = {
     # Earliest timestamp raw_data is guaranteed to cover (None = from the beginning)
     "fetch_type": None,
     "fetched_start_ms": None,
-    # (start_ms, end_ms) the plot is zoomed to, prepared at full detail; None = whole dataset
-    "view_range": None,
+    # (start_ms, end_ms) of raw data the plot is prepared from at full detail; None = all cached
+    "view_range": _window_view_range(),
     "prep_view_range": None,
 }
 
@@ -1018,7 +1033,7 @@ def update_time_window(minutes, sync_inputs=True):
     current_window["minutes"] = minutes
     current_window["force_update"] = True
     current_window["auto_range"] = True
-    data_cache["view_range"] = None
+    data_cache["view_range"] = _window_view_range()
 
     if sync_inputs:
         set_time_inputs_from_minutes(minutes)
@@ -1027,7 +1042,7 @@ def update_time_window(minutes, sync_inputs=True):
         _request_load(_loading_message(current_sensor_state["name"], f"Loading {format_minutes(minutes)}…"))
         return
     if not _prepared_is_current(data_cache["raw_data"], max(int(ma_spinner.value), 1)):
-        _request_load(f"Loading {format_minutes(minutes)}…", refetch=False)  # e.g. leaving a zoomed view
+        _request_load(f"Loading {format_minutes(minutes)}…", refetch=False)  # Re-sample cached data
         return
 
     update_view()
@@ -1268,11 +1283,8 @@ def on_auto_scroll_toggle(attr, old, new):
     auto_scroll_toggle.label = f"Auto-scroll: {'ON' if new else 'OFF'}"
     if new:
         logger.info("Auto-scroll re-enabled by user")
-        if data_cache["view_range"] is not None:
-            data_cache["view_range"] = None  # Leave the zoomed view: replot the whole window
-            _request_load(None, refetch=False)
-        else:
-            update_view()  # Force immediate view update to current time
+        data_cache["view_range"] = _window_view_range()  # Leave any zoomed view
+        _request_load(None, refetch=False)
 
 
 auto_scroll_toggle.on_change("active", on_auto_scroll_toggle)
@@ -1287,7 +1299,7 @@ def on_sensor_change(attr, old, new):
     light_plot.title.text = f"Light - {new}"
     noise_plot.title.text = f"Noise - {new}"
     current_window["force_update"] = True
-    data_cache["view_range"] = None
+    data_cache["view_range"] = _window_view_range()
     logger.info(f"Switching to sensor: {new}")
     _request_load(_loading_message(new, f"Loading {new}…"))
 
@@ -2172,6 +2184,19 @@ sensor_selector.js_on_change("value", _loading_js_show)
 for _btn in time_buttons:
     _btn.js_on_click(_loading_js_show)
 
+# The browser's "show" can reach the server after the click it belongs to has been handled.
+# Hiding then looks like a no-op to the server (visible was already False), so nothing is sent
+# and the indicator sticks. _clear_busy() therefore also bumps this counter, which always
+# reaches the browser, and the browser hides the indicator itself.
+loading_indicator.tags = [0]
+loading_indicator.js_on_change("tags", CustomJS(
+    args=dict(indicator=loading_indicator, plots=all_plots, idle_style=_PLOT_IDLE_STYLE),
+    code="""
+        indicator.visible = false;
+        for (const p of plots) { p.styles = idle_style; }
+    """,
+))
+
 curdoc().js_on_event(ConnectionLost, CustomJS(args=dict(banner=connection_banner),
                                               code="banner.visible = true;"))
 
@@ -2188,6 +2213,7 @@ def _clear_busy():
     loading_indicator.text = ""
     for plot in all_plots:
         plot.styles = _PLOT_IDLE_STYLE
+    loading_indicator.tags = [loading_indicator.tags[0] + 1]  # See the js_on_change("tags") above
 
 
 def _loading_message(sensor_name, default):
@@ -2230,7 +2256,7 @@ def _request_load(message, refetch=True):
     reuse_raw = (not refetch and data_cache["raw_data"] is not None
                  and data_cache["sensor_name"] == sensor_name)
     raw_snapshot = dict(data_cache["raw_data"]) if reuse_raw else None
-    view_range = data_cache["view_range"] if reuse_raw else None
+    view_range = data_cache["view_range"]
 
     future = load_executor.submit(_load_job, sensor_name, window_minutes, ma_window,
                                   raw_snapshot, data_cache.get("log_interval_s"), view_range)
@@ -2254,7 +2280,6 @@ def _apply_load(generation, future, sensor_name, window_minutes, ma_window, view
         result = future.result()
         if result["fetched"] is not None:
             _install_fetched_data(sensor_name, result["fetched"])
-            data_cache["view_range"] = None  # New data: back to the whole-dataset view
         if result["prepared"] is not None:
             _store_prepared(result["prepared"], result["raw"], ma_window, view_range)
         data_cache["new_point_count"] = -1  # Replace the plotted data, don't stream
